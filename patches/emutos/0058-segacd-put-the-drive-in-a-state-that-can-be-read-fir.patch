@@ -1,0 +1,155 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 20:16:13 +0000
+Subject: [PATCH 058/184] segacd: put the drive in a state that can be read,
+ first
+
+$34E6 checks the drive's state before every read: 1, 4 and C go
+straight through, 5, B and E abandon the operation, and anything else
+gets command 6 and another look. This driver fired a read at whatever
+state the drive happened to be in and read the silence that followed as
+a timeout.
+
+Command 6 is sent now when the state is not one Sega would read from.
+Deliberately advisory rather than gating: both emulators rest in state
+9 and read from it perfectly, so refusing on the list turned two
+working reads into two failures the moment it went in. Either the list
+is narrower than the hardware needs or the emulators report a state the
+BIOS never sees, and the count of reads that began from an unready
+drive is on the status line so the disagreement is visible.
+
+Sega also sends command $A with the target position between the two.
+Not implemented: $10CE builds that command from the table of contents
+and fails outright if $5839 says there is not one, and we have never
+read a TOC. That is the next piece and it is a bigger one.
+---
+ bios/segacd.c | 88 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 88 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 6deeea5..e65893b 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -157,6 +157,7 @@ static volatile UBYTE cd_busy;  /* a foreground read owns the drive */
+ static UBYTE cd_gone;           /* the drive said the disc changed */
+ static UBYTE cd_badrun;         /* consecutive packets saying "nothing" */
+ static UBYTE cd_badstate;       /* ...and the state that said it */
++static UWORD cd_notready;       /* reads that found the drive unfit */
+ static UWORD cd_why;            /* nibble per attempt of the last
+                                  * failed fetch: 1 timed out, 2 the
+                                  * head was already past, 3 the
+@@ -966,6 +967,23 @@ static void cdd_ask_stop(void)
+     cdd_handover = 1;
+ }
+ 
++/* Command 6, no arguments. The BIOS sends this at $352E when the drive
++ * is in any state it is not willing to read from, waits for it to take
++ * effect, and then looks again. It is how a drive that is stopped, or
++ * confused, or between things, is put back into a state that can be
++ * asked for data. */
++static void cdd_ask_ready(void)
++{
++    int i;
++
++    for (i = 0; i < 9; i++)
++        cdd_next[i] = 0;
++    cdd_next[0] = 0x06;
++    cdd_want = 0xFF;
++    cdd_answered = 0;
++    cdd_handover = 1;
++}
++
+ /* All nine nibbles zero. The drive is being asked for its status and
+  * nothing else, which is what the BIOS sends between commands ($1A88)
+  * and the safest packet there is -- and something has to be sent, since
+@@ -1110,6 +1128,7 @@ static void cdr_report(void)
+      * driver has never once looked at it. */
+     CDREPORT[29] = (UWORD)(((UWORD)cdd_stat[0] << 8) | cdd_stat[1]);
+     CDREPORT[30] = (UWORD)(((UWORD)cd_gone << 8) | cd_badstate);
++    CDREPORT[31] = cd_notready;
+     CDREPORT[0] = CDREPORT_MAGIC;
+ }
+ 
+@@ -1277,6 +1296,51 @@ static void cdr_step(void)
+ #define CD_STREAM_AHEAD 20UL
+ 
+ 
++#define CD_READY    0           /* the drive will accept a read */
++#define CD_NOTREADY 1
++#define CD_NODISC   2
++
++/* Is the drive in a state that can be asked for data, and if not, put
++ * it in one.
++ *
++ * $34E6 is the BIOS's answer and it is short: states 1, 4 and C go
++ * straight to the read; 5, B and E abandon the whole operation; and
++ * anything else gets command 6 and another look. This driver has been
++ * firing a read command at whatever state the drive happened to be in
++ * and treating the silence that followed as a timeout.
++ *
++ * Sega then sends command $A with the target position before the read
++ * itself, which this does not, because $10CE builds that command out
++ * of the table of contents and we have never read one. That is the
++ * next piece and it is a bigger one. */
++static UBYTE cd_prepare(void)
++{
++    int round;
++
++    for (round = 0; round < 6; round++) {
++        UBYTE st = cdd_stat[0];
++
++        if (st == 0x1 || st == 0x4 || st == 0xC)
++            return CD_READY;
++        if (st == 0x5 || st == 0xB || st == 0xE)
++            return CD_NODISC;
++
++        cdd_ask_ready();
++
++        /* Let it act. Bounded twice over: by exchanges, which is the
++         * unit the drive answers in, and by a spin count in case the
++         * exchanges have stopped altogether. */
++        {
++            UBYTE base = cdd_irqs;
++            LONG spin = 200000L;
++
++            while (spin-- > 0 && (UBYTE)(cdd_irqs - base) < 12)
++                ;
++        }
++    }
++    return CD_NOTREADY;
++}
++
+ #define CD_WAIT     0           /* the drive is working; keep waiting */
+ #define CD_ABANDON  1           /* it has nothing; stop waiting, seek again */
+ #define CD_GONE     2           /* the disc changed; everything cached is void */
+@@ -1337,6 +1401,30 @@ static BOOL cd_fetch(ULONG lba)
+                 || lba > cd_ring_newest + CD_STREAM_AHEAD) {
+             if (cd_ring_find(lba, &pt))
+                 goto collect;           /* it is already sitting there */
++            {
++                UBYTE rdy = cd_prepare();
++
++                if (rdy == CD_NODISC) {
++                    cd_gone = 1;
++                    cd_badstate = cdd_stat[0];
++                    goto done;
++                }
++                if (rdy == CD_NOTREADY) {
++                    /* Nudged and still not in a state Sega would read
++                     * from -- but go ahead anyway.
++                     *
++                     * The ready list is $34E6's, verbatim, and both
++                     * emulators sit in state 9 at rest and read
++                     * perfectly from it. So either the list is
++                     * narrower than the hardware requires or the
++                     * emulators report a state the real BIOS never
++                     * sees; either way, refusing on it turned two
++                     * working reads into two failures the moment it
++                     * was added. Count it and carry on. */
++                    cd_badstate = cdd_stat[0];
++                    cd_notready++;
++                }
++            }
+             cd_ring_reset();
+             cdc_ints = 0;
+             cdc_hit = 0;

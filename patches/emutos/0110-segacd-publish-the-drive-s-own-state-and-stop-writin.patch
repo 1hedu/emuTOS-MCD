@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 09:24:42 +0000
+Subject: [PATCH 110/184] segacd: publish the drive's own state, and stop
+ writing CART_REQ
+
+Two collisions on the sub-to-main comm words, one of them mine. The
+tick counter went into 0xFF8026, which is CART_REQ -- the B: proxy's
+request register, which IOFW polls and services by taking the sub
+CPU's bus. Publishing a 75 Hz counter there asks for that bus
+seventy-five times a second, out from under the CPU doing the asking.
+And 0xFF8020, the boot trace, becomes the screen base once EmuTOS is
+up, so a live read of it is meaningless and only a high-water read
+means anything.
+
+The CD read path gets its own register at 0xFF802E for the same
+reason, and 0xFF802C now carries the drive's state nibble with a
+rolling tick count beneath it -- the clock has been shown healthy, so
+eight bits of it is plenty.
+---
+ bios/segacd.c | 35 +++++++++++++++++++++++++++++++++--
+ 1 file changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index ab8631f..732eb96 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -124,6 +124,16 @@ const UBYTE *segacd_physbase(void)
+  * head now", which touches nothing and is therefore the safe way to
+  * prove a command round-trip on real hardware. */
+ 
++/* Where the CD read path is, live.
++ *
++ * Its own register, because the two shared ones both lie. 0xFF8020
++ * becomes the screen base once EmuTOS is up, so a live read there is
++ * meaningless and a high-water read hides every code lower than the
++ * highest ever reached -- which for a loop is exactly the information
++ * wanted. 0xFF8026 is CART_REQ and writing it asks IOFW for the sub
++ * CPU's bus. 0xFF802E is neither. */
++#define CDTRACE(n) (*(volatile UWORD *)0xFF802E = (UWORD)(0xE400u + (n)))
++
+ #define CDD_CMD_STAT    0x00
+ #define CDD_CMD_INFO    0x02
+ 
+@@ -783,7 +793,19 @@ void segacd_int_4_c(void)
+      * bounded is not. That is the difference between the disk probe
+      * failing and the disk probe hanging, and it is one word to tell
+      * them apart. IOFW mirrors this into its report block. */
+-    *(volatile UWORD *)0xFF8026 = cdd_ticks;
++    /* 0x2C, not 0x26. 0xFF8026 is CART_REQ -- the B: proxy's request
++     * register, which IOFW polls and services by taking the sub CPU's
++     * bus. Publishing a 75 Hz counter into it asks for that bus
++     * seventy-five times a second, out from under the CPU doing the
++     * asking. */
++    /* The drive's own state nibble in the high byte, a rolling tick
++     * count in the low. The clock has already been shown healthy, so
++     * eight bits of it is plenty and the state is the number that
++     * matters: cd_state_action() treats 0 as a refusal, and every CD
++     * boot has shown 1, 2 or 4 because the firmware moved the drive
++     * before EmuTOS ever saw it. A Mode 1 boot has never been asked. */
++    *(volatile UWORD *)0xFF802C = (UWORD)(((UWORD)cdd_stat[0] << 8)
++                                        | (cdd_ticks & 0xFF));
+ 
+     /* Wait for DRS to go *low*. It reads as "a status packet is on its
+      * way in", so the BIOS spins until the incoming transfer is over
+@@ -1987,12 +2009,14 @@ static BOOL cd_fetch(ULONG lba)
+             cd_hits++;
+         }
+ 
++        CDTRACE(7);
+         settle = cdd_irqs;
+         seen = settle;
+         cd_badrun = 0;
+         why1 = 0;
+         wrongs = 0;
+ rewait:
++        CDTRACE(8);
+         while (cd_budget > 0 && cd_time_left()) {
+             cd_budget--;
+             if (cd_ring_find(lba, &pt))
+@@ -2187,6 +2211,7 @@ collect:
+     }
+ 
+ done:
++    CDTRACE(9);
+     if (!got) {
+         /* Stop the drive running away.
+          *
+@@ -2370,6 +2395,8 @@ static BOOL cd_fill(ULONG lba)
+ {
+     UBYTE i, have;
+ 
++    CDTRACE(3);
++
+     cd_cache_base = 0xFFFFFFFFUL;
+     cd_cache_have = 0;
+     {
+@@ -2378,9 +2405,12 @@ static BOOL cd_fill(ULONG lba)
+             cd_cache_slot[k] = 0xFFFFFFFFUL;
+     }
+ 
+-    if (cd_ts)
++    if (cd_ts) {
++        CDTRACE(4);
+         return cd_fill_bios(lba);
++    }
+ 
++    CDTRACE(5);
+     if (!cd_fetch(lba))
+         return FALSE;
+     memcpy(cd_cache[0], CDSECT, CDC_DATA_BYTES);
+@@ -2498,6 +2528,7 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+         }
+     }
+ 
++    CDTRACE(2);
+     cd_blk_src = 0;
+     if (lba < cd_cache_base || lba >= cd_cache_base + cd_cache_have) {
+         UBYTE go;

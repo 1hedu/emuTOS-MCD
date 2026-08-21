@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 22:09:58 +0000
+Subject: [PATCH 161/184] Eject and reload, and a 16 MB disc for real software
+
+SCD_EJECT sends drive command $D down our own commander -- no firmware
+queue, no visit, none of the one-slot races the pause taught us about.
+SCD_RELOAD closes the tray ($C), un-wakes the parked firmware so the
+next visit re-runs DRV_INIT against the new disc's TOC, revives the
+block layer, and re-arms the media-change offer so GEMDOS logs the new
+volume. Doom CD32X Fusion swaps discs from its menu on this same
+console, so the mechanism has a shipping precedent.
+
+TOS has no CD anywhere in its API -- nothing canonical to hook -- so
+eject is a program, the same shape as SRAMTOOL. CD_DDISK_BLOCKS grows
+to 16 MB for a disc that carries software rather than a proof.
+---
+ bios/scdapi.h |  4 +++-
+ bios/segacd.c | 43 ++++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 45 insertions(+), 2 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 2d11ee4..ce99a95 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  29
++#define SCD_VERSION  30
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -154,6 +154,8 @@ struct scd_snap {
+ #define SCD_BIOS_NEARREAD 6             /* -> ...one it read at boot */
+ #define SCD_BIOS_SWAPS    7             /* -> how many exchanges have run */
+ #define SCD_REVIVE        8             /* another chance, and a clean mask */
++#define SCD_EJECT         9             /* open the tray (drive cmd $D) */
++#define SCD_RELOAD        10            /* close it and remount from zero */
+ 
+ struct scd_api {
+     unsigned short size;                /* sizeof(struct scd_api) */
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 205a666..4799e34 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1778,6 +1778,36 @@ static void cdd_ask_read(const UBYTE *msf)
+  * the documented way to wear the mechanism -- and the access lamp
+  * sitting solid at an idle desktop was this driver doing exactly
+  * that, reported by the user days before it was understood. */
++/* Open and close the tray: drive commands $D and $C, straight down our
++ * own commander -- no firmware queue, no visit, none of the one-slot
++ * races. The gate array carries them like any status probe. After a
++ * swap the TOC is fiction, so SCD_RELOAD un-wakes the firmware (next
++ * visit re-runs DRV_INIT), revives the block layer, and re-arms the
++ * media-change offer so GEMDOS logs the new volume. */
++static void cdd_ask_eject(void)
++{
++    int i;
++
++    for (i = 0; i < 9; i++)
++        cdd_next[i] = 0;
++    cdd_next[0] = 0x0D;
++    cdd_want = 0xFF;
++    cdd_answered = 0;
++    cdd_handover = 1;
++}
++
++static void cdd_ask_close(void)
++{
++    int i;
++
++    for (i = 0; i < 9; i++)
++        cdd_next[i] = 0;
++    cdd_next[0] = 0x0C;
++    cdd_want = 0xFF;
++    cdd_answered = 0;
++    cdd_handover = 1;
++}
++
+ static void cdd_ask_stop(void)
+ {
+     int i;
+@@ -2173,7 +2203,7 @@ static void cdr_step(void)
+  * kilobytes, which is not a disk, it is a punishment. */
+ 
+ #define CD_DDISK_LBA    1600UL          /* where the image sits on the disc */
+-#define CD_DDISK_BLOCKS 8192UL          /* 4 MB in 512-byte blocks */
++#define CD_DDISK_BLOCKS 32768UL         /* 16 MB in 512-byte blocks */
+ #define CD_BPS_SHIFT    2               /* 2048 / 512 */
+ 
+ /* How far ahead we are willing to wait rather than seek. Twenty sectors
+@@ -3753,6 +3783,17 @@ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+     case SCD_TS_ARM:    segacd_ts_arm((WORD)a); break;
+     case SCD_TS_REARM:  segacd_ts_rearm(); break;
+     case SCD_REVIVE:    segacd_cd_revive(); break;
++    case SCD_EJECT:
++        cdd_cmd_on = 1;         /* our commander carries it, always */
++        cdd_ask_eject();
++        break;
++    case SCD_RELOAD:
++        cdd_ask_close();
++        segacd_bios_unwake();   /* new disc: the firmware re-inits */
++        segacd_cd_revive();
++        cd_dtest &= (UBYTE)~2;  /* the media-change offer is live again */
++        cd_remount_at = 0;
++        break;
+     case SCD_BIOS_PROBE:    return segacd_bios_probe();
+     case SCD_BIOS_READTEST: return segacd_bios_readtest();
+     case SCD_BIOS_NEARREAD: return segacd_bios_nearread();

@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 18:32:43 +0000
+Subject: [PATCH 019/184] segacd: pause between PCM register writes, which is
+ why it was silent
+
+The RF5C164 needs settling time between control-register writes and
+drops a back-to-back run of them on real silicon. We wrote nine in a
+row. No emulator models this, so the entire audio path verified in
+emulation -- wave RAM byte-exact, keyclick counter rising -- and a real
+console made no sound at all.
+
+megadev's pcm_config_channel has had the answer the whole time: four
+NOPs after every register write. This pauses eight, since none of these
+writes are in a hot loop, and follows megadev in leaving wave RAM
+filling at full speed. Also loads wave RAM with the chip disabled, as
+megadev's pcm_clear_ram does.
+
+Third instance of this pattern in the port after the internal BRAM's
+bulk writes and the servant's completion ACK: when emulation is clean
+and silicon is not, suspect a write that needed time.
+---
+ bios/segacd.c | 63 ++++++++++++++++++++++++++++++++-------------------
+ 1 file changed, 40 insertions(+), 23 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 11e8203..b70900a 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -84,17 +84,34 @@ const UBYTE *segacd_physbase(void)
+  * Registers select either a channel (bit 7 clear, channel in bits 2-0)
+  * or a wave RAM bank (bit 7 set, bank in bits 3-0); bit 6 is the chip's
+  * master enable and has to stay set once we want sound at all. */
+-#define PCM_ENV     (*(volatile UBYTE *)0xFF0001)
+-#define PCM_PAN     (*(volatile UBYTE *)0xFF0003)
+-#define PCM_FDL     (*(volatile UBYTE *)0xFF0005)
+-#define PCM_FDH     (*(volatile UBYTE *)0xFF0007)
+-#define PCM_LSL     (*(volatile UBYTE *)0xFF0009)
+-#define PCM_LSH     (*(volatile UBYTE *)0xFF000B)
+-#define PCM_ST      (*(volatile UBYTE *)0xFF000D)
+-#define PCM_CTRL    (*(volatile UBYTE *)0xFF000F)
+-#define PCM_ONOFF   (*(volatile UBYTE *)0xFF0011)
++#define PCM_ENV     ((volatile UBYTE *)0xFF0001)
++#define PCM_PAN     ((volatile UBYTE *)0xFF0003)
++#define PCM_FDL     ((volatile UBYTE *)0xFF0005)
++#define PCM_FDH     ((volatile UBYTE *)0xFF0007)
++#define PCM_LSL     ((volatile UBYTE *)0xFF0009)
++#define PCM_LSH     ((volatile UBYTE *)0xFF000B)
++#define PCM_ST      ((volatile UBYTE *)0xFF000D)
++#define PCM_CTRL    ((volatile UBYTE *)0xFF000F)
++#define PCM_ONOFF   ((volatile UBYTE *)0xFF0011)
+ #define PCM_WAVE    0xFF2001UL          /* 4K window, odd bytes */
+ 
++/* The chip needs settling time between control-register writes. A run
++ * of back-to-back writes gets dropped on real silicon and no emulator
++ * models it, which is why the entire path verified in emulation and a
++ * real console stayed silent. megadev's driver pauses four NOPs after
++ * each register write; this pauses eight, since none of these are in a
++ * hot loop. Wave RAM does not need it -- megadev fills it at full speed
++ * and so do we.
++ *
++ * Second time this machine has caught us out this way: the internal
++ * backup RAM drops bulk writes the same manner, and that one showed up
++ * as a volume that mounted and then lost every file. */
++static void pcm_reg(volatile UBYTE *reg, UBYTE v)
++{
++    *reg = v;
++    __asm__ volatile("nop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop");
++}
++
+ #define PCM_CYCLE   32                  /* samples in one cycle of the tone */
+ #define PCM_LEN     2048                /* one-shot length: ~63 ms */
+ #define PCM_BELL_FRAMES  8              /* backstop, well past the sample */
+@@ -118,7 +135,7 @@ static void pcm_load_wave(void)
+ {
+     UWORD i;
+ 
+-    PCM_CTRL = 0xC0;                    /* enable, wave RAM bank 0 */
++    pcm_reg(PCM_CTRL, 0x80);            /* chip off, wave RAM bank 0 */
+     for (i = 0; i < PCM_LEN; i++) {
+         UWORD ph = (UWORD)(i % PCM_CYCLE);
+         WORD q = (ph < PCM_CYCLE / 2) ? ph : (PCM_CYCLE - 1 - ph);
+@@ -135,15 +152,15 @@ void segacd_sound_init(void)
+ {
+     pcm_load_wave();
+ 
+-    PCM_CTRL = 0x40;                    /* enable, program channel 0 */
+-    PCM_ENV = 0xC0;                     /* volume */
+-    PCM_PAN = 0xFF;                     /* both speakers */
+-    PCM_FDL = 0x00;                     /* step 1 sample per tick: the chip */
+-    PCM_FDH = 0x08;                     /* runs at 32552 Hz, so ~1017 Hz */
+-    PCM_LSL = (UBYTE)(PCM_LEN & 0xFF);  /* loop onto the terminator, so */
+-    PCM_LSH = (UBYTE)(PCM_LEN >> 8);    /* the tone ends by itself */
+-    PCM_ST  = 0x00;                     /* sample begins at wave RAM 0 */
+-    PCM_ONOFF = 0xFF;                   /* every channel off for now */
++    pcm_reg(PCM_CTRL, 0x40);            /* enable, program channel 0 */
++    pcm_reg(PCM_ENV, 0xC0);             /* volume */
++    pcm_reg(PCM_PAN, 0xFF);             /* both speakers */
++    pcm_reg(PCM_FDL, 0x00);             /* step 1 sample per tick: the chip */
++    pcm_reg(PCM_FDH, 0x08);             /* runs at 32552 Hz, so ~1017 Hz */
++    pcm_reg(PCM_LSL, (UBYTE)(PCM_LEN & 0xFF));  /* loop onto the end */
++    pcm_reg(PCM_LSH, (UBYTE)(PCM_LEN >> 8));    /* marker, so it stops */
++    pcm_reg(PCM_ST,  0x00);             /* sample begins at wave RAM 0 */
++    pcm_reg(PCM_ONOFF, 0xFF);           /* every channel off for now */
+     pcm_countdown = 0;
+ 
+     pcm_ready = 1;
+@@ -157,9 +174,9 @@ void segacd_sound_init(void)
+ 
+ static void pcm_beep(UBYTE frames, UBYTE volume)
+ {
+-    PCM_CTRL = 0x40;                    /* channel 0 registers */
+-    PCM_ENV = volume;
+-    PCM_ONOFF = 0xFE;                   /* channel 0 on, the rest off */
++    pcm_reg(PCM_CTRL, 0x40);            /* channel 0 registers */
++    pcm_reg(PCM_ENV, volume);
++    pcm_reg(PCM_ONOFF, 0xFE);           /* channel 0 on, the rest off */
+     pcm_countdown = frames;
+ }
+ 
+@@ -243,7 +260,7 @@ void segacd_int_2_c(void)
+ 
+     if (pcm_countdown) {                /* silence the bell when it is due */
+         if (--pcm_countdown == 0)
+-            PCM_ONOFF = 0xFF;
++            pcm_reg(PCM_ONOFF, 0xFF);
+     }
+ 
+     /* Tell the servant where the screen really is, rather than letting

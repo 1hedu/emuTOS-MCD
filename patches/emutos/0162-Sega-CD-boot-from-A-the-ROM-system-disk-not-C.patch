@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sat, 15 Aug 2026 03:39:30 +0000
+Subject: [PATCH 162/184] Sega CD: boot from A:, the ROM system disk, not C:
+
+DEFAULT_BOOTDEV is C: because on an ST the hard disk is where a system
+lives. Here C: is a save chip on whatever cartridge happens to be in
+the slot -- it may be absent, it may hold somebody else's game saves,
+and FORMATC.PRG exists precisely so it can be wiped. A: is the
+ROM-resident system disk: always there, always ours, and not changed by
+anything the user does.
+
+It is not only tidiness. The boot drive is where the desktop looks for
+its own files: app_rdicon() and read_inf_file() both adjust their
+filename by G.g_stdrv, which is dos_gdrv() at desktop start, which is
+whatever Dsetdrv(bootdev) made current. So EMUDESK.INF and EMUICON.RSC
+were being looked for on the cartridge and quietly not found, which is
+not a failure any message reports -- the desktop just builds a default
+INF and uses the built-in icons, exactly as it would on a machine that
+had never been given any.
+
+blkdev.h now takes a prior definition so the machine can say.
+---
+ bios/blkdev.h    |  2 ++
+ include/config.h | 17 +++++++++++++++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/bios/blkdev.h b/bios/blkdev.h
+index bdbc470..8dadbe9 100644
+--- a/bios/blkdev.h
++++ b/bios/blkdev.h
+@@ -37,7 +37,9 @@
+ 
+ #define FLOPPY_BOOTDEV      0   /* i.e. A: */
+ #define HARDDISK_BOOTDEV    2   /* i.e. C: */
++#ifndef DEFAULT_BOOTDEV
+ #define DEFAULT_BOOTDEV     HARDDISK_BOOTDEV
++#endif
+ 
+ /* Original FAT12 bootsector */
+ struct bs {
+diff --git a/include/config.h b/include/config.h
+index aa8bcf6..e8f7fa1 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -629,6 +629,23 @@
+     * own bus, alongside ACSI, SCSI, IDE and SD. */
+ #  define CONF_WITH_SEGACD_CD 1
+ # endif
++# ifndef DEFAULT_BOOTDEV
++   /* A:, and not C:.
++    *
++    * DEFAULT_BOOTDEV is C: because on an ST the hard disk is where a
++    * system lives. Here C: is a save chip on whatever cartridge is in
++    * the slot -- it may be absent, it may hold somebody else's game
++    * saves, and FORMATC.PRG exists precisely so it can be wiped. A: is
++    * the ROM-resident system disk: always there, always ours, never
++    * changed by anything the user does.
++    *
++    * It is not only tidiness. The boot drive is where the desktop looks
++    * for EMUDESK.INF and EMUICON.RSC -- app_rdicon() and
++    * read_inf_file() both adjust their filename by G.g_stdrv -- so with
++    * C: as the boot drive the icons this machine ships were being
++    * looked for on the cartridge and quietly not found. */
++#  define DEFAULT_BOOTDEV 0
++# endif
+ # ifndef CONF_WITH_READ_INF
+ #  define CONF_WITH_READ_INF 0
+ # endif

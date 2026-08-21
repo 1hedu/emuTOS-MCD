@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 05:46:12 +0000
+Subject: [PATCH 009/184] segacd: report the last drive-B: request on screen
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Hardware run #3 showed writes persisting (folders survived a power
+cycle) while the desktop still reported failure and copied files
+arrived empty. The driver now records every B: request — direction,
+sector count, LBA and the error it returned — for the servant's second
+status row. EE02 marks a request past the end of the volume, EE01 an
+unmounted volume, 0000 a request the driver accepted, which would put
+the refusal above us in GEMDOS.
+---
+ bios/segacd.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 94a053b..eb905da 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -371,10 +371,19 @@ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+ 
+     if (!cart_sectors) {            /* internal BRAM, sub-side, direct */
+         ULONG off;
+-        if (bram_state != BRAM_OURS)
++        /* telemetry for the hardware status line: what was asked for,
++         * and what we answered. (rw<<12)|lba, then the error code. */
++        *(volatile UWORD *)0xFF802C =
++            (UWORD)(((rw & 1) << 15) | ((count & 0x7) << 12) | (lba & 0xFFF));
++        if (bram_state != BRAM_OURS) {
++            *(volatile UWORD *)0xFF802E = 0xEE01;
+             return EUNDEV;
+-        if (lba + count > BRAM_SECTORS)
++        }
++        if (lba + count > BRAM_SECTORS) {
++            *(volatile UWORD *)0xFF802E = 0xEE02;   /* out of range */
+             return ESECNF;
++        }
++        *(volatile UWORD *)0xFF802E = 0;
+         off = (ULONG)lba * SECTOR_SIZE;
+         while (count--) {
+             WORD i;
+@@ -395,6 +404,8 @@ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+         if (rw & 1) {
+             memcpy((void *)BOUNCE, buf, SECTOR_SIZE);
+             err = cart_xfer(2, (UWORD)lba);
++            *(volatile UWORD *)0xFF802C = (UWORD)lba;
++            *(volatile UWORD *)0xFF802E = (UWORD)err;
+         } else {
+             err = cart_xfer(1, (UWORD)lba);
+             if (err == E_OK)

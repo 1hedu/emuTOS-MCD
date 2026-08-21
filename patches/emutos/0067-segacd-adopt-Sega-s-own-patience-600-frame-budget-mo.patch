@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 00:10:49 +0000
+Subject: [PATCH 067/184] segacd: adopt Sega's own patience -- 600-frame
+ budget, more attempts
+
+megadev's cdrom.s carries the read loop from Sega's Mega CD sample
+code, and it quantifies what this driver had been sizing by feel: the
+first sector after a read command gets 600 one-per-frame polls -- ten
+seconds -- before a single retry is counted, a mid-stream gap gets six
+frames, and thirty full re-seeks are allowed before failure. The
+maker of the 1992 lens gave it a long leash.
+
+Budget goes 375 to 600 exchanges per fill, matching their first-sector
+figure; the attempt cap inside a fill goes three to eight, with the
+time budget as the real limiter.
+---
+ bios/segacd.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 9be3642..2d9b9da 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -200,7 +200,14 @@ static UBYTE cd_quiet;          /* the read command has been withdrawn */
+  * cdd_ticks stops and would otherwise leave us waiting forever. It is
+  * sized to expire at about the same time, which it could not be before
+  * because nobody had counted the loop. */
+-#define CD_XCHG_BUDGET  375     /* 5 s at 75 Hz */
++#define CD_XCHG_BUDGET  600     /* 8 s at 75 Hz. Not a guess: Sega's own
++                                 * sample code (via megadev's cdrom.s)
++                                 * polls 0x258 = 600 times, once per
++                                 * frame, for the first sector after a
++                                 * read command before it even counts
++                                 * one retry -- and it then allows
++                                 * thirty retries. A 1992 lens gets a
++                                 * long leash from its own maker. */
+ #define CD_XCHG_AHEAD   120     /* stop reading ahead with this much left */
+ #define CD_SPIN_BACKSTOP 130000L
+ 
+@@ -1530,7 +1537,11 @@ static BOOL cd_fetch(ULONG lba)
+      * interrupts the streaming that read is waiting on. */
+     cd_busy = 1;
+ 
+-    for (attempt = 0; attempt < 3 && !got && cd_time_left(); attempt++) {
++    /* Eight, up from three, after reading Sega's sample policy: it
++     * re-seeks up to thirty times before giving up. Time is the real
++     * limiter -- the budget above bounds the whole fill -- so the cap
++     * exists only to put a floor under pathological thrash. */
++    for (attempt = 0; attempt < 8 && !got && cd_time_left(); attempt++) {
+         /* Already gone past, or never coming? Then seek. Otherwise the
+          * drive is heading towards it and waiting is free. */
+         if (attempt > 0 || !cd_streaming

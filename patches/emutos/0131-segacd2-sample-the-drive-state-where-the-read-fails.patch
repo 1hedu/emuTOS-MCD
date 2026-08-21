@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 06:13:59 +0000
+Subject: [PATCH 131/184] segacd2: sample the drive state where the read fails
+
+Two hardware logs have reported the timeshare failing at 0300, and I
+have twice read that 00 as "the drive was in state 0". It is not.
+34(a5) is written only inside the DRV_INIT block, and both failing
+rounds were I0 rounds -- the diagnostic arm that switches DRV_INIT off
+-- so the byte was never written and kept its cleared zero.
+
+A failure code that carries a state has to sample the state on the
+failing path, not on one the diagnostic can switch off. brd_fail_stat
+calls CDB_STAT itself now, still inside the swapped-in world, and
+stores the nibble.
+
+So the next 03xx discriminates. 1, 2 or 4 means the drive was live and
+the sector is what never arrived -- the CDC decode side. 0 or 7 means
+the drive really is dead at read time despite the wake having moved it,
+which points at the swap window instead.
+---
+ bios/segacd2.S | 27 ++++++++++++++++++++++++++-
+ 1 file changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index fb077b0..2e3b54f 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -569,9 +569,16 @@ brd_wait_init:
+         // state 2 on hardware as 0x2n, and a whole-byte compare against
+         // 0x20 would have missed it.
+         move.w  (a0),d0
+-        move.w  d0,34(a5)               // the whole word, for the report
+         lsr.w   #8,d0
+         andi.w  #0x00F0,d0              // the drive's own state nibble
++        // Store the nibble, not the whole word. The low byte of the
++        // failure code is documented as "the drive state the BIOS
++        // believed at the time", and stashing the raw status word here
++        // put the low half of it -- which is not the state -- into that
++        // byte. The last log read 0300 and that 00 meant nothing.
++        move.w  d0,d1
++        lsr.w   #4,d1
++        move.w  d1,34(a5)
+         cmpi.w  #0x0040,d0              // paused, ready to be read from
+         beq     brd_init_done
+         cmpi.w  #0x0020,d0              // and 2, which a CD boot shows
+@@ -639,6 +646,24 @@ brd_fail_init:
+         move.w  #2,32(a5)
+         bra     brd_done
+ brd_fail_stat:
++        // Ask the drive what it thinks, here, at the point of failure.
++        //
++        // 34(a5) was only ever written inside the DRV_INIT block, so on
++        // any round with the I arm off it stayed at its cleared zero --
++        // and the last two hardware logs failed on exactly such a
++        // round and reported 0300, whose 00 meant "never asked" and
++        // read like "state 0". A failure code that carries a state has
++        // to sample the state on the failing path, not on a path the
++        // diagnostic can switch off.
++        movea.l a5,a0
++        move.w  #0x0081,d0              // CDB_STAT
++        move.w  d0,50(a5)
++        jsr     0x5F22
++        move.w  (a0),d0
++        lsr.w   #8,d0
++        lsr.w   #4,d0
++        andi.w  #0x000F,d0
++        move.w  d0,34(a5)
+         move.w  #3,32(a5)
+         bra     brd_done
+ brd_fail_read:

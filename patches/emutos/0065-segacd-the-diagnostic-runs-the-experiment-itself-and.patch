@@ -1,0 +1,166 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 23:35:15 +0000
+Subject: [PATCH 065/184] segacd: the diagnostic runs the experiment itself,
+ and shows its buttons
+
+The lead-2 lever went onto the last disc behind a boot button whose
+detection was displayed nowhere, so its one hardware run produced a
+result indistinguishable from the button not registering. A switch
+with no light on it is not an instrument.
+
+So: no levers. The diagnostic cycles the whole matrix itself, four
+rounds -- lead 20 or 2 frames, command-6 hold after the fill on or off
+-- prints each round's configuration in its header, and prints the raw
+boot-button word too, so button detection is never again a matter of
+inference. Whichever arm's counters stay clean is the answer, read off
+the CRT, no reburn needed.
+
+The hold arm exists because the hardware trace shows the drive PAUSED
+at rest before the probe reads -- something in Sega's flow settles it
+outside the traced window -- and the build that held with command 6
+produced the best hardware run this project has had. It is an
+experimental arm now instead of an argument.
+---
+ bios/bios.c   | 31 ++++++++++++++++++++++++++++---
+ bios/segacd.c | 37 ++++++++++++++++++++++++++++++-------
+ bios/segacd.h |  2 ++
+ 3 files changed, 60 insertions(+), 10 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 72feb5d..f6c146c 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1048,16 +1048,41 @@ void biosmain(void)
+      * is worth much less than one that can be asked again.
+      */
+     if (segacd_diag) {
++        /* The diagnostic is the experiment now, not just the meter.
++         *
++         * The first cut of this put one variable on a boot button, and
++         * the button's detection was displayed nowhere -- so its one
++         * hardware run produced a result that could not be told apart
++         * from the button not working. On the last disc anyone is
++         * burning, that is the worst possible instrument. So: no
++         * levers. Every round sets its own configuration, prints it,
++         * and prints the raw button word too, and four rounds cover
++         * the whole matrix --
++         *
++         *   lead: command the read 20 frames early (this driver's
++         *         habit) or 2 (the CDBIOS's, measured in the trace);
++         *   hold: send command 6 after each fill (the build that ran
++         *         best on hardware) or nothing (what the traced BIOS
++         *         sends between reads).
++         *
++         * Whichever arm's counters stay clean is the answer, read off
++         * a CRT, no reburn required. */
++        static const UWORD arm_lead[4] = { 20, 2, 20, 2 };
++        static const UWORD arm_hold[4] = {  0, 0,  1, 1 };
+         static char buf[512];
+         static DTA dta;
+         LONG h, rc;
+-        UWORD run, seeks, hits, errs, why;
++        UWORD run, arm, seeks, hits, errs, why;
+         UBYTE state;
+         int i;
+ 
+         cprintf("\033E");
+-        for (run = 1; ; run++) {
+-            cprintf("D: TEST %u  (Down held at boot)\r\n", run);
++        for (run = 0; ; run++) {
++            arm = (UWORD)(run & 3);
++            segacd_cd_tune(arm_lead[arm], arm_hold[arm]);
++            cprintf("D: TEST %u  LEAD %u HOLD %u  BTNS %02X\r\n",
++                    run + 1, arm_lead[arm], arm_hold[arm],
++                    segacd_bootflags);
+ 
+             rc = Dfree((LONG *)buf, 3);         /* 3 = C: */
+             cprintf(" Dfree    %ld   %ld of %ld free\r\n",
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 7057df2..6b1f251 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -144,12 +144,19 @@ static UBYTE cdd_count, cdd_good;
+ static UBYTE cdd_tick;
+ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
+ UBYTE segacd_diag;              /* holding Down runs the D: diagnostic */
++UWORD segacd_bootflags;         /* the raw button word the servant sent.
++                                 * Printed by the diagnostic, because a
++                                 * boot switch nothing displays is a
++                                 * switch nobody can prove was thrown --
++                                 * which is exactly what happened the
++                                 * first night this disc was used. */
+ /* How far before the target a read is commanded. Sega uses two frames,
+  * measured three times in the hardware trace; this driver has always
+  * used twenty. Selectable at boot -- hold Left -- because with one
+  * CD-R left, choosing between them blind is not a decision I get to
+  * make on someone else's disc. */
+ static ULONG cd_lead = 20UL;
++static UBYTE cd_hold;           /* send command 6 after each fill */
+ /* D: telemetry. Declared up here because the report that publishes it
+  * is written before the code that keeps it, and a forward declaration
+  * for four counters is less to get wrong than moving either. */
+@@ -339,6 +346,7 @@ void segacd_cdd_init(void)
+          * can now answer that instead of me choosing. */
+         segacd_diag = (UBYTE)((f & 4) ? 1 : 0);
+         cd_lead = (f & 8) ? 2UL : 20UL;
++        segacd_bootflags = (UWORD)(f & 0xFF);
+     }
+ 
+     cdd_ask(CDD_CMD_INFO, 0x03);        /* something to say from the first
+@@ -1702,13 +1710,18 @@ static BOOL cd_fill(ULONG lba)
+         cd_cache_have = (UBYTE)(i + 1);
+     }
+ 
+-    /* And then nothing. No command 6 to hold the head, no command 1 to
+-     * stop it: the drive is left running and the next read names a new
+-     * place, because that is what the CDBIOS does on this console and
+-     * it was measured, not assumed. Every command this driver sent that
+-     * Sega's does not -- 1, 6, and the $A seek assist -- was a guess at
+-     * being helpful, and each one moved the drive into a state the read
+-     * path then had to recover from. */
++    /* Ordinarily nothing follows the fill -- the drive is left running
++     * and the next read names a new place, which is what the traced
++     * CDBIOS does between its reads. But the trace also shows the drive
++     * PAUSED at rest, state 4, before the probe -- so something in
++     * Sega's flow does settle it after a run of reads, outside the
++     * traced window. Command 6 after the fill is the one candidate this
++     * driver ever had for that, and the build that sent it produced the
++     * best run this project has had on hardware. So it stays available
++     * as an experimental arm, selected by the diagnostic, instead of
++     * being argued about. */
++    if (cd_hold)
++        cdd_ask_ready();
+     cd_streaming = 0;
+     return TRUE;
+ }
+@@ -1785,6 +1798,16 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+     *why = cd_why;
+ }
+ 
++/* The diagnostic's knobs. The disc got burned with exactly one
++ * experimental lever on a button, and the button's detection could not
++ * be seen -- so now the diagnostic drives the levers itself and prints
++ * what it set. Nothing about a normal boot goes through here. */
++void segacd_cd_tune(UWORD lead, UWORD hold)
++{
++    cd_lead = lead;
++    cd_hold = (UBYTE)(hold ? 1 : 0);
++}
++
+ LONG segacd_cd_ioctl(WORD op, void *arg)
+ {
+     ULONG *info = (ULONG *)arg;
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 4ce6180..cd95139 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -37,6 +37,8 @@ LONG segacd_cd_ioctl(WORD op, void *arg);
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
++extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
++void segacd_cd_tune(UWORD lead, UWORD hold);
+ 
+ /* Clock */
+ ULONG segacd_getdt(void);

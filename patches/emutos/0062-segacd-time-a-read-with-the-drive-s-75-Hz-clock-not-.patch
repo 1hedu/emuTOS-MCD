@@ -1,0 +1,161 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 21:55:45 +0000
+Subject: [PATCH 062/184] segacd: time a read with the drive's 75 Hz clock, not
+ with CPU spins
+
+The wait loop is ~480 cycles a turn, so the 1200000-turn budget
+described as 'about six seconds' was forty-six, and cd_read_block ran
+the fill twice: a minute and a half for one failed 512-byte block.
+Nothing was hung; the bound was just enormous and nobody had counted
+the loop.
+
+The drive clocks one exchange every 1/75 s, so cdd_ticks is a real
+clock. A block read now gets 375 frames -- five seconds, seek and
+retries included -- and the retry gets its own five rather than the
+first try's leftovers. The spin count survives only as a backstop for a
+drive that has gone silent, and is now sized against the measured cost.
+---
+ bios/segacd.c | 69 ++++++++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 60 insertions(+), 9 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 8990c76..33feb49 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -152,7 +152,32 @@ static UBYTE cd_cache_have;
+ static UBYTE cd_streaming;
+ static UWORD cd_errors;         /* reads that gave up */
+ static UBYTE cd_quiet;          /* the read command has been withdrawn */
+-static LONG cd_budget;          /* spin left for the whole block read */
++/* How long a block read may take.
++ *
++ * This used to be a spin count, 1200000, with a comment saying "about
++ * six seconds". It is not six seconds. The loop scans a six-entry ring
++ * and comes to about 480 cycles a turn, so on a 12.5 MHz sub CPU those
++ * 1200000 turns are forty-six seconds -- and cd_read_block runs the
++ * fill twice, so one failed 512-byte block cost a minute and a half.
++ * Mounting a drive touches several. That arithmetic is the whole of the
++ * "console looks hung on a white screen" report; nothing was stuck.
++ *
++ * Timing a drive by counting CPU spins was the mistake. The drive
++ * clocks one exchange every 1/75 s and never varies, so cdd_ticks is a
++ * real clock and the budget is now written in it: CD_XCHG_BUDGET frames
++ * for a whole block read, seek and retries and all.
++ *
++ * The spin count stays, but only as a backstop for the one case the
++ * drive's clock cannot cover -- the drive having gone silent, when
++ * cdd_ticks stops and would otherwise leave us waiting forever. It is
++ * sized to expire at about the same time, which it could not be before
++ * because nobody had counted the loop. */
++#define CD_XCHG_BUDGET  375     /* 5 s at 75 Hz */
++#define CD_XCHG_AHEAD   120     /* stop reading ahead with this much left */
++#define CD_SPIN_BACKSTOP 130000L
++
++static UWORD cd_epoch;          /* cdd_ticks when this block read began */
++static LONG cd_budget;          /* backstop spin, for a silent drive */
+ static volatile UBYTE cd_busy;  /* a foreground read owns the drive */
+ static UBYTE cd_gone;           /* the drive said the disc changed */
+ static UBYTE cd_badrun;         /* consecutive packets saying "nothing" */
+@@ -238,6 +263,11 @@ static UBYTE cdd_sent;          /* commands handed to the drive. Wraps, and
+                                  * was read as proof of life for several
+                                  * builds after the interrupt had stopped */
+ static UBYTE cdd_irqs;          /* level-4 arrivals, for the watchdog */
++static volatile UWORD cdd_ticks; /* the same arrivals, wide enough to time
++                                  * with: the drive clocks one exchange
++                                  * every 1/75 s and never varies, which
++                                  * makes it the only honest clock this
++                                  * driver has. See cd_time_left(). */
+ static UBYTE cdd_seen;          /* last count the watchdog looked at */
+ static UBYTE cdd_quiet;         /* VBLs since the interrupt last fired */
+ static UWORD cdd_burst;         /* level-4 arrivals since the VBL last ran */
+@@ -525,6 +555,7 @@ void segacd_int_4_c(void)
+     }
+ 
+     cdd_irqs++;
++    cdd_ticks++;
+ 
+     /* Wait for DRS to go *low*. It reads as "a status packet is on its
+      * way in", so the BIOS spins until the incoming transfer is over
+@@ -1478,11 +1509,19 @@ static void cdr_step(void)
+  * itself, which this does not, because $10CE builds that command out
+  * of the table of contents and we have never read one. That is the
+  * next piece and it is a bigger one. */
++/* Is there any of this block read's five seconds left? Measured in the
++ * drive's own exchanges, so it means the same on any CPU and however
++ * much the main side steals the bus. */
++static BOOL cd_time_left(void)
++{
++    return (UWORD)(cdd_ticks - cd_epoch) < CD_XCHG_BUDGET;
++}
++
+ static UBYTE cd_prepare(void)
+ {
+     int round;
+ 
+-    for (round = 0; round < 6; round++) {
++    for (round = 0; round < 6 && cd_time_left(); round++) {
+         UBYTE st = cdd_stat[0];
+ 
+         if (st == 0x1 || st == 0x4 || st == 0xC)
+@@ -1558,7 +1597,7 @@ static BOOL cd_fetch(ULONG lba)
+      * interrupts the streaming that read is waiting on. */
+     cd_busy = 1;
+ 
+-    for (attempt = 0; attempt < 3 && !got; attempt++) {
++    for (attempt = 0; attempt < 3 && !got && cd_time_left(); attempt++) {
+         /* Already gone past, or never coming? Then seek. Otherwise the
+          * drive is heading towards it and waiting is free. */
+         if (attempt > 0 || !cd_streaming
+@@ -1621,7 +1660,7 @@ static BOOL cd_fetch(ULONG lba)
+         settle = cdd_irqs;
+         seen = settle;
+         cd_badrun = 0;
+-        while (cd_budget > 0) {
++        while (cd_budget > 0 && cd_time_left()) {
+             cd_budget--;
+             if (cd_ring_find(lba, &pt))
+                 goto collect;
+@@ -1759,7 +1798,7 @@ static BOOL cd_fill(ULONG lba)
+             break;
+         /* Only while the budget is comfortable. Read-ahead exists to
+          * make the next read free, not to make this one late. */
+-        if (cd_budget < 400000L)
++        if ((UWORD)(cdd_ticks - cd_epoch) > CD_XCHG_BUDGET - CD_XCHG_AHEAD)
+             break;
+         if (!cd_fetch(lba + i))
+             break;
+@@ -1793,7 +1832,8 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+ 
+     cd_dtest |= 1;
+     if (lba < cd_cache_base || lba >= cd_cache_base + cd_cache_have) {
+-        cd_budget = 1200000L;           /* about six seconds, all in */
++        UBYTE go;
++
+         /* Twice, because the evidence says so: a fill that has just
+          * failed three times over succeeds immediately when started
+          * again from scratch. The first read after the drive has been
+@@ -1803,9 +1843,20 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+          *
+          * Why a fresh fill works where the retries inside one did not
+          * is not yet understood. Written down as a mitigation, not as
+-         * a fix, so that it is not mistaken for one later. */
+-        if (!cd_fill(lba) && !cd_fill(lba))
+-            return FALSE;
++         * a fix, so that it is not mistaken for one later.
++         *
++         * Each try gets its own clock. Sharing one made the retry
++         * meaningless -- the first try would spend the lot and the
++         * second would find nothing left and return without asking the
++         * drive anything, which is not a retry. */
++        for (go = 0; go < 2; go++) {
++            cd_epoch = cdd_ticks;
++            cd_budget = CD_SPIN_BACKSTOP;
++            if (cd_fill(lba))
++                break;
++            if (go)
++                return FALSE;
++        }
+     }
+     memcpy(buf, cd_cache[lba - cd_cache_base] + off, SECTOR_SIZE);
+     cd_dtest |= 2;

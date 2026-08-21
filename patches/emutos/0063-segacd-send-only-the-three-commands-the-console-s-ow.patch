@@ -1,0 +1,359 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 22:28:53 +0000
+Subject: [PATCH 063/184] segacd: send only the three commands the console's
+ own BIOS sends
+
+A trace of the CDBIOS reading this disc on real hardware -- three long
+seeks, including a full sweep from 00:23:30 back to 00:02:14 -- uses
+command 3 once, command 0 for the whole seek, and command 2 to poll.
+Nothing else. No command 1, no command 6, no command $A.
+
+This driver sent all three, each added in good faith, each moving the
+drive somewhere the read path then had to recover from.
+
+Command 1 was the expensive one. It leaves the drive in state 0, which
+is what the console reported every time C: went unreadable, and the
+stage-3 self-test used it to park a few seconds into EmuTOS's boot --
+about when the desktop mounts its drives. Whichever got there first
+decided whether C: worked at all. That is the whole of 'worked once and
+never again', and this driver was holding both ends of the race.
+
+Command 6 held the head after each fill, to stop it running to the rim.
+It does run to the rim, and Sega lets it: seeking back is four tenths
+of a second, which the trace measures, while a stopped drive costs
+every read after it.
+
+Command $A's derivation stands and stays in docs/cdd-bios-notes.md,
+but the console does not send it, so neither do we -- $EB0 declines for
+distances this small in turns and every distance on a disc this size is
+small. cdd_ask_stop, cdd_ask_seek, cdd_let_go and the spiral arithmetic
+go with it.
+---
+ bios/segacd.c | 252 ++++++++++++--------------------------------------
+ 1 file changed, 61 insertions(+), 191 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 33feb49..b59d834 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -183,7 +183,6 @@ static UBYTE cd_gone;           /* the drive said the disc changed */
+ static UBYTE cd_badrun;         /* consecutive packets saying "nothing" */
+ static UBYTE cd_badstate;       /* ...and the state that said it */
+ static UWORD cd_notready;       /* reads that found the drive unfit */
+-static UWORD cd_seekcmds;       /* long seeks that earned command $A */
+ static UWORD cd_why;            /* nibble per attempt of the last
+                                  * failed fetch: 1 timed out, 2 the
+                                  * head was already past, 3 the
+@@ -960,11 +959,6 @@ static BOOL cdr_check(UBYTE slot)
+     return TRUE;
+ }
+ 
+-static UWORD frombcd(UBYTE v)
+-{
+-    return (UWORD)((v >> 4) * 10 + (v & 0x0F));
+-}
+-
+ static UBYTE tobcd(UWORD v)
+ {
+     return (UBYTE)(((v / 10) << 4) | (v % 10));
+@@ -1004,25 +998,23 @@ static void cdd_ask_read(const UBYTE *msf)
+     cdd_handover = 1;           /* last: the interrupt reads this */
+ }
+ 
+-/* Command 1, no arguments: what the BIOS sends at $1A10 when it gives
+- * up on whatever it was doing.
++/* Three commands this driver used to send and the CDBIOS does not.
+  *
+- * Nothing in this driver ever sent it, which means that after every
+- * read the drive carried on reading forward to the end of the disc and
+- * stayed there -- for as long as the console was on. That is hours of
+- * an optical head doing work nobody wanted. Sending it costs one
+- * packet. */
+-static void cdd_ask_stop(void)
+-{
+-    int i;
++ * A trace of Sega's own code reading this disc on the console -- three
++ * long seeks, including a full sweep from 00:23:30 back to 00:02:14 --
++ * uses exactly three commands: 3 to read, once; 0 for the whole of the
++ * seek; 2 to poll position. No command 1 to stop the drive, no command
++ * 6 to hold it, no command $A to help it along.
++ *
++ * Each of those three was added here in good faith and each moved the
++ * drive somewhere the read path then had to recover from. Command 1
++ * was the worst: it left the drive in state 0, which is the state the
++ * console reported every time C: went unreadable. They are gone, and
++ * with them cdd_ask_stop, cdd_ask_seek, cdd_let_go and the spiral
++ * arithmetic behind $A -- whose derivation survives in
++ * docs/cdd-bios-notes.md, where it is worth more than it was here.
++ */
+ 
+-    for (i = 0; i < 9; i++)
+-        cdd_next[i] = 0;
+-    cdd_next[0] = 0x01;
+-    cdd_want = 0xFF;
+-    cdd_answered = 0;
+-    cdd_handover = 1;
+-}
+ 
+ /* Command 6, no arguments. The BIOS sends this at $352E when the drive
+  * is in any state it is not willing to read from, waits for it to take
+@@ -1101,139 +1093,7 @@ static void cdr_reissue(void)
+     cdr_state = CDR_COMMAND;
+ }
+ 
+-/* Command $A: the long-seek assist.
+- *
+- * Sega sends this between preparing the drive and asking it to read,
+- * and it is the last thing this driver did not do. It carries how far
+- * the head has to travel, in turns of the disc's spiral, banded.
+- *
+- * The spiral is Red Book geometry and nothing else: constant linear
+- * velocity over a constant track pitch, so after t seconds
+- *
+- *      r(t) = sqrt(r0^2 + v*p*t/pi)      turns = (r - r0) / p
+- *
+- * With the programme area starting at 25 mm, a pitch of 1.6 um and
+- * 1.25 m/s, that is turns(T) = sqrt(15625^2 + 3316*T) - 15625 for T in
+- * frames -- and it reproduces the BIOS's own table to within one turn
+- * on every entry. See docs/cdd-bios-notes.md; nothing here was copied
+- * out of the ROM, because there was nothing in the ROM worth copying.
+- */
+-#define CD_R0       15625UL     /* 25 mm at a 1.6 um pitch, in turns */
+-#define CD_K        3316UL      /* v / (pi * p), per frame */
+-
+-/* The bands $E38 computes when there is no calibration -- and there is
+- * none, because $CB2 reads it out of the console's own backup RAM and
+- * returns zero when it is absent, which is the case we are in and the
+- * only one we would ever want to be in. */
+-#define CD_BAND_LO  0x01C0
+-#define CD_BAND_MID 0x0380
+-#define CD_BAND_HI  0x0700
+-#define CD_NEAR     0x0514
+-
+-static UWORD cd_isqrt(ULONG n)
+-{
+-    ULONG root = 0, bit = 0x8000UL;
+-
+-    while (bit) {
+-        ULONG t = root | bit;
+-
+-        if (t * t <= n)
+-            root = t;
+-        bit >>= 1;
+-    }
+-    return (UWORD)root;
+-}
+-
+-static UWORD cd_turns(ULONG frames)
+-{
+-    return (UWORD)(cd_isqrt(CD_R0 * CD_R0 + CD_K * frames) - CD_R0);
+-}
+-
+-/* $EB0. Returns the banded distance, or zero for "near enough that
+- * Sega would not bother" -- in which case $10CE never sets its post
+- * flag and no command goes out at all. That path is what this driver
+- * has always taken, which is why its reads work. */
+-static UWORD cd_seek_dist(ULONG target, UBYTE *dir)
+-{
+-    ULONG len;
+-    UWORD tl, tt, d;
+ 
+-    if (!cdd_len_ok)
+-        return 0;               /* $11E0 fails and $10CE bails at $1124 */
+-
+-    len = (ULONG)frombcd(cdd_len_m) * 4500UL
+-        + (ULONG)frombcd(cdd_len_s) * 75UL
+-        + (ULONG)frombcd(cdd_len_f);
+-    tl = cd_turns(len);
+-    tt = cd_turns(target + 150UL);
+-
+-    if (tl > tt) {
+-        *dir = 0xFF;
+-        d = (UWORD)(tl - tt);
+-    } else {
+-        *dir = 0x00;
+-        d = (UWORD)(tt - tl);
+-    }
+-
+-    if (d <= CD_BAND_LO)
+-        return 0;
+-    else if (d <= CD_BAND_MID)
+-        d = (UWORD)(d - CD_BAND_LO);
+-    else if (d <= CD_BAND_HI)
+-        d >>= 1;
+-    else
+-        d = (UWORD)(d - CD_BAND_MID);
+-
+-    /* The tails differ by which end the target is nearer. */
+-    if (*dir) {
+-        if (tt < CD_NEAR) {
+-            if (d < (CD_BAND_LO >> 4))
+-                return 0;
+-            d = (UWORD)(d - (CD_BAND_LO >> 4));
+-        }
+-    } else {
+-        UWORD far = (tl > CD_NEAR) ? (UWORD)(tl - CD_NEAR) : 0;
+-
+-        if (far < tt) {
+-            if (d < (CD_BAND_LO >> 4))
+-                return 0;
+-            d = (UWORD)(d - (CD_BAND_LO >> 4));
+-        }
+-    }
+-    return d;
+-}
+-
+-/* $10CE's packing: the command, a zero, the direction as two bytes,
+- * then the distance a nibble at a time. */
+-static void cdd_ask_seek(UBYTE dir, UWORD dist)
+-{
+-    int i;
+-
+-    for (i = 0; i < 9; i++)
+-        cdd_next[i] = 0;
+-    cdd_next[0] = 0x0A;
+-    cdd_next[2] = 0;
+-    cdd_next[3] = (UBYTE)(dir & 0x0F);
+-    cdd_next[4] = (UBYTE)((dist >> 12) & 0x0F);
+-    cdd_next[5] = (UBYTE)((dist >> 8) & 0x0F);
+-    cdd_next[6] = (UBYTE)((dist >> 4) & 0x0F);
+-    cdd_next[7] = (UBYTE)(dist & 0x0F);
+-    cdd_want = 0xFF;
+-    cdd_answered = 0;
+-    cdd_handover = 1;
+-}
+-
+-/* Give a queued command time to actually go out: level 4 posts one per
+- * exchange, so two commands queued back to back means the second
+- * replaces the first. */
+-static void cdd_let_go(UBYTE packets)
+-{
+-    UBYTE base = cdd_irqs;
+-    LONG spin = 200000L;
+-
+-    while (spin-- > 0 && (UBYTE)(cdd_irqs - base) < packets)
+-        ;
+-}
+ 
+ static void cdr_start(ULONG lba)
+ {
+@@ -1324,7 +1184,8 @@ static void cdr_report(void)
+      * should be the length of the image the disc was built from. */
+     CDREPORT[32] = (UWORD)(((UWORD)cdd_len_m << 8) | cdd_len_s);
+     CDREPORT[33] = (UWORD)(((UWORD)cdd_len_f << 8) | cdd_len_ok);
+-    CDREPORT[34] = cd_seekcmds;
++    CDREPORT[34] = 0;           /* was: long seeks that earned $A.
++                                 * Sega sends none, so neither do we. */
+     CDREPORT[0] = CDREPORT_MAGIC;
+ }
+ 
+@@ -1456,7 +1317,18 @@ static void cdr_step(void)
+                 cdr_slot++;
+                 cdr_start(cdr_lbas[cdr_slot]);
+             } else {
+-                cdd_ask_stop();
++                /* Emphatically not command 1.
++                 *
++                 * Stopping here is what left the drive in state 0, and
++                 * state 0 is where every later read died. The self-test
++                 * finishes a few seconds into EmuTOS's boot, at about
++                 * the moment the desktop mounts its drives -- so which
++                 * of the two got there first decided whether C: worked
++                 * at all, which is exactly the "worked once and never
++                 * again" pattern. A trace of the CDBIOS reading this
++                 * disc on the same console sends command 1 not once.
++                 * The drive is left running, and the next read simply
++                 * names a new place. */
+                 cdr_state = CDR_PARKED;
+             }
+         }
+@@ -1634,20 +1506,21 @@ static BOOL cd_fetch(ULONG lba)
+             cdc_hit = 0;
+             if (attempt == 0)
+                 cdc_setup();
+-            {
+-                /* The long-seek assist, when the distance earns it.
+-                 * Sent first and given the exchange it needs, because
+-                 * a command queued on top of another replaces it. */
+-                UBYTE dir = 0;
+-                UWORD dist = cd_seek_dist(lba >= CDR_LEADIN
+-                                          ? lba - CDR_LEADIN : 0, &dir);
+-
+-                if (dist) {
+-                    cdd_ask_seek(dir, dist);
+-                    cdd_let_go(3);
+-                    cd_seekcmds++;
+-                }
+-            }
++            /* No long-seek assist. The derivation of command $A stands
++             * -- it is CD geometry and it is written up in
++             * docs/cdd-bios-notes.md -- but the console does not use
++             * it. A trace of the CDBIOS on this hardware seeking from
++             * 00:23:30 back to 00:02:14, twenty-one seconds of disc,
++             * sends command 3 and then nothing at all: state 2 for
++             * about thirty exchanges while the position ramps down, and
++             * then state 1 at the destination. $EB0 declines for
++             * distances this small in turns, and every distance on a
++             * disc this size is small.
++             *
++             * Which is the answer to "why leave a gap": there was no
++             * gap. There was a command Sega has and does not use, and
++             * sending it was one of three ways this driver was moving
++             * the drive around behind its own back. */
+             lba_to_msf(lba >= CDR_LEADIN ? lba - CDR_LEADIN : 0, start);
+             cdd_ask_read(start);
+             cd_quiet = 0;
+@@ -1748,14 +1621,18 @@ done:
+     return got;
+ }
+ 
+-/* Let the drive rest. Called when a run of reads is over: without it
+- * the head keeps going to the end of the disc and sits there. */
++/* End of a run of reads.
++ *
++ * This used to stop the drive, on the reasoning that otherwise the head
++ * keeps going to the end of the disc and sits there. It does keep
++ * going, and Sega lets it: a trace of the CDBIOS reading this disc on
++ * the console sends command 1 not once across three long seeks, and
++ * simply names a new place when it wants one. Seeking back from the rim
++ * costs four tenths of a second, which is what the trace measured, and
++ * a stopped drive costs every read after it. */
+ static void cd_park(void)
+ {
+-    if (cd_streaming) {
+-        cd_streaming = 0;
+-        cdd_ask_stop();
+-    }
++    cd_streaming = 0;
+ }
+ 
+ /* Sectors kept from one visit to the drive.
+@@ -1806,20 +1683,13 @@ static BOOL cd_fill(ULONG lba)
+         cd_cache_have = (UBYTE)(i + 1);
+     }
+ 
+-    /* Hold the head where it is.
+-     *
+-     * Command 3 does not read a sector, it starts the drive reading and
+-     * the drive keeps going. Between one read and the next -- across
+-     * GEMDOS, across a whole request -- nothing was stopping it, so it
+-     * ran forward to the end of the disc and sat in the lead-out. A
+-     * console reported the head at 01:80:00 on a disc 01:28:48 long
+-     * while waiting for 00:02:16, thirty-seven seeks against three
+-     * waits, and a boot slow enough to look hung.
+-     *
+-     * Command 6 holds position rather than stopping the disc, so the
+-     * next read is a short seek from where this one finished instead of
+-     * a journey back from the rim. */
+-    cdd_ask_ready();
++    /* And then nothing. No command 6 to hold the head, no command 1 to
++     * stop it: the drive is left running and the next read names a new
++     * place, because that is what the CDBIOS does on this console and
++     * it was measured, not assumed. Every command this driver sent that
++     * Sega's does not -- 1, 6, and the $A seek assist -- was a guess at
++     * being helpful, and each one moved the drive into a state the read
++     * path then had to recover from. */
+     cd_streaming = 0;
+     return TRUE;
+ }

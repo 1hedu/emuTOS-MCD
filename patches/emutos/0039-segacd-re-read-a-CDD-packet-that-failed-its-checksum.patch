@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 08:36:31 +0000
+Subject: [PATCH 039/184] segacd: re-read a CDD packet that failed its checksum
+
+The drive is answering now -- hardware returned RS1 = 3, naming the
+sub-command it was asked -- but the score read zero, so the answers
+were being counted as garbage and discarded.
+
+They were arriving intact. The Genesis can halt this CPU in the middle
+of the ten-byte status read, and half a packet from before the halt
+joined to half from after fails its checksum however perfect the
+drive's transmission was. The registers hold the packet until the next
+exchange, so reading them again once the halt is over recovers it.
+
+One retry, in the interrupt, costing microseconds.
+---
+ bios/segacd.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 0fe361f..7249963 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -390,6 +390,15 @@ void segacd_int_4_c(void)
+ 
+     cdd_poll();
+ 
++    /* One re-read if it did not checksum. The Genesis can halt this CPU
++     * in the middle of the ten-byte read, and a packet torn in half
++     * fails its checksum even though the drive sent it perfectly -- so
++     * the answers were arriving and being thrown away. The registers
++     * hold the packet until the next exchange, so simply reading them
++     * again once the halt is over recovers it. */
++    if (!cdd_valid)
++        cdd_poll();
++
+     /* Acknowledge -- but only if DTS says there is an outgoing transfer
+      * to acknowledge. The BIOS tests that bit first and skips the write
+      * when it is clear, and the reason is in what the write does: it

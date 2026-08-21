@@ -1,0 +1,336 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 09:06:24 +0000
+Subject: [PATCH 107/184] segacd: a trace per init step, so a boot that stops
+ says where
+
+A Mode 1 boot reached trace E005 -- the top of biosmain -- and
+stopped, which locates the fault only to 'somewhere in the whole of
+bios_init'. One word store per init call on a path that runs once
+turns that into a number: E11F, about to call blkdev_init. Four more
+inside blkdev_hdv_init narrow it to E203, about to call
+disk_init_all.
+
+So it is the disk probe, and it hangs with a disc in the tray as
+readily as without one -- which kills the empty-tray theory the last
+build was shipped to test.
+---
+ bios/bios.c   | 86 ++++++++++++++++++++++++++++-----------------------
+ bios/blkdev.c | 11 +++++++
+ 2 files changed, 59 insertions(+), 38 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 5cd027f..8d80dda 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -212,6 +212,16 @@ extern PFVOID vbl_list[8]; /* Default array for vblqueue */
+  * Initialize the BIOS
+  */
+ 
++/* One number per step of bios_init, so a boot that stops has to say
++ * where. The high-water mark of these is what the Mode 1 loader reads
++ * out of the comm register, and it costs a word store per init call on
++ * a path that runs once. */
++#ifdef MACHINE_SEGACD
++#define SCTRACE(n) (*(volatile UWORD *)0xFF8020 = (UWORD)(0xE100u + (n)))
++#else
++#define SCTRACE(n)
++#endif
++
+ static void bios_init(void)
+ {
+     KDEBUG(("bios_init()\n"));
+@@ -221,20 +231,20 @@ static void bios_init(void)
+      */
+ #if DETECT_NATIVE_FEATURES
+     KDEBUG(("natfeat_init()\n"));
+-    natfeat_init();
++    SCTRACE(1); natfeat_init();
+ #endif
+ #if STONX_NATIVE_PRINT
+     KDEBUG(("stonx_kprintf_init()\n"));
+-    stonx_kprintf_init();
++    SCTRACE(2); stonx_kprintf_init();
+ #endif
+ #if CONF_WITH_UAE
+     KDEBUG(("amiga_uae_init()\n"));
+-    amiga_uae_init();
++    SCTRACE(3); amiga_uae_init();
+ #endif
+ 
+     /* Initialize the processor */
+     KDEBUG(("processor_init()\n"));
+-    processor_init();   /* Set CPU type, longframe and FPU type */
++    SCTRACE(4); processor_init();   /* Set CPU type, longframe and FPU type */
+ 
+ #if CONF_WITH_ADVANCED_CPU
+     is_bus32 = (UBYTE)detect_32bit_address_bus();
+@@ -242,26 +252,26 @@ static void bios_init(void)
+     KDEBUG(("Address Bus width is %d-bit\n", IS_BUS32 ? 32 : 24));
+ 
+     KDEBUG(("vecs_init()\n"));
+-    vecs_init();        /* setup all exception vectors (above) */
++    SCTRACE(5); vecs_init();        /* setup all exception vectors (above) */
+     KDEBUG(("init_delay()\n"));
+-    init_delay();       /* set 'reasonable' default values for delay */
++    SCTRACE(6); init_delay();       /* set 'reasonable' default values for delay */
+ 
+     /* Detect optional hardware (video, sound, etc.) */
+     KDEBUG(("machine_detect()\n"));
+-    machine_detect();   /* detect hardware */
++    SCTRACE(7); machine_detect();   /* detect hardware */
+     KDEBUG(("machine_init()\n"));
+-    machine_init();     /* initialise machine-specific stuff */
++    SCTRACE(8); machine_init();     /* initialise machine-specific stuff */
+ 
+     /* Initialize the BIOS memory management */
+     KDEBUG(("bmem_init()\n"));
+-    bmem_init();
++    SCTRACE(9); bmem_init();
+ 
+ #if defined(MACHINE_AMIGA)
+     /* Detect and initialize Zorro II/III expansion boards.
+      * This must be done after is_bus32 and bmem_init().
+      * Alt-RAM found on those boards will be added later in altram_init().
+      */
+-    amiga_autoconfig();
++    SCTRACE(10); amiga_autoconfig();
+ #endif
+ 
+ #if CONF_WITH_68040_PMMU
+@@ -278,11 +288,11 @@ static void bios_init(void)
+ #endif /* CONF_WITH_68040_PMMU */
+ 
+     KDEBUG(("cookie_init()\n"));
+-    cookie_init();      /* sets a cookie jar */
++    SCTRACE(11); cookie_init();      /* sets a cookie jar */
+     KDEBUG(("fill_cookie_jar()\n"));
+-    fill_cookie_jar();  /* detect hardware features and fill the cookie jar */
++    SCTRACE(12); fill_cookie_jar();  /* detect hardware features and fill the cookie jar */
+     KDEBUG(("font_init()\n"));
+-    font_init();        /* initialize font ring (requires cookie_akp) */
++    SCTRACE(13); font_init();        /* initialize font ring (requires cookie_akp) */
+ 
+ #if CONF_WITH_BLITTER
+     /*
+@@ -303,7 +313,7 @@ static void bios_init(void)
+ 
+ #if CONF_WITH_MFP
+     KDEBUG(("mfp_init()\n"));
+-    mfp_init();
++    SCTRACE(14); mfp_init();
+ #endif
+ 
+ #if CONF_WITH_TT_MFP
+@@ -327,33 +337,33 @@ static void bios_init(void)
+      * Must be done before calling linea_init().
+      */
+     KDEBUG(("screen_init_mode()\n"));
+-    screen_init_mode(); /* detect monitor type, ... */
++    SCTRACE(15); screen_init_mode(); /* detect monitor type, ... */
+ 
+     /* Set up the BIOS console output */
+     KDEBUG(("linea_init()\n"));
+-    linea_init();       /* initialize screen related line-a variables */
++    SCTRACE(16); linea_init();       /* initialize screen related line-a variables */
+ 
+     /*
+      * Initialize the screen address
+      * Must be done after calling linea_init().
+      */
+     KDEBUG(("screen_init_address()\n"));
+-    screen_init_address();
++    SCTRACE(17); screen_init_address();
+ 
+     KDEBUG(("vt52_init()\n"));
+-    vt52_init();        /* initialize the vt52 console */
++    SCTRACE(18); vt52_init();        /* initialize the vt52 console */
+ 
+     /* Now kcprintf() will also send debug info to the screen */
+     KDEBUG(("after vt52_init()\n"));
+ 
+     /* now we have output, let the user know we're alive */
+-    display_startup_msg();
++    SCTRACE(19); display_startup_msg();
+ 
+ #if DETECT_NATIVE_FEATURES
+     /*
+      * Tell ARAnyM where the LineA variables are
+      */
+-    nf_setlinea();
++    SCTRACE(20); nf_setlinea();
+ #endif
+ 
+     /* misc. variables */
+@@ -384,7 +394,7 @@ static void bios_init(void)
+      * keyboard repeat stuff.
+      */
+     KDEBUG(("init_system_timer()\n"));
+-    init_system_timer();
++    SCTRACE(21); init_system_timer();
+ 
+     /*
+      * Now we can enable interrupts.  Although VBL & timer interrupts will
+@@ -429,10 +439,10 @@ static void bios_init(void)
+ 
+     /* Initialize the RS-232 port(s) */
+     KDEBUG(("chardev_init()\n"));
+-    chardev_init();     /* Initialize low-memory bios vectors */
++    SCTRACE(22); chardev_init();     /* Initialize low-memory bios vectors */
+     boot_status |= CHARDEV_AVAILABLE;   /* track progress */
+     KDEBUG(("init_serport()\n"));
+-    init_serport();
++    SCTRACE(23); init_serport();
+     boot_status |= RS232_AVAILABLE;     /* track progress */
+ #if CONF_WITH_SCC
+     if (has_scc)
+@@ -444,21 +454,21 @@ static void bios_init(void)
+      */
+ #if CONF_WITH_DMASOUND
+     KDEBUG(("dmasound_init()\n"));
+-    dmasound_init();
++    SCTRACE(24); dmasound_init();
+ #endif
+     KDEBUG(("snd_init()\n"));
+-    snd_init();         /* Reset Soundchip, deselect floppies */
++    SCTRACE(25); snd_init();         /* Reset Soundchip, deselect floppies */
+ 
+     /*
+      * Initialise the two ACIA devices (MIDI and KBD), then initialise
+      * the associated IORECs & vectors
+      */
+     KDEBUG(("kbd_init()\n"));
+-    kbd_init();         /* init keyboard, disable mouse and joystick */
++    SCTRACE(26); kbd_init();         /* init keyboard, disable mouse and joystick */
+     KDEBUG(("midi_init()\n"));
+-    midi_init();        /* init MIDI acia so that kbd acia irq works */
++    SCTRACE(27); midi_init();        /* init MIDI acia so that kbd acia irq works */
+     KDEBUG(("init_acia_vecs()\n"));
+-    init_acia_vecs();   /* Init the ACIA interrupt vector and related stuff */
++    SCTRACE(28); init_acia_vecs();   /* Init the ACIA interrupt vector and related stuff */
+     KDEBUG(("after init_acia_vecs()\n"));
+     boot_status |= MIDI_AVAILABLE;  /* track progress */
+ 
+@@ -466,7 +476,7 @@ static void bios_init(void)
+     timer_c_sieve = 0x1111;
+ 
+     KDEBUG(("calibrate_delay()\n"));
+-    calibrate_delay();  /* determine values for delay() function */
++    SCTRACE(29); calibrate_delay();  /* determine values for delay() function */
+                         /*  - requires interrupts to be enabled  */
+ 
+     /* Initialize the DSP.  Since we currently use the system timer
+@@ -475,7 +485,7 @@ static void bios_init(void)
+      */
+ #if CONF_WITH_DSP
+     KDEBUG(("dsp_init()\n"));
+-    dsp_init();
++    SCTRACE(30); dsp_init();
+ #endif
+ 
+ #if CONF_WITH_MEMORY_TEST
+@@ -504,15 +514,15 @@ static void bios_init(void)
+     }
+ 
+     KDEBUG(("blkdev_init()\n"));
+-    blkdev_init();      /* floppy and harddisk initialisation */
++    SCTRACE(31); blkdev_init();      /* floppy and harddisk initialisation */
+     KDEBUG(("after blkdev_init()\n"));
+ 
+     /* initialize BIOS components */
+ 
+     KDEBUG(("parport_init()\n"));
+-    parport_init();     /* parallel port */
++    SCTRACE(32); parport_init();     /* parallel port */
+     KDEBUG(("clock_init()\n"));
+-    clock_init();       /* init clock */
++    SCTRACE(33); clock_init();       /* init clock */
+     KDEBUG(("after clock_init()\n"));
+ 
+ #if CONF_WITH_NOVA
+@@ -554,7 +564,7 @@ static void bios_init(void)
+ 
+ #if CONF_WITH_NLS
+     KDEBUG(("nls_init()\n"));
+-    nls_init();         /* init native language support */
++    SCTRACE(34); nls_init();         /* init native language support */
+     nls_set_lang(get_lang_name());
+ #endif
+ 
+@@ -564,17 +574,17 @@ static void bios_init(void)
+     exec_os = os_header.os_magic->gm_init;
+ 
+     KDEBUG(("osinit_before_xmaddalt()\n"));
+-    osinit_before_xmaddalt();   /* initialize BDOS (part 1) */
++    SCTRACE(35); osinit_before_xmaddalt();   /* initialize BDOS (part 1) */
+     KDEBUG(("after osinit_before_xmaddalt()\n"));
+ 
+ #if CONF_WITH_ALT_RAM
+     /* Add Alt-RAM to BDOS pool */
+     KDEBUG(("altram_init()\n"));
+-    altram_init();
++    SCTRACE(36); altram_init();
+ #endif
+ 
+     KDEBUG(("osinit_after_xmaddalt()\n"));
+-    osinit_after_xmaddalt();    /* initialize BDOS (part 2) */
++    SCTRACE(37); osinit_after_xmaddalt();    /* initialize BDOS (part 2) */
+     KDEBUG(("after osinit_after_xmaddalt()\n"));
+     boot_status |= DOS_AVAILABLE;   /* track progress */
+ 
+@@ -604,7 +614,7 @@ static void bios_init(void)
+ 
+     /* Boot hard disks */
+     KDEBUG(("disk_try_dmaboot()\n"));
+-    disk_try_dmaboot();
++    SCTRACE(38); disk_try_dmaboot();
+ 
+     KDEBUG(("bios_init() end\n"));
+ }
+diff --git a/bios/blkdev.c b/bios/blkdev.c
+index d180a42..3894d42 100644
+--- a/bios/blkdev.c
++++ b/bios/blkdev.c
+@@ -168,6 +168,12 @@ static void pun_info_setup(void)
+  *
+  */
+ 
++#ifdef MACHINE_SEGACD
++#define SCTRACE2(n) (*(volatile UWORD *)0xFF8020 = (UWORD)(0xE200u + (n)))
++#else
++#define SCTRACE2(n)
++#endif
++
+ static void blkdev_hdv_init(void)
+ {
+     /* Start with no drives. This matters for EmuTOS-RAM, because the system
+@@ -175,24 +181,29 @@ static void blkdev_hdv_init(void)
+     drvbits = 0;
+ 
+     /* Detect and initialize floppy drives */
++    SCTRACE2(1);
+     flop_hdv_init();
+ 
+     /*
+      * do bus initialisation, such as setting delay values
+      */
++    SCTRACE2(2);
+     bus_init();
+ 
+ #if CONF_WITH_SCSI_DRIVER
+     scsidriv_init();    /* detect all devices */
+ #endif
+ 
++    SCTRACE2(3);
+     disk_init_all();    /* Detect hard disk partitions */
+ 
+ #if CONF_WITH_XHDI
+     init_XHDI_drvmap(); /* remember drives that we control */
+ #endif
+ 
++    SCTRACE2(4);
+     pun_info_setup();
++    SCTRACE2(5);
+ }
+ 
+ /*

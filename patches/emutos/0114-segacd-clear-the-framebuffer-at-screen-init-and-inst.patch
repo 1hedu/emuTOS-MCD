@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 09:55:47 +0000
+Subject: [PATCH 114/184] segacd: clear the framebuffer at screen init, and
+ instrument the clear
+
+The Mode 1 framebuffer comes up holding power-on contents and the
+servant faithfully converts and displays them. A CD boot has never
+shown that because Sega's firmware and then boot/sp.S walk all over
+PRG-RAM before EmuTOS is handed it, so the buffer is clean by
+accident. Depending on RAM being clean is not a property to keep by
+luck, so screen_init_address zeroes it.
+
+It does not fix the picture, and the instrument that was supposed to
+say why cannot see that far back -- see the parent commit.
+---
+ bios/screen.c     | 24 ++++++++++++++++++++++++
+ vdi/vdi_control.c | 16 ++++++++++++++++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/bios/screen.c b/bios/screen.c
+index fa19119..b4cdde1 100644
+--- a/bios/screen.c
++++ b/bios/screen.c
+@@ -19,6 +19,7 @@
+ #include "machine.h"
+ #include "has.h"
+ #include "screen.h"
++#include "string.h"
+ #include "videl.h"
+ #include "asm.h"
+ #include "tosvars.h"
+@@ -660,6 +661,29 @@ void screen_init_address(void)
+     /* set new v_bas_ad */
+     v_bas_ad = screen_start;
+     KDEBUG(("v_bas_ad = %p, vram_size = %lu\n", v_bas_ad, vram_size));
++
++#ifdef MACHINE_SEGACD
++    /* Clear it, because nothing else does.
++     *
++     * vdi_v_clrwk() is the function that would, and it is never called
++     * on this machine -- measured on both boot paths. A CD boot has got
++     * away with that since the beginning because Sega's firmware and
++     * then boot/sp.S walk all over PRG-RAM before EmuTOS is given it,
++     * so the buffer is clean by accident. A Mode 1 boot touches none of
++     * that memory and the framebuffer comes up holding whatever was in
++     * the chips at power-on, which the servant then faithfully converts
++     * and displays.
++     *
++     * Depending on RAM being clean is not a property to keep by luck. */
++    {   /* calc_vram_size(), not vram_size: with CONF_VRAM_ADDRESS set
++         * the latter is deliberately 0 for "unspecified", so guarding
++         * on it skips the clear on exactly the machine that needs it. */
++        LONG n = calc_vram_size();
++        *(volatile UWORD *)0xFF802E = (UWORD)(0xD000u | (UWORD)(n >> 4));
++        if (n > 0)
++            memset(screen_start, 0, n);
++    }
++#endif
+     /* correct physical address */
+     setphys(screen_start);
+ }
+diff --git a/vdi/vdi_control.c b/vdi/vdi_control.c
+index e01ca09..f2ce5b0 100644
+--- a/vdi/vdi_control.c
++++ b/vdi/vdi_control.c
+@@ -615,7 +615,23 @@ void vdi_v_clrwk(Vwk * vwk)
+     {
+         fill = 0x00;
+     }
++#ifdef MACHINE_SEGACD
++    /* Which buffer this actually clears, and how much of it.
++     *
++     * On a Mode 1 boot the top 12 KB of the framebuffer keeps its
++     * power-on contents while the bottom is zero, and a CD boot hides
++     * the same thing because the firmware and the SP have already
++     * walked that memory. Either this never runs, or it runs against a
++     * different v_bas_ad than the one published to the servant every
++     * VBL. High nibble B so the servant can pick it out of a register
++     * the boot traces also use. */
++    *(volatile UWORD *)0xFF802E = (UWORD)(0xB000u
++                    | (UWORD)((((ULONG)v_bas_ad) >> 8) & 0x0FFF));
++#endif
+     memset(v_bas_ad, fill, size);
++#ifdef MACHINE_SEGACD
++    *(volatile UWORD *)0xFF802E = (UWORD)(0xC000u | (UWORD)(size >> 4));
++#endif
+ }
+ 
+ 

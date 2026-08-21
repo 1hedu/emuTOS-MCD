@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 00:41:17 +0000
+Subject: [PATCH 068/184] segacd: pause like a game does -- after every fill,
+ and before every retry
+
+Lunar's sub program, disassembled from the user's own dump, touches
+exactly one hardware register directly ($FF8004 destination select)
+and drives everything else through the BIOS. Its read engine ends
+every run -- success or failure -- with CDC_STOP + ROM_PAUSEON, and
+its stall recovery is stop, pause, wait for the BIOS to settle,
+reissue, up to fifteen times.
+
+So the pause after each fill returns as the default rather than an
+experiment arm (three sources now agree: Lunar always pauses, BlastEm
+shows pause is a hover with instant resume, the hardware trace shows
+the drive resting in state 4), and the retry path now pauses and waits
+for state 4 before reissuing the read instead of firing command 3 at a
+drive still in flight. $34E6's ready list -- 1, 4, C -- was saying
+this all along: a read starts from a pause.
+---
+ bios/segacd.c | 34 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 2d9b9da..6c993ee 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -157,7 +157,15 @@ UWORD segacd_bootflags;         /* the raw button word the servant sent.
+  * CD-R left, choosing between them blind is not a decision I get to
+  * make on someone else's disc. */
+ static ULONG cd_lead = 20UL;
+-static UBYTE cd_hold;           /* send command 6 after each fill */
++static UBYTE cd_hold = 1;       /* pause the drive after each fill.
++                                 * Default on: Lunar's sub program ends
++                                 * every read run, successful or not,
++                                 * with CDC_STOP + ROM_PAUSEON -- and
++                                 * pause is a hover, not a stop, so the
++                                 * next read starts instantly. Removing
++                                 * this on the strength of the trace was
++                                 * wrong; the pause simply happens
++                                 * outside the traced window. */
+ /* When to give the decoder its second control pair.
+  *
+  * The BIOS writes $A0/$F8 when it resets the decoder and $A7/$F0 only
+@@ -1576,8 +1584,30 @@ static BOOL cd_fetch(ULONG lba)
+             cd_ring_reset();
+             cdc_ints = 0;
+             cdc_hit = 0;
+-            if (attempt == 0)
++            if (attempt == 0) {
+                 cdc_setup();
++            } else {
++                /* Pause before every reissue. This is GameArts' stall
++                 * recovery, verbatim: CDC_STOP, ROM_PAUSEON, wait for
++                 * the BIOS to settle, and only then a fresh ROM_READ --
++                 * up to fifteen times. A pause makes the drive hover on
++                 * its current track, tracking re-locked, and a read
++                 * commanded from that hover starts clean; a read
++                 * commanded at a drive still in flight is a coin toss,
++                 * and this driver had been tossing it three times and
++                 * calling the result a timeout. Wait for state 4
++                 * bounded, because $34E6's ready list -- 1, 4, C --
++                 * describes exactly what a read may start from. */
++                UBYTE base = cdd_irqs;
++
++                cdc_stop();
++                cdd_ask_ready();
++                while ((UBYTE)(cdd_irqs - base) < 40 && cd_time_left()) {
++                    if (cdd_valid && cdd_stat[0] == 0x4)
++                        break;
++                }
++                cdc_setup();
++            }
+             /* No long-seek assist. The derivation of command $A stands
+              * -- it is CD geometry and it is written up in
+              * docs/cdd-bios-notes.md -- but the console does not use

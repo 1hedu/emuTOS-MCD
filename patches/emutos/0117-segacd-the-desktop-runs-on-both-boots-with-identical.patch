@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 10:19:43 +0000
+Subject: [PATCH 117/184] segacd: the desktop runs on both boots, with
+ identical screen geometry
+
+deskmain() is entered on a Mode 1 boot as readily as on a CD boot --
+sticky bit, so it cannot be missed the way a sampler misses things.
+And the line-A geometry the VDI draws through is the same on both: 4
+planes, 160 bytes per line.
+
+So the desktop is not failing to start and it is not drawing through a
+different description of the screen. It runs, it draws, and on one
+boot the result is a desktop and on the other it is confetti.
+---
+ bios/segacd.c   | 11 +++++++++--
+ desk/deskmain.c |  7 +++++++
+ 2 files changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 15b140e..0eb13db 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -25,6 +25,7 @@
+ #ifdef MACHINE_SEGACD
+ 
+ #include "segacd.h"
++#include "lineavars.h"
+ #include "screen.h"
+ #include "vectors.h"
+ #include "tosvars.h"
+@@ -850,8 +851,14 @@ void segacd_int_4_c(void)
+      * its pool ends. The screen is reserved 32 KB below phystop, so a
+      * memtop of 058000 means the pool stops exactly at the screen and
+      * something is writing past its own ceiling. */
+-    *(volatile UWORD *)0xFF802C = (UWORD)(((((ULONG)memtop) >> 12) << 8)
+-                                        | cd_events);
++    /* The geometry the VDI draws through, in the high nibble and byte:
++     * planes and bytes-per-line. The desktop runs on both boots -- the
++     * sticky bits say so -- and draws correctly on one, so what is left
++     * between the AES and the pixels is the line-A description of the
++     * screen. memtop and phystop have both been read and matched. */
++    *(volatile UWORD *)0xFF802C = (UWORD)(((UWORD)v_planes << 12)
++                                        | ((UWORD)v_lin_wr << 4)
++                                        | (cd_events & 0x0F));
+ 
+     /* Wait for DRS to go *low*. It reads as "a status packet is on its
+      * way in", so the BIOS spins until the incoming transfer is over
+diff --git a/desk/deskmain.c b/desk/deskmain.c
+index 05a4640..a9f1015 100644
+--- a/desk/deskmain.c
++++ b/desk/deskmain.c
+@@ -1935,8 +1935,15 @@ void static close_desktop_windows(void)
+ /*
+  *  Run desktop
+  */
++#ifdef MACHINE_SEGACD
++void segacd_event(UWORD bit);   /* bios/segacd.h is not on the desk path */
++#endif
++
+ BOOL deskmain(void)
+ {
++#ifdef MACHINE_SEGACD
++    segacd_event(4);            /* the desktop actually ran */
++#endif
+     WORD ii, done, flags;
+     UWORD ev_which, mx, my, button, kstate, kret, bret;
+     BOOL rc;

@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 09:10:19 +0000
+Subject: [PATCH 043/184] segacd: report both CDD checksums instead of guessing
+ between them
+
+Every packet failing while the drive plainly answers has exactly two
+explanations: the arithmetic disagrees, or the packet is stale. I have
+guessed between them three times and been wrong three times, at the
+cost of a disc each.
+
+So the status line now carries the checksum we computed and the
+checksum the packet arrived with, side by side. A constant difference
+is an arithmetic bug; a wandering one is a timing bug. One glance
+instead of another guess.
+---
+ bios/segacd.c | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 00499f9..adfeda7 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -130,6 +130,8 @@ static UBYTE cdd_stat[10];
+ static ULONG cdd_rawbuf[3];     /* aligned: the read below is long-wide */
+ #define cdd_raw ((UBYTE *)cdd_rawbuf)
+ static UBYTE cdd_valid;         /* last packet checksummed */
++static UBYTE cdd_want_ck;       /* checksum we computed over the packet */
++static UBYTE cdd_got_ck;        /* checksum the packet carried */
+ static UBYTE cdd_score;         /* valid packets in the last 16, latched */
+ static UBYTE cdd_count, cdd_good;
+ static UBYTE cdd_tick;
+@@ -344,7 +346,9 @@ static void cdd_poll(void)
+         cdd_stat[i] = (UBYTE)(cdd_raw[i] & 0x0F);
+     for (i = 0; i < 9; i++)
+         sum = (UBYTE)(sum + cdd_stat[i]);
+-    cdd_valid = (UBYTE)((((~sum) & 0x0F) == cdd_stat[9]) ? 1 : 0);
++    cdd_want_ck = (UBYTE)((~sum) & 0x0F);       /* what we computed */
++    cdd_got_ck  = cdd_stat[9];                  /* what arrived */
++    cdd_valid = (UBYTE)((cdd_want_ck == cdd_got_ck) ? 1 : 0);
+ 
+     /* The only evidence that a command arrived: the drive naming the
+      * sub-command it was asked for. Checked on every packet, because
+@@ -714,9 +718,13 @@ void segacd_int_2_c(void)
+      * and then the one reading that says whether it was ever asked:
+      * DTS and DRS live in the low two bits, the same two latched in
+      * the high two. Minutes lost its place to that, and deserved to. */
+-    *(volatile UWORD *)0xFF8028 = (UWORD)(((UWORD)cdd_stat[0] << 12)
+-        | ((UWORD)cdd_stat[1] << 8)
+-        | ((UWORD)cdd_stat[8] << 4)
++    /* Both checksums, side by side. If they differ by the same amount
++     * every time the arithmetic is wrong; if they wander, the packet is
++     * arriving stale or torn. Guessing between those two has now cost
++     * three discs, and one glance settles it. */
++    *(volatile UWORD *)0xFF8028 = (UWORD)(((UWORD)cdd_stat[1] << 12)
++        | ((UWORD)cdd_want_ck << 8)
++        | ((UWORD)cdd_got_ck << 4)
+         |  (UWORD)(cdd_ok ? 1 : 0));
+ 
+     /* Sound telemetry, packed into the spare bits of the drive status

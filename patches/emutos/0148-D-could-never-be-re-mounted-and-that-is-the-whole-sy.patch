@@ -1,0 +1,158 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 10:12:19 +0000
+Subject: [PATCH 148/184] D: could never be re-mounted, and that is the whole
+ symptom
+
+"Impossible to open D: on boot, no matter how many retries; works after
+the diagnostic's third round." Not the wake, not the dead-drive latch,
+not the decoder. The mount.
+
+blkdev_getbpb() runs once, during the boot probe. If the disc is not
+readable at that moment -- and it is not, because nothing has woken the
+drive that early -- bdev->bpb.recsiz stays zero, and blkdev_rwabs()
+answers ESECNF on sight for every logical access afterwards:
+
+    if (blkdev[dev].bpb.recsiz == 0)
+        return ESECNF;
+
+Nothing below that line runs again. The drive can wake, the decoder can
+lock, the disc can be perfectly readable, and D: still refuses -- and
+refuses identically however many times the critical-error alert is
+answered with Retry, because the retry re-enters at the same test.
+Getbpb is only re-run when a media change is reported, and
+segacd_cd_ioctl() returned MEDIANOCHANGE unconditionally on the
+grounds that the tray cannot be opened with the power on. True, and
+beside the point: "the medium changed" is also how a driver asks for a
+volume to be logged again.
+
+CDTEST calls bios_getbpb(3) as the first thing in every round. That is
+the one call in the system that re-attempts the mount, and it is why
+round 3 "unlocks" the drive.
+
+So: until one block has come off this disc, report MEDIACHANGE. After
+that the answer is no forever, which is true and self-limiting;
+disk_mediach() will not ask more than twice a second in any case.
+
+Two others on the same failure path:
+
+The cool-down bought an attempt and then crippled it. cd_deadrun was
+left one short of the threshold, so the attempt ran on the short leash
+cd_read_block reserves for a drive that has just failed, got one try
+instead of two, and re-latched the moment it did not work. Ten seconds
+of patience spent on an attempt weaker than a normal one. It gets a
+whole fresh run now; three more failures still latch it.
+
+And the bring-up wake goes back to the loader's twenty seconds. Cutting
+it to 300 frames was justified with "a visit costs about 174 ticks",
+which came from the gap between two diagnostic rounds only one of which
+ran DRV_INIT. That was not a measurement of DRV_INIT and should not
+have been used as one.
+---
+ bios/scdapi.h |  2 +-
+ bios/segacd.c | 64 +++++++++++++++++++++++++++++++++++++++++++++------
+ 2 files changed, 58 insertions(+), 8 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 5ed00e1..6916684 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  16
++#define SCD_VERSION  17
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 61a1021..911bcaa 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3068,9 +3068,17 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+              * Put back afterwards, because a read that genuinely needs
+              * the drive spun up from cold is a different question from
+              * a boot probe. */
+-            segacd_bios_initwait = 300UL;
++            /* The loader's own budget for this call, and no less.
++             *
++             * A previous version cut it to 300 frames on the grounds
++             * that a firmware visit costs about 174 of the diagnostic's
++             * ticks. That number came from the gap between two rounds,
++             * only one of which ran DRV_INIT, so it was not a
++             * measurement of DRV_INIT at all. boot/m1emu.S allows
++             * twenty seconds for exactly this call and the drive
++             * answers inside it on every boot; there is no honest
++             * reading that says less will do. */
+             cd_woke = (UBYTE)(segacd_bios_read(0UL, 0) == 0 ? 1 : 2);
+-            segacd_bios_initwait = 1200UL;
+         }
+     }
+ 
+@@ -3253,9 +3261,18 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+     if (cd_dead) {
+         if (hz_200 - cd_deadstamp < CD_DEAD_COOLDOWN)
+             return EREADF;      /* answer immediately, as it has been */
+-        cd_dead = 0;            /* one more try, and one failure from
+-                                 * being right back where it was */
+-        cd_deadrun = CD_DEADRUN - 1;
++        cd_dead = 0;
++        /* A whole fresh run, not one crippled try.
++         *
++         * This used to leave cd_deadrun one short of the threshold, so
++         * the attempt that the cool-down had just bought was taken on
++         * the short leash cd_read_block reserves for a drive that has
++         * just failed, with one try instead of two, and re-latched the
++         * moment it did not work. Ten seconds of patience spent on an
++         * attempt deliberately weaker than a normal one. If the drive
++         * is genuinely dead it takes three more failures to say so
++         * again, which is what the threshold is for. */
++        cd_deadrun = 0;
+     }
+ 
+     while (count--) {
+@@ -3769,8 +3786,41 @@ LONG segacd_cd_ioctl(WORD op, void *arg)
+         return E_OK;
+     case GET_MEDIACHANGE:
+         /* The tray cannot be opened without cutting power to the sub,
+-         * which ends EmuTOS along with the question. */
+-        return MEDIANOCHANGE;
++         * so this never reports a real disc swap. What it does report
++         * is a volume that has never been logged, and that is not the
++         * same question.
++         *
++         * blkdev_getbpb() runs once, during the boot probe. If the disc
++         * is not readable at that moment -- and on this machine it is
++         * not, because nothing has woken the drive yet -- then
++         * bdev->bpb.recsiz stays zero, and blkdev_rwabs() answers
++         * ESECNF on sight for every logical access afterwards:
++         *
++         *   if (blkdev[dev].bpb.recsiz == 0)
++         *       return ESECNF;
++         *
++         * Nothing below that line ever runs again. The drive can wake
++         * up, the decoder can lock, the disc can be perfectly readable,
++         * and D: still refuses -- and refuses identically however many
++         * times the critical-error alert is answered with Retry,
++         * because the retry re-enters at the same test. Getbpb is only
++         * re-run when a media change is reported, and this returned
++         * MEDIANOCHANGE unconditionally.
++         *
++         * That is the whole of "impossible to open D: on boot, and it
++         * works after the diagnostic": CDTEST calls Getbpb directly,
++         * which is the one thing in the system that re-attempts the
++         * mount. The wake, the latch and the decoder were all innocent
++         * of this particular symptom.
++         *
++         * So: until one block has come off this disc, say the medium
++         * changed, and let GEMDOS try to log the volume again. Once a
++         * block has been delivered the answer is no forever, which is
++         * both true and self-limiting. disk_mediach() will not ask more
++         * than twice a second. */
++        if (cd_dtest & 2)
++            return MEDIANOCHANGE;
++        return MEDIACHANGE;
+     }
+     return ERR;
+ }

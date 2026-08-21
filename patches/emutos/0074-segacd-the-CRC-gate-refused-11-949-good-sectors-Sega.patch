@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 07:24:09 +0000
+Subject: [PATCH 074/184] segacd: the CRC gate refused 11,949 good sectors;
+ Sega never checks it
+
+The DOWN screen on hardware: refused 11949, wrong-sector 0, why 11.
+Every decoded sector of a disc the console's own loader reads
+perfectly, refused by the STAT0 gate; nothing left to transfer; both
+attempts of every fetch timing out. The gate was mine, added on
+reasoning, and the reasoning is now checked against the silicon's
+handler: CDCSTAT at $1D28 tests only whether the ring has an entry,
+CDCREAD at $1D52 tests nothing further, and the level-5 coroutine
+appends every sector unconditionally. No layer of Sega's read path
+consults STAT0. The platform's validity check is the post-transfer
+header compare, which this driver performs since the audit -- and
+which hardware showed clean (wrong-sector 0) even while the gate was
+starving it.
+
+The flag is still counted, as telemetry only: a bit that never sets
+under our configuration is worth knowing about. It decides nothing.
+
+Also found at $1D5C while reading the proof: the BIOS masks to IPL 5
+around its own CDC address-register writes -- the register race fixed
+here two builds ago, in Sega's code all along.
+
+Co-authored-by: the user's transcription of three numbers off a CRT
+---
+ bios/bios.c   |  2 +-
+ bios/segacd.c | 29 +++++++++++++----------------
+ 2 files changed, 14 insertions(+), 17 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 5517e99..af04140 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1111,7 +1111,7 @@ void biosmain(void)
+                             &bad, &wrong);
+             cprintf(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+                     state, seeks, hits, errs, why);
+-            cprintf(" refused %u  wrong-sector %u\r\n\r\n", bad, wrong);
++            cprintf(" flagged %u  wrong-sector %u\r\n\r\n", bad, wrong);
+ 
+             /* Long enough to read a round before the next scrolls it
+              * away, and long enough that the drive is not being flogged
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 916fdbb..fd34d42 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -914,10 +914,18 @@ void segacd_int_5_c(void)
+      * round to the transfer, PT has moved on to later sectors. */
+     cdc_pt_last = (UWORD)(((UWORD)pth << 8) | ptl);
+ 
+-    if (!cdc_altctrl && !(cdc_stat4[0] & 0x80)) {
+-        cd_badhdr++;                    /* decoded, but damaged */
+-        return;
+-    }
++    /* STAT0 bit 7 is counted, never obeyed. A gate on it refused
++     * 11,949 consecutive sectors on hardware -- every sector of a disc
++     * the console's own loader reads perfectly -- because the flag is
++     * one Sega never consults: CDCSTAT at $1D28 tests only whether the
++     * ring has an entry, CDCREAD at $1D52 tests nothing else, and the
++     * level-5 coroutine appends unconditionally. The platform's
++     * validity check is the header compare after the transfer, which
++     * this driver now performs. The count stays because a flag that
++     * never sets under our configuration is worth knowing about; it
++     * decides nothing. */
++    if (!(cdc_stat4[0] & 0x80))
++        cd_badhdr++;
+ 
+     if (!cdc_hit && h0 == cdc_want[0] && h1 == cdc_want[1]
+                  && h2 == cdc_want[2]) {
+@@ -928,18 +936,7 @@ void segacd_int_5_c(void)
+     /* Note it in the ring, whether or not anybody asked for it. Cheap:
+      * a couple of multiplies and three stores, against the alternative
+      * of a reader trying to be awake at the right moment. */
+-    /* Only a sector the decoder itself vouches for may be latched or
+-     * ring-inserted. STAT0 bit 7 is CRCOK: the mode-1 check passed
+-     * after correction. This driver read STAT0 every sector from the
+-     * first day -- reading STAT3 is what re-arms the interrupt -- and
+-     * never once looked at the value, so a damaged sector entered the
+-     * ring with the same standing as a good one. On pressed discs that
+-     * is rare; on the hundredth CD-R through a 1992 lens it is
+-     * routine. Gated only when the correction pair is in force: with
+-     * the reset-time pair alone (B held) the flag never sets and the
+-     * gate would refuse everything.
+-     *
+-     * Only a header that could exist may enter the ring. A console
++    /* Only a header that could exist may enter the ring. A console
+      * once reported the head at 01:80:00 -- eighty is not a second --
+      * and a poisoned ring is worse than an empty one: a garbage entry
+      * that happens to equal the wanted LBA delivers the wrong sector

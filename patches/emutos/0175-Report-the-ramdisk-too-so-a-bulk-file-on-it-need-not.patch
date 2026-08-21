@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 19 Aug 2026 19:14:14 +0000
+Subject: [PATCH 175/184] Report the ramdisk too, so a bulk file on it need not
+ be copied
+
+There is 112KB of PRG RAM between phystop and the timeshare's scratch,
+and the C: ramdisk is at the bottom of it. A disc can keep C: small and
+load a payload's .MDD into what is left. A cartridge cannot -- C: is the
+only drive it has -- and 52KB of file plus 52KB of copy does not fit in
+112KB alongside anything else.
+
+So SCD_BULK_INFO now fills four longs instead of two: the arena, and
+then the ramdisk's own address and length. A loader that finds its file
+already inside the ramdisk hands that address over and copies nothing.
+---
+ bios/scdapi.h | 15 +++++++++++----
+ bios/segacd.c | 19 ++++++++++++++-----
+ 2 files changed, 25 insertions(+), 9 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index ce66300..6a21622 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  32
++#define SCD_VERSION  33
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -170,12 +170,19 @@ struct scd_snap {
+ /* Bulk data: a lot of memory that EmuTOS will never allocate, for a
+  * payload that needs more than the 32000 bytes it is handed.
+  *
+- * INFO fills two longs at a -- byte address and length -- with whatever
+- * is left between the end of the ramdisk and the timeshare's scratch. A
+- * length of zero means the ramdisk fills the region and there is none.
++ * INFO fills four longs at a: the arena's byte address and length --
++ * whatever is left between the end of the ramdisk and the timeshare's
++ * scratch -- and then the ramdisk's own address and length. A zero
++ * arena length means the ramdisk fills the region and there is none.
+  * The caller writes the data there itself: it is ordinary memory on
+  * this side, and no handshake moves it.
+  *
++ * The ramdisk is reported because a payload's bulk file may be *on* it,
++ * and then there is nothing to copy: the bytes are already in the
++ * window, at an address the loader can find and hand over. That is the
++ * only way a 52KB file and a 52KB arena fit in a region that holds
++ * 112KB between them.
++ *
+  * BULK then tells the servant where it is, in a = the byte address and
+  * b = the length, so that the payload can be handed the window address
+  * rather than have to know the map. */
+diff --git a/bios/segacd.c b/bios/segacd.c
+index fe25d1f..2a038a7 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3779,8 +3779,10 @@ static void scd_snapshot(struct scd_snap *s)
+ void cart_swap_arm(void);       /* defined with cart_seq, further down */
+ static ULONG scd_payload(LONG op, LONG a, LONG b);
+ /* Tentative definitions: the real ones are down beside the ramdisk that
+- * decides them. */
+-static ULONG bulk_base, bulk_len;
++ * decides them. disk_base and disk_len are the ramdisk itself, reported
++ * for the same reason -- a payload's bulk file may be on it, and then
++ * there is nothing to copy. */
++static ULONG bulk_base, bulk_len, disk_base, disk_len;
+ 
+ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+ {
+@@ -3806,7 +3808,12 @@ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+         return scd_payload(op, a, b);
+     case SCD_BOOT_OVER: cd_boot_over(); break;
+     case SCD_BULK_INFO:
+-        if (a) { ((ULONG *)a)[0] = bulk_base; ((ULONG *)a)[1] = bulk_len; }
++        if (a) {
++            ((ULONG *)a)[0] = bulk_base;
++            ((ULONG *)a)[1] = bulk_len;
++            ((ULONG *)a)[2] = disk_base;
++            ((ULONG *)a)[3] = disk_len;
++        }
+         return bulk_len;
+     case SCD_EJECT:
+         cdd_cmd_on = 1;         /* our commander carries it, always */
+@@ -4508,7 +4515,7 @@ void segacd_floppy_init(void)
+     adisk_present = (ADISK_BASE[2] == 'E' && ADISK_BASE[3] == 'm'
+                   && ADISK_BASE[4] == 'u' && ADISK_BASE[5] == 'T');
+     adisk_sectors = 0;
+-    bulk_base = bulk_len = 0;
++    bulk_base = bulk_len = disk_base = disk_len = 0;
+     if (adisk_present) {
+         /* offset 19: total sectors, little-endian, as FAT has always
+          * had it. The image is a FAT12 one and never approaches the
+@@ -4518,7 +4525,9 @@ void segacd_floppy_init(void)
+         if (n == 0 || n > ADISK_MAX_SECTORS)
+             n = ADISK_MAX_SECTORS;
+         adisk_sectors = n;
+-        bulk_base = (ULONG)ADISK_BASE + (ULONG)n * SECTOR_SIZE;
++        disk_base = (ULONG)ADISK_BASE;
++        disk_len = (ULONG)n * SECTOR_SIZE;
++        bulk_base = disk_base + disk_len;
+         bulk_len = ADISK_TOP - bulk_base;
+         segacd_event(5);
+     }

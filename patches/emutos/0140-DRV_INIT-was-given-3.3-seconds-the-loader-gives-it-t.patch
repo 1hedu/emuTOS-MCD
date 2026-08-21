@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 08:28:05 +0000
+Subject: [PATCH 140/184] DRV_INIT was given 3.3 seconds; the loader gives it
+ twenty
+
+Round 1 with the I arm on came back stage 2 at state 8: DRV_INIT
+issued, the drive still in a no-information state when brd_wait_init
+stopped waiting at 200 frames. Round 2 with it off reached stage 3, so
+the read at least got issued. Read as a verdict on DRV_INIT that says
+it makes things worse; read as a stopwatch it may say nothing at all.
+
+DRV_INIT spins the disc up, reads the table of contents and then pauses
+about two seconds. boot/m1emu.S budgets twenty seconds for exactly this
+call and the drive answers inside it on every boot -- this gate allowed
+three and a third. State 8 is also the one the BIOS's own ROMREAD
+singles out as worth another go, which is what a call still in progress
+looks like.
+
+So: 1200 frames for DRV_INIT, and the watchdog above it at 1500.
+
+And the same shared-clock bug as cd_read_block's retry, one floor down:
+every stage tests _segacd_bios_frames against a threshold measured from
+the start of the visit, so a DRV_INIT that legitimately spent 1200
+frames would leave brd_stat's 200-frame test already true and report
+"no sector announced" without waiting at all. The counter is cleared
+when DRV_INIT succeeds.
+
+Also publish cdd_ok and nibble 1 of the status packet. Nibble 1 reads
+0x0F on every packet of every round, which is a drive with no table of
+contents answering "not available" to a question about the disc -- and
+it means cdd_poll() never counts a round trip, so cdd_ask_next() has
+never left cdd_confirm() and the probe rotation, disc length included,
+has never run once.
+---
+ bios/scdapi.h  | 14 +++++++++++++-
+ bios/segacd.c  |  2 ++
+ bios/segacd2.S | 28 ++++++++++++++++++++++++++--
+ 3 files changed, 41 insertions(+), 3 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 8af8164..471152f 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  8
++#define SCD_VERSION  9
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -106,6 +106,18 @@ struct scd_snap {
+     unsigned char  cddfirst;            /* 0xFF: no valid packet yet */
+     unsigned short cddftick;
+ 
++    /* Has the drive ever answered a question about the disc?
++     *
++     * cdd_poll() only counts a round trip when the reply echoes the
++     * sub-command it was asked for, and the console reports nibble 1 as
++     * 0x0F on every packet of every round -- which is a drive with no
++     * table of contents answering "not available" to a table-of-
++     * contents question. Until that changes, cdd_ask_next() never
++     * leaves cdd_confirm() and the whole probe rotation, disc length
++     * included, has never run. */
++    unsigned char  cddtoc;              /* cdd_ok: two different subs echoed */
++    unsigned char  cddsub;              /* the last nibble 1 seen */
++
+     /* The whole CD report block, verbatim.
+      *
+      * This is what the hardware status line renders, and the question
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 179da36..f626036 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3516,6 +3516,8 @@ static void scd_snapshot(struct scd_snap *s)
+     s->cddmask = cdd_statemask;
+     s->cddfirst = cdd_first;
+     s->cddftick = cdd_firsttick;
++    s->cddtoc = cdd_ok;
++    s->cddsub = cdd_stat[1];
+ 
+     for (i = 0; i < 32; i++)            /* the status line's own source */
+         s->rep[i] = CDREPORT[i];
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 2e3b54f..45aa3c1 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -310,7 +310,13 @@ bios_int2_watch:
+         or.w    d0,_segacd_bios_lost
+         ori.b   #0x30,0xFF8033
+         move.l  (sp)+,d0
+-        cmpi.l  #300,_segacd_bios_frames
++        // Above DRV_INIT's own budget, which is now 1200 frames and is
++        // cleared the moment it succeeds -- so this only ever fires on
++        // a call that has genuinely stopped returning. The cost of the
++        // rise is that such a call freezes the screen for 25 s instead
++        // of 5; the cost of not raising it was that no DRV_INIT could
++        // ever be allowed to finish.
++        cmpi.l  #1500,_segacd_bios_frames
+         bcs     1f
+         lea     0x7C000,a5              // abandoning: registers are ours
+         move.w  #5,32(a5)
+@@ -547,7 +553,18 @@ brd_own_done:
+         move.w  d0,50(a5)
+         jsr     0x5F22
+ brd_wait_init:
+-        cmpi.l  #200,_segacd_bios_frames
++        // Twenty seconds, not three and a third.
++        //
++        // DRV_INIT spins the disc up, reads the table of contents and
++        // then pauses about two seconds -- boot/m1emu.S budgets 20 s
++        // for exactly this call and the drive answers inside it every
++        // boot. This gate allowed 200 frames, and the console duly
++        // reported stage 2 at state 8: DRV_INIT issued, the drive still
++        // in a no-information state when we stopped waiting. State 8 is
++        // the one the BIOS's own ROMREAD singles out as worth another
++        // go, so "not finished yet" is the reading with the most behind
++        // it. Whether it is right is what this change asks.
++        cmpi.l  #1200,_segacd_bios_frames
+         bcc     brd_fail_init
+         move.w  #0x0081,d0              // CDB_STAT
+         move.w  d0,50(a5)
+@@ -586,6 +603,13 @@ brd_wait_init:
+         cmpi.w  #0x0010,d0              // playing, also fine
+         bne     brd_wait_init
+ brd_init_done:
++        // The read gets its own clock. Every stage below tests the same
++        // counter against a threshold measured from the start of the
++        // visit, so a DRV_INIT that legitimately spends 1200 frames
++        // would leave brd_stat's 200-frame test already true and report
++        // "no sector announced" without having waited at all. Same bug
++        // as cd_read_block's shared retry clock, one floor down.
++        clr.l   _segacd_bios_frames
+         move.b  #1,_bios_woken
+ brd_awake:
+ 

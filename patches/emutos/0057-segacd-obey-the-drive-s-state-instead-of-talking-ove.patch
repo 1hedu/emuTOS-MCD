@@ -1,0 +1,185 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 19:59:59 +0000
+Subject: [PATCH 057/184] segacd: obey the drive's state instead of talking
+ over it
+
+The table in docs/cdd-bios-notes.md says which of the sixteen states
+mean the drive has nothing to give -- 0, 6, 7, 8, D and F, the ones
+whose handlers call $1498 -- and which mean the disc itself changed
+under us: 5, B and E, which throw the table of contents away.
+
+A read now watches for those. Before this, a refusal and a slow drive
+were the same thing to the reader: six seconds of silence, three times
+over, reported as bad luck. A disc-change state wipes the ring and both
+caches, because everything in them would be fiction.
+
+Two guards, because this table was read rather than measured. Nothing
+is believed until the drive has had eight exchanges to answer the
+command just sent -- its status is otherwise whatever it was doing a
+moment ago, and 'stopped' from before the seek would abandon the read
+before it began. And a refusal has to hold for four status packets: if
+one state is mis-filed, acting on first sight turns a slow read into an
+instant failure, which is a worse bug than the one being fixed.
+
+Either way the state that refused is published. What the drive was
+actually saying when a read failed is the one number this stage has
+never had.
+---
+ bios/segacd.c | 97 ++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 96 insertions(+), 1 deletion(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 9a2b839..6deeea5 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -126,7 +126,10 @@ const UBYTE *segacd_physbase(void)
+ #define CDD_CMD_STAT    0x00
+ #define CDD_CMD_INFO    0x02
+ 
+-static UBYTE cdd_stat[10];
++/* Volatile: level 4 writes these and a foreground spin loop now reads
++ * them. Without it the compiler samples the state once before the loop
++ * and waits for ever on a copy. */
++static volatile UBYTE cdd_stat[10];
+ static ULONG cdd_rawbuf[3];     /* aligned: the read below is long-wide */
+ #define cdd_raw ((UBYTE *)cdd_rawbuf)
+ static UBYTE cdd_valid;         /* last packet checksummed */
+@@ -151,6 +154,9 @@ static UWORD cd_errors;         /* reads that gave up */
+ static UBYTE cd_quiet;          /* the read command has been withdrawn */
+ static LONG cd_budget;          /* spin left for the whole block read */
+ static volatile UBYTE cd_busy;  /* a foreground read owns the drive */
++static UBYTE cd_gone;           /* the drive said the disc changed */
++static UBYTE cd_badrun;         /* consecutive packets saying "nothing" */
++static UBYTE cd_badstate;       /* ...and the state that said it */
+ static UWORD cd_why;            /* nibble per attempt of the last
+                                  * failed fetch: 1 timed out, 2 the
+                                  * head was already past, 3 the
+@@ -1103,6 +1109,7 @@ static void cdr_report(void)
+      * BIOS dispatches sixteen ways on this byte at $140E and this
+      * driver has never once looked at it. */
+     CDREPORT[29] = (UWORD)(((UWORD)cdd_stat[0] << 8) | cdd_stat[1]);
++    CDREPORT[30] = (UWORD)(((UWORD)cd_gone << 8) | cd_badstate);
+     CDREPORT[0] = CDREPORT_MAGIC;
+ }
+ 
+@@ -1270,6 +1277,42 @@ static void cdr_step(void)
+ #define CD_STREAM_AHEAD 20UL
+ 
+ 
++#define CD_WAIT     0           /* the drive is working; keep waiting */
++#define CD_ABANDON  1           /* it has nothing; stop waiting, seek again */
++#define CD_GONE     2           /* the disc changed; everything cached is void */
++
++/* Read the drive's own account of itself, from the table in
++ * docs/cdd-bios-notes.md.
++ *
++ * Sega's handler for each of the sixteen states says which group it is
++ * in by whether it calls $1498, "there is no disc information". Six
++ * states do, and in those the drive is telling us it has nothing --
++ * waiting for a sector is waiting for something that is not coming.
++ * Three more throw the table of contents away, and in those everything
++ * this driver has cached is fiction.
++ *
++ * Until this existed a refusal and a slow drive were the same thing:
++ * six seconds of silence, three times over, reported as bad luck. */
++static UBYTE cd_state_action(void)
++{
++    switch (cdd_stat[0]) {
++    case 0x1:                   /* the mode variable goes to 3: reading */
++    case 0x2:                   /* head moving; position lost, disc known */
++    case 0x3:
++    case 0x4:
++    case 0x9:
++    case 0xA:                   /* head moving */
++    case 0xC:
++        return CD_WAIT;
++    case 0x5:                   /* $1476: wipes the TOC */
++    case 0xB:                   /* $1542: wipes the TOC and the position */
++    case 0xE:                   /* as 5 */
++        return CD_GONE;
++    default:                    /* 0, 6, 7, 8, D, F -- all publish nothing */
++        return CD_ABANDON;
++    }
++}
++
+ /* Get one CD sector into CDSECT, by seeking if it is not coming and
+  * then waiting for the ring to report it. */
+ static BOOL cd_fetch(ULONG lba)
+@@ -1277,6 +1320,7 @@ static BOOL cd_fetch(ULONG lba)
+     UBYTE start[3];
+     UWORD pt;
+     int attempt;
++    UBYTE settle, seen;
+     BOOL got = FALSE;
+ 
+     /* Take the drive. The VBL rotates a status question at the CDD
+@@ -1307,10 +1351,60 @@ static BOOL cd_fetch(ULONG lba)
+             cd_hits++;
+         }
+ 
++        settle = cdd_irqs;
++        seen = settle;
++        cd_badrun = 0;
+         while (cd_budget > 0) {
+             cd_budget--;
+             if (cd_ring_find(lba, &pt))
+                 goto collect;
++
++            /* Listen to the drive, but not until it has had a few
++             * exchanges to answer the command we just sent -- its
++             * status is whatever it was doing a moment ago, and
++             * "stopped" from before the seek would abandon the read
++             * before it began. Eight packets is about a tenth of a
++             * second. */
++            if ((UBYTE)(cdd_irqs - settle) >= 8 && cdd_irqs != seen) {
++                UBYTE act;
++
++                seen = cdd_irqs;        /* one verdict per status packet */
++                act = cd_state_action();
++
++                /* A refusal has to persist. This table was read off the
++                 * BIOS rather than measured, and if one state is
++                 * mis-filed then acting on first sight turns a slow
++                 * read into an instant failure -- a worse bug than the
++                 * one being fixed. Four packets is a twentieth of a
++                 * second and costs nothing when the reading is right.
++                 *
++                 * The state that did it is published either way, so a
++                 * console can name what the drive was actually saying
++                 * when a read failed. That number is the one thing this
++                 * whole stage has never had. */
++                if (act == CD_ABANDON) {
++                    if (++cd_badrun < 4)
++                        continue;
++                    cd_badstate = cdd_stat[0];
++                } else if (act == CD_WAIT) {
++                    cd_badrun = 0;
++                } else {
++                    cd_badstate = cdd_stat[0];
++                }
++
++                if (act == CD_GONE) {
++                    cd_ring_reset();
++                    cd_cache_base = 0xFFFFFFFFUL;
++                    cd_cache_have = 0;
++                    cd_cached = 0xFFFFFFFFUL;
++                    cd_streaming = 0;
++                    cd_gone = 1;
++                    goto done;
++                }
++                if (act == CD_ABANDON)
++                    break;
++            }
++
+             if (cdc_ints) {
+                 /* Sectors are arriving, so the drive has done as it was
+                  * told. Stop telling it: a queued command goes out on
+@@ -1339,6 +1433,7 @@ collect:
+         }
+     }
+ 
++done:
+     if (!got) {
+         cd_errors++;
+         cd_cached = 0xFFFFFFFFUL;

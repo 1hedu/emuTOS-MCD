@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 11:51:35 +0000
+Subject: [PATCH 051/184] segacd: drain the host register while waiting for end
+ of transfer
+
+CDCTRN's wait is 'move.w (a2),d0 / btst #7,(a3) / dbne' -- it reads a
+word from the host data register on every poll. Mine only looked. If
+the decoder still has bytes queued, and whether it does depends on how
+the byte count is counted, end of transfer never comes to a reader that
+has stopped reading: the sector arrives half fetched and the read times
+out. Emulators are lenient about it and silicon reported V80.
+
+A retry now sets the decoder up again as well as the drive, which is
+what the BIOS's retry amounts to: 'bcs $4124' re-issues ROMREAD from
+the top and that reaches CDCSTART, which reinitialises everything.
+
+The far sector is read first now. On hardware the near one failed and
+the far one verified, and 'the first read fails' and 'sector 16 fails'
+are different bugs the old order could not separate.
+---
+ bios/segacd.c | 35 +++++++++++++++++++++++++++++++++--
+ 1 file changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 3a6922e..c93c4ac 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -529,6 +529,7 @@ void segacd_int_4_c(void)
+ #define CDC_AR      ((volatile UBYTE *)0xFF8005)
+ #define CDC_DATA    ((volatile UBYTE *)0xFF8007)
+ #define CDC_DATA_RD ((const volatile UBYTE *)0xFF8007)
++#define CDC_HOST    ((const volatile UWORD *)0xFF8008)
+ #define CDC_EDT     0x80
+ #define CDC_DSR     0x40
+ #define CDC_DEST_SUB 0x03
+@@ -557,6 +558,10 @@ static UWORD cdc_pt_last;       /* ...and where the newest one is, matched
+ static UBYTE cdc_hit;           /* it went by, and cdc_pt says where */
+ static UBYTE cdc_hdr[4];        /* header that arrived with the data */
+ static UBYTE cdc_fail;          /* why the read did not finish */
++static UWORD cdc_spill;         /* words drained while waiting for the end
++                                 * of a transfer; kept in a variable so the
++                                 * compiler cannot decide the read was
++                                 * pointless and remove it */
+ 
+ /* $21C8, then $21F2, then the control pair $2132 writes for the mode we
+  * want. CDCSTART reaches $2132 only when the two mode bits in its flag
+@@ -673,9 +678,23 @@ static BOOL cdc_grab(void)
+         segacd_cdc_read((UWORD *)cdc_hdr, (UWORD *)CDSECT,
+                         CDC_DATA_BYTES / 16 - 1);
+ 
+-        for (n = 0; n < 2048; n++)
++        /* Wait for end-of-transfer -- and keep reading the host data
++         * register while waiting, which is the part I left out.
++         * CDCTRN's loop is `move.w (a2),d0 / btst #7,(a3) / dbne`, so
++         * the BIOS drains a word per poll rather than only looking.
++         *
++         * That is not decoration. If the decoder still has bytes queued
++         * -- and whether it does depends on how the byte count is
++         * counted, which is exactly the sort of thing an emulator is
++         * lenient about and silicon is not -- then end-of-transfer
++         * never comes to a reader that has stopped reading, and the
++         * transfer hangs until the timeout with the sector half
++         * fetched. Drain, as Sega does. */
++        for (n = 0; n < 2048; n++) {
+             if (*CDC_MODE_RD & CDC_EDT)
+                 break;
++            cdc_spill = *CDC_HOST;
++        }
+         if (n < 2048)
+             ok = TRUE;
+         else
+@@ -718,7 +737,13 @@ static BOOL cdc_grab(void)
+  * line. Must stay in step with tools/build-iso.sh. */
+ #define CDR_SLOTS 2
+ #define CDR_PATTERN_LBA 1400UL
+-static const ULONG cdr_lbas[CDR_SLOTS] = { 16UL, CDR_PATTERN_LBA };
++
++/* The far sector goes first now. On hardware the near one failed and
++ * the far one passed, and "the first read fails" and "sector 16 fails"
++ * are different bugs that the old order could not tell apart. Swapped,
++ * both answers are legible from the verdict alone: 81 is the first read
++ * failing whatever it is, 82 is sector 16 failing wherever it sits. */
++static const ULONG cdr_lbas[CDR_SLOTS] = { CDR_PATTERN_LBA, 16UL };
+ 
+ static UBYTE cdr_state;
+ static UBYTE cdr_tried;
+@@ -858,6 +883,12 @@ static void cdr_reissue(void)
+     cdc_ints = 0;
+     cdr_seen = 0;
+     cdr_wait = 0;
++    /* Set the decoder up again, not just the drive. The BIOS's retry is
++     * `bcs $4124`, which re-issues ROMREAD from the top -- and that
++     * reaches CDCSTART, which runs the whole initialisation. A retry
++     * that leaves the decoder in whatever state the failure left it is
++     * not the same thing and has no reason to go better. */
++    cdc_setup();
+     cdd_ask_read(start);
+     cdr_state = CDR_COMMAND;
+ }

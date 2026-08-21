@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 06:16:33 +0000
+Subject: [PATCH 033/184] segacd: follow the BIOS exchange exactly, including
+ the order
+
+Reading two routines out of the BIOS was not the same as reading the
+code that calls them, and the caller is where the rest of it was.
+
+Three corrections, one of them mine from the previous commit:
+
+The wait is for DRS to go *low*, not high. `btst #1,$FF8037 / dbeq`
+exits when the condition is true, and btst sets Z when the bit is
+zero, so the BIOS spins until the incoming packet has finished
+arriving. At a glance it reads as the opposite, and I read it at a
+glance.
+
+The acknowledgement comes before the command is loaded, not after.
+The BIOS reads the status, writes #4 to the control register, and only
+then fills the command registers.
+
+And it writes a command on every exchange -- 75 times a second, a NOP
+when it has nothing to ask. This driver wrote one about twice a second
+and left seventy-odd exchanges untouched, which is not how a link
+clocked by both ends behaves.
+
+The checksum convention is confirmed against the same code: the BIOS
+sums all ten status bytes, inverts, masks to a nibble and requires
+zero, which is the same test written the other way round.
+---
+ bios/segacd.c | 68 +++++++++++++++++++++++++++++++--------------------
+ 1 file changed, 42 insertions(+), 26 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 3f2aee2..96dbfb0 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -189,14 +189,13 @@ void segacd_cdd_init(void)
+  * the console's BIOS ROM, but the boot process decompresses it into
+  * PRG-RAM $0000-$5FFF -- exactly the region the audit payload already
+  * snapshots -- so Sega's own CDD routine can simply be read. It does
+- * three things per exchange, and we were doing one of them:
++ * four things per exchange, and we were doing one of them:
+  *
+- *     btst  #1,$FF8037     wait for DRS: the status packet is ready
+- *     dbeq  d0,...         (bounded, and it gives up)
+- *     lea   $FF8038,a1     read ten status bytes
+- *     move.l (a1)+,(a0)+   as long, long, word
+- *     lea   $FF8042,a1     write ten command bytes, same shape
+- *     move.b #4,$FF8037    <- hand it over and re-arm the link
++ *     btst  #1,$FF8037     spin until DRS goes low: the incoming
++ *     dbeq  d0,...         packet has finished arriving
++ *     lea   $FF8038,a1     read ten status bytes, long/long/word
++ *     move.b #4,$FF8037    acknowledge: HOCK stays, DTS and DRS clear
++ *     lea   $FF8042,a1     only now load the ten command bytes
+  *
+  * That last write is the whole answer. Four discs went looking for a
+  * trigger among writes to the command registers, and there isn't one:
+@@ -207,10 +206,8 @@ void segacd_cdd_init(void)
+  * reporting its own status and answering "invalid" to questions it was
+  * never asked. Every symptom, exactly.
+  *
+- * The waiting was wrong too, and backwards: DRS set does not mean the
+- * bus is busy, it means the packet has arrived. The previous driver
+- * refused to send a command in precisely the moment the BIOS chooses
+- * to send one. */
++ * The acknowledgement also comes *before* the command is loaded, not
++ * after it. Order matters here in a way it does not in a mailbox. */
+ static void cdd_command(const UBYTE *nib)       /* nine nibbles */
+ {
+     volatile ULONG *l = (volatile ULONG *)0xFF8042;
+@@ -352,16 +349,21 @@ void segacd_int_4_c(void)
+ 
+     cdd_irqs++;
+ 
+-    /* Wait for the packet rather than assuming the interrupt means it
+-     * has fully landed: the gate array raises level 4 before the last
+-     * nibbles are in. Bounded, because a drive that stops talking must
+-     * not take the machine with it. */
++    /* Wait for DRS to go *low*. It reads as "a status packet is on its
++     * way in", so the BIOS spins until the incoming transfer is over
++     * and only then reads the registers -- bounded, and it gives up
++     * rather than hang.
++     *
++     * Getting the direction of this test wrong cost a disc: dbeq exits
++     * when its condition is true, btst sets Z when the bit is *zero*,
++     * so `btst #1,$FF8037 / dbeq` waits for the bit to clear. Read at
++     * a glance it looks like the opposite, and I read it at a glance. */
+     {
+         UWORD n;
+         for (n = 0; n < 512; n++) {
+             ctrl = *CDD_CTRL_RD;
+             cdd_ctrl_ever |= (UBYTE)(ctrl & (CDD_DTS | CDD_DRS));
+-            if (ctrl & CDD_DRS)
++            if (!(ctrl & CDD_DRS))
+                 break;
+         }
+     }
+@@ -369,17 +371,31 @@ void segacd_int_4_c(void)
+ 
+     cdd_poll();
+ 
+-    if (cdd_pending) {
+-        cdd_pending = 0;
+-        cdd_command(cdd_queued);
+-        if (cdd_sent < 0xFF)
+-            cdd_sent++;
+-    }
+-
+-    /* Hand the exchange over: HOCK stays set, DTS and DRS go to zero.
+-     * This is the step the driver was missing entirely. */
++    /* Acknowledge the exchange before sending anything: HOCK stays
++     * set, DTS and DRS go to zero. The BIOS does this the moment it
++     * has the status in hand and only then loads the next command,
++     * which is the ordering this driver had inside out. */
+     *CDD_CTRL_B = CDD_HOCK;
+-    cdd_ctrl_ever |= (UBYTE)(*CDD_CTRL_RD & (CDD_DTS | CDD_DRS));
++
++    /* Send something every single exchange, as the BIOS does: the
++     * queued question if there is one, otherwise a NOP. The BIOS never
++     * leaves the command registers unwritten, and a serial link that is
++     * clocked by both ends having something to say is not one to leave
++     * half-idle -- this driver was writing a command roughly twice a
++     * second and letting seventy-odd exchanges go by untouched. */
++    {
++        static const UBYTE nop[9] = { CDD_CMD_STAT, 0, 0, 0, 0, 0, 0, 0, 0 };
++
++        if (cdd_pending) {
++            cdd_pending = 0;
++            cdd_command(cdd_queued);
++            if (cdd_sent < 0xFF)
++                cdd_sent++;
++        } else {
++            cdd_command(nop);
++        }
++        cdd_ctrl_ever |= (UBYTE)(*CDD_CTRL_RD & (CDD_DTS | CDD_DRS));
++    }
+ 
+     /* A boolean cannot tell a dead link from a flaky one. Count how
+      * many of the last sixteen packets checksummed and report that:

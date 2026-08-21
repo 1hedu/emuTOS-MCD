@@ -1,0 +1,148 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 19:37:01 +0000
+Subject: [PATCH 152/184] The first D: open runs the sequence that works, not a
+ paraphrase of it
+
+Confirmed again today, on this build's hardware run: CDTEST brings D:
+up at round 3, every time, and nothing else ever has. So the first
+touch of the disc now does literally what the rounds do -- arm the
+timeshare. Our VBL goes silent first (cdd_cmd_on = 0; the silence is
+part of the sequence), the firmware gets the whole read: DRV_INIT,
+then ROMREADN, a real play command at a real target. Its sector
+delivery fails under our environment, stage 3 every time, but it
+leaves the drive spun up, positioned and streaming, and after six
+failures cd_fill_bios disarms itself and our own reads take over --
+which is exactly the T1-through-T3 arc.
+
+The deleted "wake" was my paraphrase of that sequence: DRV_INIT alone,
+no ROMREADN, no silence first. It never once worked on hardware.
+Approximating a working sequence instead of running it cost four
+builds.
+
+Also fixed before shipping: the edit initially left a duplicated brace
+that closed cd_read_block early -- caught by -Wunused-variable before
+it ever reached a build that was sent anywhere.
+
+What this does not fix, named so it stays in view: Doom-speed needs the
+firmware's read to SUCCEED under the timeshare, not merely to warm the
+drive up for ours. The loader's subwake proves the firmware can read
+this disc on this console -- letter R, every boot. Under the
+timeshare's partial environment the same read starves at stage 3. That
+one gap is the difference between "works after ~20 seconds, once" and
+"snappy, accurate, repeatable".
+---
+ bios/scdapi.h |  2 +-
+ bios/segacd.c | 84 +++++++++++++++++++--------------------------------
+ 2 files changed, 32 insertions(+), 54 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 7534f06..f723c1f 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  20
++#define SCD_VERSION  21
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 54c51b5..205a666 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3047,61 +3047,39 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+      * moment -- one drive, one master. */
+     if (!cd_ts_decided && !cd_booting) {
+         cd_ts_decided = 1;
+-        if (cd_ts_want && segacd_bios_available()) {
++        /* First touch of the disc: run the sequence that works, not an
++         * approximation of it.
++         *
++         * The one thing that has ever brought D: up on this console is
++         * CDTEST's rounds, and what they do is arm the timeshare: our
++         * VBL stops commanding the drive (cdd_cmd_on = 0, and the
++         * silence is part of it), and the firmware gets the whole read
++         * -- DRV_INIT, then ROMREADN, a real play command at a real
++         * target. Its sector delivery fails in our environment, stage
++         * 3 every time, but it leaves the drive spun up, positioned
++         * and streaming; after six failures cd_fill_bios disarms
++         * itself, our commander comes back, and our own reads work.
++         * That is the T1-through-T3 arc, and the user has confirmed it
++         * end to end more times than either of us enjoyed.
++         *
++         * The previous "wake" here ran DRV_INIT alone -- no ROMREADN,
++         * no silence first -- and it never once worked on hardware. So
++         * no more paraphrase: arm the machinery CDTEST arms, let the
++         * existing fallback do what it demonstrably does, and D:'s
++         * first open costs what the diagnostic's rounds cost instead
++         * of needing the diagnostic.
++         *
++         * The remaining gap to Doom-speed is real and it is one bug,
++         * not this one: the firmware CAN read this disc on this
++         * console -- the loader's subwake proves it every boot, letter
++         * R -- but under the timeshare's partial environment its read
++         * starves at stage 3. Make that succeed and the fallback never
++         * fires, and the first open is as fast as every other. */
++        if (segacd_bios_available()) {
+             cd_ts = 1;
+             cd_ts_cmdsave = cdd_cmd_on;
+-            cdd_cmd_on = 0;     /* our VBL stops talking to the drive */
+-        } else if (!cd_booting && segacd_bios_available()) {
+-            /* Otherwise: let the firmware wake the drive, once, and
+-             * then read it ourselves.
+-             *
+-             * This is the shape the console arrived at by hand and it
+-             * took three rounds of a diagnostic to see it. Rounds 1 and
+-             * 2 handed the disc to the parked firmware with DRV_INIT
+-             * on; round 3 took it back and read the filesystem with
+-             * this driver -- Getbpb, Dfree, Fsfirst, Fopen, Fread, all
+-             * of them, on the first try. Round 3 alone does nothing,
+-             * because nothing else on a normal boot ever calls
+-             * DRV_INIT, and this drive does not leave its
+-             * no-information state without it. So D: has only ever been
+-             * readable after a person launched CDTEST.
+-             *
+-             * Doom does the same thing and says so plainly: three
+-             * DRV_INIT sites in its sub program, one of them the second
+-             * instruction of its bring-up. The note in this file
+-             * claiming no Sega read path calls DRV_INIT was wrong.
+-             *
+-             * A count of zero asks segacd_bios_read for the wake and
+-             * not the read. It costs one visit -- about two seconds on
+-             * the console, measured between diagnostic rounds -- and it
+-             * happens on the first block anyone asks for, which is the
+-             * boot probe, so the drive is awake before disk_init_all
+-             * decides whether D: has a filesystem. */
+-            /* Five seconds, not twenty.
+-             *
+-             * A firmware visit that includes a successful DRV_INIT
+-             * costs about 174 of the diagnostic's ticks on the console
+-             * -- under three seconds -- so five is generous and twenty
+-             * is a tax on an empty tray. The cartridge loader already
+-             * spends up to twenty of its own waiting for the drive
+-             * before EmuTOS starts, and paying it twice for a machine
+-             * with nothing in the tray is not a trade worth making for
+-             * headroom nothing has ever used.
+-             *
+-             * Put back afterwards, because a read that genuinely needs
+-             * the drive spun up from cold is a different question from
+-             * a boot probe. */
+-            /* The loader's own budget for this call, and no less.
+-             *
+-             * A previous version cut it to 300 frames on the grounds
+-             * that a firmware visit costs about 174 of the diagnostic's
+-             * ticks. That number came from the gap between two rounds,
+-             * only one of which ran DRV_INIT, so it was not a
+-             * measurement of DRV_INIT at all. boot/m1emu.S allows
+-             * twenty seconds for exactly this call and the drive
+-             * answers inside it on every boot; there is no honest
+-             * reading that says less will do. */
+-            cd_woke = (UBYTE)(segacd_bios_read(0UL, 0) == 0 ? 1 : 2);
++            cdd_cmd_on = 0;
++            cd_woke = 1;
+         }
+     }
+ 

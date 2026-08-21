@@ -1,0 +1,122 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 21:27:45 +0000
+Subject: [PATCH 159/184] Return to v24, the state the console owner named the
+ high-water mark
+
+They labeled v24 "probably the best state yet" -- D: opening in one
+shot, files reading correctly, the access light going out after reads
+-- and the three builds after it each made something worse. v25
+removed the pause on emulator-only corruption evidence, from an
+emulator that does not model the pause hover, and the light regressed
+to always-on. v26 let the DRV_INIT gate fall through and the TV began
+clicking in the same window. v27 cut the screen pump's patience to 90
+frames, which force-grabs the sub mid-visit, and D: stopped opening
+entirely.
+
+All three reverted. This is v24's driver and v24's IOFW, byte-for-byte
+behavior, plus exactly one addition that cannot touch the driver: the
+per-op hz_200 timings in CDTEST.PRG.
+
+The standing rule this codifies: the console is the ground truth, the
+owner's assessment of a build outranks a headless run, and changes to
+the baseline ship one system at a time from here.
+---
+ bios/scdapi.h  |  2 +-
+ bios/segacd2.S | 54 +++++++++++++++++++++++++++-----------------------
+ 2 files changed, 30 insertions(+), 26 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 41243c6..559db4b 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  27
++#define SCD_VERSION  28
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index d6f0521..348d450 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -249,7 +249,7 @@ _segacd_bios_lost:                      // mask bits seen switched off
+         .globl  _segacd_bios_initwait
+         .align  2
+ _segacd_bios_initwait:                  // frames DRV_INIT may take
+-        .long   450
++        .long   1200
+ 
+ _segacd_bios_drvinit:                   // whether to wake with DRV_INIT
+         // On, and that reverses a correction.
+@@ -608,21 +608,12 @@ brd_wait_init:
+         // the one the BIOS's own ROMREAD singles out as worth another
+         // go, so "not finished yet" is the reading with the most behind
+         // it. Whether it is right is what this change asks.
+-        // On timeout, read anyway -- do not fail the visit.
+-        //
+-        // The hardware log that decided this: the first Getbpb of the
+-        // session cost 20,390 ms, which is this gate's 1200-frame
+-        // budget to the frame, spent waiting for state $10/$20/$40
+-        // from a drive reporting 1 and 6 -- and the immediate retry
+-        // re-ran the same DRV_INIT through the same gate and succeeded
+-        // in about two seconds. The drive was ready; the gate refused
+-        // the states it spins up through. Every stage below carries
+-        // its own 200-frame bound, and ROMREADN itself snaps a willing
+-        // drive to play, so proceeding costs at most seconds and
+-        // failing here cost twenty. Doom never blocks on DRV_INIT at
+-        // all: it retries per frame off CDBSTAT.
++        // v24's gate, restored with the rest of v24. v26 made this
++        // timeout fall through to the read; the click on the TV and
++        // "no faster" arrived in the same window. Reverted wholesale:
++        // v24 is the baseline and changes to it ship one at a time.
+         cmp.l   _segacd_bios_initwait,d2
+-        bcc     brd_awake
++        bcc     brd_fail_init
+         move.w  #0x0081,d0              // CDB_STAT
+         move.w  d0,50(a5)
+         jsr     0x5F22
+@@ -789,17 +780,30 @@ brd_fail_read:
+         // interrupt frame thrown away. Either way a5 and the scratch
+         // stack are the only things it may assume, which is why the
+         // stack it has to go back to lives at 44(a5) and not in a6.
+-        // No pause here, and the scar is worth keeping visible: v24
+-        // sent CDBPAUSE at the end of every successful visit to put the
+-        // access light out, and the very next headless run read a FAT
+-        // with 95 phantom free clusters and a directory with no files
+-        // in it. After a pause, the first sector CDCSTAT announces can
+-        // be the hover's sector rather than the target, and this loop
+-        // takes what it is announced. Until the loop verifies the
+-        // header it is handed (12(a5), CDCTRN fills it), the drive
+-        // stays playing between reads and the light stays on. The
+-        // light is cosmetic; the FAT is not.
++        // v24's pause, restored on the console owner's evidence.
++        //
++        // v24 on hardware: D: opened in one shot, files read correctly,
++        // and the access light went out after reads -- their words,
++        // "probably the best state yet". v25 removed the pause because
++        // a HEADLESS gpgx run showed FAT corruption after it -- but
++        // gpgx does not model the drive's pause hover (its own sync
++        // and latency gaps are documented all over this port), and no
++        // corruption was ever seen on hardware with v24. Reverting a
++        // hardware-confirmed state on emulator-only evidence was the
++        // wrong call, made worse by two more stacked changes on top.
++        // The hardware is the ground truth; the emulator's pause
++        // artifact is noted and gets to be wrong.
+ brd_park:
++        move.w  #0x0084,d0              // CDBPAUSE
++        move.w  d0,50(a5)
++        jsr     0x5F22
++        move.l  _segacd_bios_frames,d2
++        addq.l  #6,d2                   // ~0.1 s of exchanges
++        move.l  #0x60000,d3             // ...bounded by spin regardless
++1:      subq.l  #1,d3
++        beq     brd_done
++        cmp.l   _segacd_bios_frames,d2
++        bhi     1b
+ brd_done:
+         ori.w   #0x0700,sr              // shut the door before swapping back
+ 

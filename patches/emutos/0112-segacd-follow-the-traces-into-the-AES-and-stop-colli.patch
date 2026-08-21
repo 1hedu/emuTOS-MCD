@@ -1,0 +1,157 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 09:44:10 +0000
+Subject: [PATCH 112/184] segacd: follow the traces into the AES, and stop
+ colliding with comm words
+
+All eight sub-to-main comm words are spoken for -- 0x20 screen base,
+0x22 flags, 0x24 CART_LBA, 0x26 CART_REQ, 0x28 CDD status, 0x2A backup
+RAM, 0x2C mine, 0x2E the trace -- and three separate probes have now
+been written into a register something else owns and read back
+somebody else's value. The A: check folds into a byte of 0x2C instead;
+the tick count it displaces has done its job.
+
+What the traces say, with a CD boot beside every reading:
+
+  A: ramdisk        present on both, so the cartridge's copy into PRG
+                    bank 3 lands exactly where the SP's copy off the
+                    disc does
+  drive state       9 on a CD boot, B in Mode 1 -- and B is the one
+                    value cd_state_action maps to CD_GONE, which is
+                    why every read fails
+  AES               entered on both, and reaching the screen clear on
+                    both
+
+So EmuTOS boots, launches the AES, and the AES runs. The desktop is
+painted on one boot and not the other, and the difference is after the
+last place either of them reports.
+---
+ aes/geminit.c | 14 ++++++++++++++
+ bios/bios.c   |  8 +++++---
+ bios/segacd.c | 16 ++++++++++++++--
+ 3 files changed, 33 insertions(+), 5 deletions(-)
+
+diff --git a/aes/geminit.c b/aes/geminit.c
+index 6343eaa..93b83e1 100644
+--- a/aes/geminit.c
++++ b/aes/geminit.c
+@@ -752,6 +752,11 @@ void run_accs_and_desktop(void)
+ 
+ void gem_main(void)
+ {
++#ifdef MACHINE_SEGACD
++    /* The AES is entered on both boots and paints on only one of them,
++     * so the traces follow it in. E1A0 is "gem_main entered". */
++    *(volatile UWORD *)0xFF802E = 0xE1A0;
++#endif
+     LONG    n;
+     WORD    i;
+ 
+@@ -760,7 +765,13 @@ void gem_main(void)
+      * cursor on a blank screen during resolution change.  this is most
+      * noticeable on a floppy-only system with no diskettes loaded.
+      */
++#ifdef MACHINE_SEGACD
++    *(volatile UWORD *)0xFF802E = 0xE1A1;
++#endif
+     dos_conws("\033f\033E");    /* cursor off, clear screen */
++#ifdef MACHINE_SEGACD
++    *(volatile UWORD *)0xFF802E = 0xE1A2;
++#endif
+ 
+     /* read in first part of emudesk.inf */
+     if (bootflags & BOOTFLAG_SKIP_AUTO_ACC)
+@@ -791,6 +802,9 @@ void gem_main(void)
+             break;
+ #endif
+         }
++#ifdef MACHINE_SEGACD
++        *(volatile UWORD *)0xFF802E = 0xE1A3;
++#endif
+         gsx_wsclear();              /* avoid artifacts that may show briefly */
+         /*
+          * resolution change always resets the default drive to the
+diff --git a/bios/bios.c b/bios/bios.c
+index 882a143..7df956c 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -933,10 +933,10 @@ void biosmain(void)
+     KDEBUG(("bootflags = 0x%02x\n", bootflags));
+ 
+     /* boot eventually from a block device (floppy or harddisk) */
+-    blkdev_boot();
++    SCTRACE(0x41); blkdev_boot();
+ 
+     Dsetdrv(bootdev);           /* Set boot drive */
+-    init_default_environment(); /* Build default environment string */
++    SCTRACE(0x42); init_default_environment(); /* Build default environment string */
+ 
+ #if ENABLE_RESET_RESIDENT
+     run_reset_resident();       /* see comments above */
+@@ -1347,7 +1347,7 @@ void biosmain(void)
+     }
+ #endif
+ 
+-    autoexec();                 /* autoexec PRGs from AUTO folder */
++    SCTRACE(0x50); autoexec();                 /* autoexec PRGs from AUTO folder */
+ 
+     /* clear commandline */
+ 
+@@ -1358,6 +1358,7 @@ void biosmain(void)
+          */
+         Pexec(PE_LOADGO, "COMMAND.PRG", "", NULL);
+     } else if (exec_os) {
++        SCTRACE(0x51);
+         /*
+          * start the default (ROM) shell
+          * like Atari TOS, we pass the default environment
+@@ -1366,6 +1367,7 @@ void biosmain(void)
+         pd = (PD *) Pexec(PE_BASEPAGEFLAGS, (char *)PF_STANDARD, "", default_env);
+         pd->p_tbase = (UBYTE *) exec_os;
+         pd->p_tlen = pd->p_dlen = pd->p_blen = 0;
++        SCTRACE(0x52);
+         Pexec(PE_GO, "", (char *)pd, default_env);
+     }
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index a0fdd90..31016a8 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -283,6 +283,7 @@ static UWORD cd_why;            /* nibble per attempt of the last
+  * and the last deduction about this log was wrong, so it is counted
+  * rather than believed: cd_badmode says how often, cd_lasth3 says
+  * what the byte actually is. */
++static BOOL adisk_present;      /* forward: the level 4 handler publishes it */
+ static UWORD cd_badmode;        /* decoded, mode byte neither 1 nor 2 */
+ static UBYTE cd_lasth3;         /* the last such byte, verbatim */
+ /* Everything else a console cannot currently say out loud.
+@@ -804,8 +805,20 @@ void segacd_int_4_c(void)
+      * matters: cd_state_action() treats 0 as a refusal, and every CD
+      * boot has shown 1, 2 or 4 because the firmware moved the drive
+      * before EmuTOS ever saw it. A Mode 1 boot has never been asked. */
++    /* Drive state in the high byte; in the low, whether the A: ramdisk
++     * carries its OEM stamp. All eight sub-to-main comm words are
++     * spoken for -- 0x20 screen base, 0x22 flags, 0x24 CART_LBA, 0x26
++     * CART_REQ, 0x28 CDD status, 0x2A backup RAM, 0x2E the trace -- and
++     * three separate probes have now been written into a register
++     * something else owns and read back somebody else's value. The tick
++     * count has done its job, so its byte is free.
++     *
++     * On a CD boot the SP reads that ramdisk off the disc; on a Mode 1
++     * boot the cartridge copies it into PRG bank 3. Same destination,
++     * different writer, and a wrong bank would leave A: absent with no
++     * other symptom. */
+     *(volatile UWORD *)0xFF802C = (UWORD)(((UWORD)cdd_stat[0] << 8)
+-                                        | (cdd_ticks & 0xFF));
++                                        | (adisk_present ? 0xA1 : 0xA0));
+ 
+     /* Wait for DRS to go *low*. It reads as "a status packet is on its
+      * way in", so the BIOS spins until the incoming transfer is over
+@@ -3428,7 +3441,6 @@ void segacd_int_2_c(void)
+ #define BRAM_OURS  1
+ #define BRAM_SEGA  2        /* holds game saves: hands off */
+ 
+-static BOOL adisk_present;
+ static UWORD cart_sectors;
+ static UBYTE cart_seq;
+ static UBYTE bram_state;

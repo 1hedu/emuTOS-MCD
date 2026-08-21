@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 20:47:21 +0000
+Subject: [PATCH 155/184] A successful visit leaves the drive paused, not
+ playing
+
+"The disk is being accessed the whole time after the first click."
+Nothing is streaming -- the desktop reads nothing after the window is
+drawn. ROMREADN commands play, nothing in the visit ever commanded
+anything else, and the 60-second standby talks through our own VBL
+commander, which is off while the timeshare is armed. So the drive
+kept reading into the void for the rest of the session: access light
+on, head drifting downstream, and every next visit paying a seek back
+to the data.
+
+CDBPAUSE at the end of every successful visit, followed by a few of
+the firmware's own exchanges so the command actually reaches the drive
+-- a posted command with no exchange behind it is the posted-to-nobody
+mistake this file already made once. Sega's flow pauses between reads,
+and a read issued from the pause hover starts instantly, so this
+should also shave the seek-back off every subsequent folder and file
+access. Failure paths skip it: their firmware may be mid-call.
+
+Headless: nine rounds read the file, and the drive state in the
+snapshots now shows 4 -- paused -- where it used to show 1, playing.
+---
+ bios/scdapi.h  |  2 +-
+ bios/segacd2.S | 30 +++++++++++++++++++++++++++++-
+ 2 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 9564150..52d03da 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  23
++#define SCD_VERSION  24
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 9654a7e..68582a8 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -738,7 +738,7 @@ brd_read:
+         addi.l  #0x0800,8(a5)
+         subq.l  #1,4(a5)
+         bne     brd_stat
+-        bra     brd_done                // stage stays zero: all delivered
++        bra     brd_park                // delivered: settle the drive
+ 
+         // Each stage names itself: 2 the firmware never reported ready,
+         // 3 no sector was ever announced, 4 one was announced and never
+@@ -776,6 +776,34 @@ brd_fail_read:
+         // interrupt frame thrown away. Either way a5 and the scratch
+         // stack are the only things it may assume, which is why the
+         // stack it has to go back to lives at 44(a5) and not in a6.
++        // A successful visit leaves the drive paused, not playing.
++        //
++        // ROMREADN commands play and nothing here ever commanded
++        // anything else, so the drive kept reading into the void after
++        // every visit: the access light on for the rest of the session,
++        // the head drifting downstream, the next visit paying a seek
++        // back. The 60-second standby never helped because it talks
++        // through our own VBL commander, and the commander is off while
++        // the timeshare is armed.
++        //
++        // CDBPAUSE, then a few of the firmware's own exchanges so the
++        // command actually reaches the drive -- a posted command with
++        // no exchange behind it is the posted-to-nobody mistake again.
++        // Sega's flow pauses between reads, and a read issued from the
++        // pause hover starts instantly. Failure paths skip this: their
++        // firmware may be mid-call and their drive state is unknown.
++brd_park:
++        move.w  #0x0084,d0              // CDBPAUSE
++        move.w  d0,50(a5)
++        jsr     0x5F22
++        move.l  _segacd_bios_frames,d2
++        addq.l  #6,d2                   // ~0.1 s of exchanges
++        move.l  #0x60000,d3             // ...bounded by spin regardless
++1:      subq.l  #1,d3
++        beq     brd_done
++        cmp.l   _segacd_bios_frames,d2
++        bhi     1b
++
+ brd_done:
+         ori.w   #0x0700,sr              // shut the door before swapping back
+ 

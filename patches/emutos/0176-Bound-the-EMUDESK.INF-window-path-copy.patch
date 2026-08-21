@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 19 Aug 2026 23:51:51 +0000
+Subject: [PATCH 176/184] Bound the EMUDESK.INF window-path copy
+
+The #W handler copies a path out of the file into a fixed 114-byte
+field with nothing but a '@' to stop it. A file that ends mid-line, or
+one line longer than the field, runs off the end of pth_save and through
+the saved window state behind it.
+
+Survivable when EMUDESK.INF lived on a disk the desktop wrote itself.
+Not survivable now that this machine reads it first from an eight
+kilobyte internal backup RAM, where a half-finished write truncates it.
+---
+ desk/deskapp.c | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/desk/deskapp.c b/desk/deskapp.c
+index 2f57a3f..7728f9f 100644
+--- a/desk/deskapp.c
++++ b/desk/deskapp.c
+@@ -917,9 +917,23 @@ void app_start(void)
+ /* */
+                 pcurr += 4;             /* skip no-longer-used field */
+                 ptmp = pws->pth_save;
+-                while(*pcurr != '@')
++                /* Bounded, and it was not.
++                 *
++                 * This copies a path out of a file into a fixed 114-byte
++                 * field with nothing but a '@' to stop it. A file that
++                 * ends mid-line -- or one line longer than the field --
++                 * runs off the end of pth_save, through the rest of the
++                 * saved window state behind it, and on through whatever
++                 * follows. That was survivable when EMUDESK.INF lived on
++                 * a disk written by the desktop itself; it is a real
++                 * hazard once the file can come off an eight-kilobyte
++                 * backup RAM that a half-finished write can truncate. */
++                while (*pcurr && *pcurr != '@'
++                       && ptmp < pws->pth_save + LEN_ZPATH - 1)
+                     *ptmp++ = *pcurr++;
+                 *ptmp = '\0';
++                while (*pcurr && *pcurr != '@')     /* the rest, if any */
++                    pcurr++;
+                 wincnt += 1;
+             }
+             break;

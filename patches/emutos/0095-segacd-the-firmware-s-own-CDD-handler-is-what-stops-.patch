@@ -1,0 +1,325 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 00:44:55 +0000
+Subject: [PATCH 095/184] segacd: the firmware's own CDD handler is what stops
+ the drive
+
+The console: i4 2/3, v4 005F88, ctl 041C, read 0500. Phase A got its
+two packets in the 27 ms it should take; with Sega's handler installed
+exactly one more level 4 arrived in the whole rest of the visit.
+Emulation gives 2/21 on the same build. So the interrupt path is fine,
+the park is intact, HOCK was already set -- and one run of the
+firmware's CDD handler silences the drive. The watchdog caught the
+consequence five seconds later instead of the console dying.
+
+That is the report's threshold for stale BIOS RAM variables: the parked
+state machine has been sitting in Word RAM since eviction while another
+driver drove the drive for half an hour.
+
+  - The mask is the first suspect, because the firmware writes it. The
+    watchdog now reads $FF8033 every frame, records which bits it finds
+    off, and puts CDD and CDC back. The record diagnoses -- bit 4 in
+    "ls" means the firmware disabled the drive's own interrupt -- and
+    the re-assertion repairs it if that is what is happening. Emulation
+    says ls EB: bit 5 cycling is CDCSTOP masking the decoder, bit 4
+    never goes.
+
+  - Stage 5 now names the call it caught. The function number goes into
+    the state block before every dispatch, so 0510 is DRVINIT, 0520
+    ROMREADN, 058C CDCTRN.
+
+  - DRV_INIT off by default. No Sega code that reads a sector calls it
+    -- sp.S, ProjectCD's ReadCD and Lunar's loader all go CDCSTOP,
+    ROMREADN, poll, which is the code that has read this disc on this
+    console every time it has been asked. "Wake the firmware" was mine.
+    The diagnostic alternates it round by round, I0/I1 in the header.
+
+  - Standing down no longer needs zero successes: six failures for every
+    delivered sector is enough. One lucky read was pinning it on.
+
+Header line shortened to fit forty columns.
+
+gpgx 83 reads 13 failures, PicoDrive 79/15, watchdog never fires, plain
+boot unchanged.
+---
+ bios/bios.c    | 20 +++++++++++------
+ bios/segacd.c  | 26 ++++++++++++++++++----
+ bios/segacd.h  |  5 ++++-
+ bios/segacd2.S | 58 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 98 insertions(+), 11 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 3593364..b198664 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1070,6 +1070,10 @@ void biosmain(void)
+         static const UWORD arm_lead[8] = { 20, 2, 20, 2, 20, 2, 20, 2 };
+         static const UWORD arm_hold[8] = {  0, 0,  1, 1,  0, 0,  1, 1 };
+         static const UWORD arm_late[8] = {  0, 0,  0, 0,  1, 1,  1, 1 };
++        /* And the one the timeshare cares about: wake the firmware with
++         * DRV_INIT, or go at the drive the way Sega's own read routines
++         * do. Alternating, so consecutive rounds compare directly. */
++        static const UWORD arm_drvi[8] = {  0, 1,  0, 1,  0, 1,  0, 1 };
+         static char buf[512];
+         static DTA dta;
+         LONG h, rc;
+@@ -1083,9 +1087,13 @@ void biosmain(void)
+         for (run = 0; ; run++) {
+             arm = (UWORD)(run & 7);
+             segacd_cd_tune(arm_lead[arm], arm_hold[arm], arm_late[arm]);
+-            cprintf("D: TEST %u  LEAD %u HOLD %u LATE %u  BTNS %02X\r\n",
++            segacd_ts_tune((WORD)arm_drvi[arm]);
++            /* Short because the line is forty columns and the last
++             * field kept falling off the edge of the tube. L lead,
++             * H hold, A late, I DRV_INIT, B the raw button word. */
++            cprintf("D: T%u  L%u H%u A%u I%u  B%02X\r\n",
+                     run + 1, arm_lead[arm], arm_hold[arm], arm_late[arm],
+-                    segacd_bootflags);
++                    arm_drvi[arm], segacd_bootflags);
+ 
+             rc = Dfree((LONG *)buf, 3);         /* 3 = C: */
+             cprintf(" Dfree    %ld   %ld of %ld free\r\n",
+@@ -1127,13 +1135,13 @@ void biosmain(void)
+                 UWORD br = segacd_bios_probe();
+                 UWORD rr = segacd_bios_readtest();
+                 ULONG i4, own, vec4;
+-                UWORD ctrl;
++                UWORD ctrl, lost;
+ 
+-                segacd_bios_ipath(&i4, &own, &vec4, &ctrl);
++                segacd_bios_ipath(&i4, &own, &vec4, &ctrl, &lost);
+                 cprintf(" CDBIOS probe %04X read %04X sw %u\r\n",
+                         br, rr, segacd_bios_swaps());
+-                cprintf(" i4 %lu/%lu v4 %06lX ctl %04X\r\n",
+-                        own, i4, vec4, ctrl);
++                cprintf(" i4 %lu/%lu v4 %06lX ctl %04X ls %02X\r\n",
++                        own, i4, vec4, ctrl, lost);
+             }
+             cprintf("\r\n");
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index e95203c..41b8ac4 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2159,12 +2159,12 @@ static BOOL cd_fill_bios(ULONG lba)
+     if (cd_ts_rc) {
+         cd_ts_fails++;
+         /* Give the drive back rather than grind. If the firmware has
+-         * failed six times running without once delivering a sector,
+-         * it is not going to start, and every further attempt costs a
++         * failed six times for every sector it did deliver, it is not
++         * going to start, and every further attempt costs a
+          * pair of 24 KB exchanges and up to five seconds of watchdog.
+          * Our own driver is imperfect but it is not nothing, and a
+          * machine that mounts D: badly beats one that hangs on it. */
+-        if (cd_ts_reads == 0 && cd_ts_fails >= 6) {
++        if (cd_ts_fails >= 6 && cd_ts_fails >= (UWORD)(cd_ts_reads * 4)) {
+             cd_ts = 0;
+             cdd_cmd_on = cd_ts_cmdsave;
+         }
+@@ -2388,6 +2388,8 @@ extern ULONG segacd_bios_int4;          /* segacd2.S */
+ extern ULONG segacd_bios_own;           /* segacd2.S */
+ extern ULONG segacd_bios_vec4;          /* segacd2.S */
+ extern UWORD segacd_bios_ctrl;          /* segacd2.S */
++extern UWORD segacd_bios_lost;          /* segacd2.S */
++extern UBYTE segacd_bios_drvinit;       /* segacd2.S */
+ 
+ 
+ /* Phase two: does the parked firmware actually READ?
+@@ -2498,12 +2500,28 @@ UWORD segacd_bios_swaps(void)
+  *   ctrl $FF8037 in the high byte, $FF8033 in the low, both read on
+  *        entry before the visit touched either
+  */
+-void segacd_bios_ipath(ULONG *i4, ULONG *own, ULONG *vec4, UWORD *ctrl)
++void segacd_bios_ipath(ULONG *i4, ULONG *own, ULONG *vec4, UWORD *ctrl,
++                       UWORD *lost)
+ {
+     *i4 = segacd_bios_int4;
+     *own = segacd_bios_own;
+     *vec4 = segacd_bios_vec4;
+     *ctrl = segacd_bios_ctrl;
++    *lost = segacd_bios_lost;
++}
++
++/* Wake with DRV_INIT, or go straight at the drive the way every Sega
++ * read routine does. The diagnostic alternates it round by round; a
++ * change has to un-wake the firmware or the second setting never gets
++ * tried. */
++void segacd_ts_tune(WORD drvinit)
++{
++    UBYTE want = (UBYTE)(drvinit ? 1 : 0);
++
++    if (want != segacd_bios_drvinit) {
++        segacd_bios_drvinit = want;
++        segacd_bios_unwake();
++    }
+ }
+ 
+ /* What the D: layer has been through, for the on-screen diagnostic.
+diff --git a/bios/segacd.h b/bios/segacd.h
+index bf02988..a853db9 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -46,7 +46,10 @@ BOOL segacd_bios_available(void);
+ void segacd_bios_selftest(void);
+ WORD segacd_bios_read(ULONG lba, WORD count);
+ UWORD segacd_bios_swaps(void);
+-void segacd_bios_ipath(ULONG *i4, ULONG *own, ULONG *vec4, UWORD *ctrl);
++void segacd_bios_ipath(ULONG *i4, ULONG *own, ULONG *vec4, UWORD *ctrl,
++                       UWORD *lost);
++void segacd_bios_unwake(void);  /* segacd2.S */
++void segacd_ts_tune(WORD drvinit);
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);
+ 
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 74e6639..48e987d 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -221,6 +221,8 @@ bios_xchg:
+         .globl  _segacd_bios_own
+         .globl  _segacd_bios_vec4
+         .globl  _segacd_bios_ctrl
++        .globl  _segacd_bios_lost
++        .globl  _segacd_bios_drvinit
+         .data
+ _segacd_bios_swapcnt:
+         .word   0
+@@ -239,6 +241,11 @@ _segacd_bios_frames:                    // level 2s: the dead-man's clock
+         .long   0
+ _segacd_bios_ctrl:                      // $FF8037 and $FF8033 on entry
+         .word   0
++_segacd_bios_lost:                      // mask bits seen switched off
++        .word   0                       //    at any point during a visit
++_segacd_bios_drvinit:                   // whether to wake with DRV_INIT
++        .byte   0
++        .even
+         .text
+ 
+ // Level 2, during a visit: the dead-man switch.
+@@ -257,12 +264,36 @@ _segacd_bios_ctrl:                      // $FF8037 and $FF8033 on entry
+ //
+ // The interrupt frame is discarded rather than returned through. That
+ // is the point: there is nothing to return to.
++// It also watches the interrupt mask, and puts it back.
++//
++// The console's answer to the two-phase probe was i4 2/3: our own
++// acknowledge kept level 4 arriving, and the moment the firmware's
++// handler took over, exactly one more came and then nothing. Something
++// in that one handler run stops the drive talking, and the gate array's
++// mask is the obvious suspect, because the firmware writes it -- it
++// manages its own interrupt enables, and the value it writes comes out
++// of RAM variables that have been sitting in Word RAM since eviction
++// while another driver used the drive.
++//
++// So every frame: remember which mask bits are off, then switch CDD and
++// CDC back on. The remembering is the diagnosis -- bit 4 turning up in
++// "lost" says the firmware disabled the drive's own interrupt -- and
++// the switching back is the repair, if that is what is happening. If it
++// is not, this costs two bus cycles a frame and proves a negative.
+ bios_int2_watch:
++        move.l  d0,-(sp)
+         addq.l  #1,_segacd_bios_frames
++        move.b  0xFF8033,d0
++        not.b   d0
++        andi.w  #0x00FF,d0
++        or.w    d0,_segacd_bios_lost
++        ori.b   #0x30,0xFF8033
++        move.l  (sp)+,d0
+         cmpi.l  #300,_segacd_bios_frames
+         bcs     1f
+         lea     0x7C000,a5              // abandoning: registers are ours
+         move.w  #5,32(a5)
++        move.w  50(a5),34(a5)           // ...in the middle of which call
+         move.l  #0x7C900,sp
+         jmp     brd_done
+ 1:      rte
+@@ -349,6 +380,13 @@ bios_int4_stub:
+ //   a5+12  header scratch    a5+36  EmuTOS's gate-array mask
+ //   a5+40  DRV_INIT params   a5+44  EmuTOS's stack pointer
+ //   a5+96  status packet the phase-A handler took
++// void segacd_bios_unwake(void) -- the next visit does its wake
++// sequence again, whatever that sequence has been changed to.
++        .globl  _segacd_bios_unwake
++_segacd_bios_unwake:
++        clr.b   _bios_woken
++        rts
++
+         .globl  _segacd_bios_read
+ _segacd_bios_read:
+         move.l  4(sp),d0                // lba
+@@ -410,6 +448,7 @@ _segacd_bios_read:
+         move.w  #0x4E73,0x5F7C
+         move.l  #bios_int2_watch,0x68
+         clr.l   _segacd_bios_frames
++        clr.w   _segacd_bios_lost
+ 
+         // 2. HOCK. Bit 2 of the CDD control byte is what makes the drive
+         // talk. Written as a plain byte, not OR-ed in, because bits 0
+@@ -470,16 +509,29 @@ brd_own_done:
+         // DRV_INIT is how a Sega program opens a session: read the TOC
+         // and find out where the disc actually is. It is asynchronous,
+         // so readiness is waited for on CDB_STAT.
++        //
++        // Off by default now, and that is a correction rather than a
++        // tuning. No Sega code that reads a sector calls DRV_INIT to do
++        // it: sp.S, ProjectCD's ReadCD and Lunar's own loader all go
++        // CDCSTOP, ROMREADN, poll, and that is the code that has read
++        // this disc on this console every time it has ever been asked.
++        // "Wake the firmware" was mine, not theirs, and it is the call
++        // the watchdog keeps catching. The diagnostic turns it back on
++        // every other round so the disc can say whether it helps.
++        tst.b   _segacd_bios_drvinit
++        beq     brd_awake
+         tst.b   _bios_woken
+         bne     brd_awake
+         lea     40(a5),a0
+         move.w  #0x0010,d0              // DRV_INIT
++        move.w  d0,50(a5)
+         jsr     0x5F22
+         move.l  #300000,28(a5)
+ brd_wait_init:
+         subq.l  #1,28(a5)
+         beq     brd_fail_init
+         move.w  #0x0081,d0              // CDB_STAT
++        move.w  d0,50(a5)
+         jsr     0x5F22
+         move.w  (a0),d0                 // status: low byte is drive state
+         andi.w  #0x00FF,d0
+@@ -494,9 +546,11 @@ brd_awake:
+ 
+         movea.l a5,a0
+         move.w  #0x0089,d0              // CDCSTOP
++        move.w  d0,50(a5)
+         jsr     0x5F22
+         movea.l a5,a0
+         move.w  #0x0020,d0              // ROMREADN
++        move.w  d0,50(a5)
+         jsr     0x5F22
+ 
+         move.l  #300000,28(a5)          // bound: a dead link is not the clock
+@@ -504,20 +558,24 @@ brd_stat:
+         subq.l  #1,28(a5)
+         beq     brd_fail_stat
+         move.w  #0x008A,d0              // CDCSTAT
++        move.w  d0,50(a5)
+         jsr     0x5F22
+         bcs     brd_stat                // no sector ready yet
+ brd_read:
+         subq.l  #1,28(a5)
+         beq     brd_fail_read
+         move.w  #0x008B,d0              // CDCREAD
++        move.w  d0,50(a5)
+         jsr     0x5F22
+         bcc     brd_read
+         movea.l 8(a5),a0                // where this sector goes
+         lea     12(a5),a1               // header scratch
+         move.w  #0x008C,d0              // CDCTRN
++        move.w  d0,50(a5)
+         jsr     0x5F22
+         bcc     brd_read                // transfer incomplete, go again
+         move.w  #0x008D,d0              // CDCACK
++        move.w  d0,50(a5)
+         jsr     0x5F22
+         addq.l  #1,(a5)                 // next sector
+         addi.l  #0x0800,8(a5)

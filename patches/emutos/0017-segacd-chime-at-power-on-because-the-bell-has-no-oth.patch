@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 18:03:53 +0000
+Subject: [PATCH 017/184] segacd: chime at power-on, because the bell has no
+ other trigger
+
+EmuTOS rings the bell only when a BEL character reaches the VT52
+driver, and nothing in GEM, EmuDesk or EmuCON ever writes one. Real TOS
+alerts are silent too, so making them beep would be a deviation rather
+than a fix. That left the bell unreachable and therefore untestable.
+
+A single chime from segacd_sound_init() fixes that: it exercises the
+whole audio path -- chip enable, wave RAM, channel programming -- at
+the earliest possible moment, so one listen at boot answers whether
+this machine can make a sound.
+---
+ bios/segacd.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index dfdf8d4..c54ddfd 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -142,6 +142,12 @@ void segacd_sound_init(void)
+     PCM_ST  = 0x00;                     /* sample begins at wave RAM 0 */
+     PCM_ONOFF = 0xFF;                   /* every channel off for now */
+     pcm_countdown = 0;
++
++    /* Power-on chime. Not decoration: the bell's only other trigger is
++     * a BEL character reaching the VT52 driver, and nothing in GEM, the
++     * desktop or EmuCON ever writes one -- so without this there is no
++     * way to find out whether this machine can make a sound at all. */
++    segacd_bell();
+ }
+ 
+ static void pcm_beep(UBYTE frames, UBYTE volume)

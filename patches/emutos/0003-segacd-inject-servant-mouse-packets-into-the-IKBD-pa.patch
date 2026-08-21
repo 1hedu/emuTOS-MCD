@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 03:27:51 +0000
+Subject: [PATCH 003/184] segacd: inject servant mouse packets into the IKBD
+ path
+
+The main-CPU servant publishes relative deltas and buttons in the comm
+registers before raising INT2; the VBL handler converts them to an
+IKBD relative packet via call_mousevec(), exactly as the Amiga port
+does, then runs the normal VBL. The GEM pointer and menus respond.
+---
+ bios/segacd.c | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 805c326..db68b66 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -28,6 +28,7 @@
+ #include "vectors.h"
+ #include "tosvars.h"
+ #include "biosext.h"
++#include "ikbd.h"
+ 
+ #define GA_TIMER    (*(volatile UBYTE *)0xFF8031)
+ #define GA_INTMASK  (*(volatile UBYTE *)0xFF8033)
+@@ -83,9 +84,27 @@ void segacd_init_system_timer(void)
+ /* Interrupts                                                                 */
+ /******************************************************************************/
+ 
+-/* INT2 C handler: VBL from the main CPU. */
++/* INT2 C handler: VBL from the main CPU. The servant publishes mouse
++ * deltas and buttons in the comm registers just before raising INT2;
++ * inject them as an IKBD relative packet, exactly as the Amiga port
++ * does, then run the normal VBL. */
+ void segacd_int_2_c(void)
+ {
++    static UBYTE oldbtn;
++    UWORD d = *(volatile UWORD *)0xFF8014;      /* (dx<<8)|dy */
++    UBYTE btn = (UBYTE)(*(volatile UWORD *)0xFF8016 & 3);
++    SBYTE dx = (SBYTE)(d >> 8);
++    SBYTE dy = (SBYTE)(d & 0xFF);
++
++    if (dx || dy || btn != oldbtn) {
++        SBYTE packet[3];
++        packet[0] = (SBYTE)(0xF8 | btn);
++        packet[1] = dx;
++        packet[2] = dy;
++        call_mousevec(packet);
++        oldbtn = btn;
++    }
++
+     int_vbl();
+ }
+ 

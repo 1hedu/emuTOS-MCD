@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 08:45:03 +0000
+Subject: [PATCH 040/184] segacd: lower the bus-interlock flag again
+
+An edit a few builds ago removed the line that clears it, so it was
+raised on the first exchange and stayed raised. Nothing complained,
+because a flag that is never lowered is indistinguishable from a
+machine that is always busy: the servant's polite grab found it set
+every time, fell back to its four-frame override, and took the bus
+without regard for the drive from then on. The screen also ran at a
+fifth of its rate, silently.
+
+The status line had been reporting it since it was introduced -- the
+probe digit reads 8 when this bit is stuck, and every hardware report
+since has read 8.
+---
+ bios/segacd.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 7249963..aa62611 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -427,6 +427,15 @@ void segacd_int_4_c(void)
+     if (cdd_sent < 0xFF)
+         cdd_sent++;
+     cdd_ctrl_ever |= (UBYTE)(*CDD_CTRL_RD & (CDD_DTS | CDD_DRS));
++
++    /* Done: the Genesis may have the bus again. An edit lost this line
++     * a few builds ago and nothing complained, because a flag that is
++     * raised and never lowered looks exactly like a machine that is
++     * always busy: the interlock stopped protecting anything, the
++     * servant fell back to grabbing anyway every fifth frame, and the
++     * screen quietly ran at a fifth of its rate. The status line said
++     * so all along -- the probe digit reads 8 when this bit is stuck. */
++    *(volatile UWORD *)0xFF8022 &= (UWORD)~0x0008;
+     /* A boolean cannot tell a dead link from a flaky one. Count how
+      * many of the last sixteen packets checksummed and report that:
+      * F is a clean link, 0 is nothing, anything between is a race. */

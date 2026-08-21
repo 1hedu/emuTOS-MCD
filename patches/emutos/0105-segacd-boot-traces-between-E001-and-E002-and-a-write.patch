@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 08:31:57 +0000
+Subject: [PATCH 105/184] segacd: boot traces between E001 and E002, and a
+ write-protect probe
+
+A Mode 1 boot from the cartridge reached E001 and stopped, with no
+fault and nothing else to say. Everything between E001 and E002 works
+by planting an exception vector and then deliberately raising that
+exception -- the VBR probe, the cache disable, the MMU disable -- so a
+vector write that does not stick produces exactly that: a silent stop,
+three layers from the cause.
+
+Six traces, one per step, found it at the first. And the probe beside
+them names it rather than implying it: write 0x5A5AA5A5 to address 16,
+read it back, publish what came back. Under gpgx on a Mode 1 boot it
+read 0x00000400 -- the stub address the cartridge had planted there --
+so the sub CPU's writes to low PRG-RAM were being swallowed whole.
+
+That is the Mega CD's PRG-RAM write protect, which the gate array
+reset leaves at 0xFF, covering 130560 bytes. On a CD boot the firmware
+clears it before the sub ever runs. In Mode 1 nothing does, and the
+cart writes through its own window so it never notices.
+
+The probe stays. It costs two instructions on a path that runs once,
+it reports through a comm register the loader already reads, and it
+would catch the same class of fault again immediately instead of
+after an afternoon.
+---
+ bios/startup.S | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/bios/startup.S b/bios/startup.S
+index b797c19..4cafdea 100644
+--- a/bios/startup.S
++++ b/bios/startup.S
+@@ -404,6 +404,23 @@ valid_st_mmu_config:
+         // We take this opportunity to set the stack pointer to the
+         // address which will become our BIOS stack after memconf.
+         lea     _stktop,sp
++#ifdef MACHINE_SEGACD
++        move.w  #0xE011,0xFF8020
++        // Does a write to low PRG-RAM stick at all?
++        //
++        // Everything from here to E002 works by planting an exception
++        // vector and then deliberately raising that exception. If the
++        // vector write is being swallowed the CPU takes the fault
++        // through whatever was already there, and on a Mode 1 boot that
++        // is whatever the cart planted -- so the symptom is a silent
++        // stop, not a crash. The Mega CD has a write-protect register
++        // covering low PRG-RAM, and on a CD boot the firmware has
++        // already cleared it. In Mode 1 nothing has.
++        move.l  #0x5A5AA5A5,16
++        move.l  16,d0
++        move.l  d0,0xFF8024
++#endif
++
+ 
+ // Note: LisaEm doesn't properly implement movec/pmove illegal instructions,
+ // so we just avoid them on MACHINE_LISA.
+@@ -415,6 +432,10 @@ valid_st_mmu_config:
+         moveq   #0,d0
+         MOVEC_D0_VBR           // initialise VBR to zero
+ vbr_ok:
++#ifdef MACHINE_SEGACD
++        move.w  #0xE012,0xFF8020
++#endif
++
+ #endif
+ 
+ #if CONF_WITH_RESET && !defined(MACHINE_AMIGA)
+@@ -439,6 +460,10 @@ not_falcon:
+         // we are not on Falcon, a simple reset is enough
+         reset
+ main_after_reset_instruction:
++#ifdef MACHINE_SEGACD
++        move.w  #0xE013,0xFF8020
++#endif
++
+ #endif /* CONF_WITH_RESET && !defined(MACHINE_AMIGA) */
+ 
+ #ifdef __mcoldfire__
+@@ -469,6 +494,10 @@ coldfire_startup_ret:
+         lea     nodiag(pc), a6          // save return address
+         jmp     cart_base+4             // execute diagnostic cartridge
+ nodiag:
++#ifdef MACHINE_SEGACD
++        move.w  #0xE014,0xFF8020
++#endif
++
+ #endif /* CONF_WITH_CARTRIDGE */
+ 
+ /*
+@@ -479,6 +508,10 @@ nodiag:
+         move.l  #0x00000808,d0     // clear & disable instruction/data caches on
+         MOVEC_D0_CACR              //  68020-60 (even though bit usage differs!)
+ cache_done:
++#ifdef MACHINE_SEGACD
++        move.w  #0xE015,0xFF8020
++#endif
++
+ #endif
+ 
+ /*
+@@ -502,6 +535,10 @@ not_68030:
+         MOVEC_D0_TC                // disable translation on 68040-60 (will error out
+                                    //  on a 68ec040)
+ mmu_done:
++#ifdef MACHINE_SEGACD
++        move.w  #0xE016,0xFF8020
++#endif
++
+ #endif
+ 
+ #ifdef MACHINE_SEGACD

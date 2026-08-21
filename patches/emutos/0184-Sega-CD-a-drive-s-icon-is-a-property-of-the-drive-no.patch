@@ -1,0 +1,154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 20 Aug 2026 23:07:32 +0000
+Subject: [PATCH 184/184] Sega CD: a drive's icon is a property of the drive,
+ not of its number
+
+`(drive > 1) ? IG_HARD : IG_FLOPPY` is right on a TOS machine because
+A: and B: are the floppy drives there and C: onward are hard disk
+partitions. It is wrong here twice over: nothing in this machine is
+either of those things, and the two icons that say what these drives
+actually are -- the RAM chip and the compact disc -- live in the
+EMUICON.RSC this project generates and had no way of being chosen by
+anything but an #M line.
+
+Both places that had to name an icon with only a drive number in hand
+now call app_drive_icon(): build_inf(), when there is no EMUDESK.INF to
+read, and install_drive(), when Options > Install Devices puts back an
+icon that Remove Icon took away. Without it that round trip silently
+downgraded C: from the RAM chip to a generic hard disk, because the
+desktop keeps no memory of what the #M line said.
+
+The two extra icon numbers are only valid if EMUICON.RSC was found --
+app_rdicon() falls back to eight built-ins -- so app_drive_icon() makes
+the same G.g_numiblks check that app_parse() makes on an icon number
+read from an #M line, and the table is the one in tools/mkicon.py that
+writes both files.
+
+Measured: with EMUDESK.INF removed from the boot drive so build_inf()
+runs, the desktop before this was four identical hard-disk boxes
+(frame fnv 9185f5e3eceb2863) and after it is pixel-for-pixel the
+desktop the shipped EMUDESK.INF produces, 80377cc6d7a4d8c2.
+---
+ desk/deskapp.c | 55 +++++++++++++++++++++++++++++++++++++++++++++++++-
+ desk/deskapp.h | 13 ++++++++++++
+ desk/deskins.c |  2 +-
+ 3 files changed, 68 insertions(+), 2 deletions(-)
+
+diff --git a/desk/deskapp.c b/desk/deskapp.c
+index 7728f9f..48cab97 100644
+--- a/desk/deskapp.c
++++ b/desk/deskapp.c
+@@ -704,6 +704,59 @@ static void read_inf_file(char *infbuf)
+ }
+ 
+ 
++/*
++ *  Pick the desktop icon for a drive
++ *
++ *  Everywhere the desktop has to name an icon for a drive with nothing
++ *  to go on but its number, it comes here: build_inf() below, when
++ *  there is no EMUDESK.INF to read, and install_drive() in deskins.c,
++ *  when Options > Install Devices puts back an icon that was removed.
++ *
++ *  The stock rule is `(drive > 1) ? IG_HARD : IG_FLOPPY`, and it is
++ *  right on a TOS machine for the reason that A: and B: are the floppy
++ *  drives there and C: onward are hard disk partitions.  Here they are
++ *  not: see the letters table in bios/disk.c's disk_init_all().
++ */
++WORD app_drive_icon(WORD drive)
++{
++#ifdef MACHINE_SEGACD
++    WORD icon;
++
++    switch(drive + 'A')
++    {
++    case 'C':                   /* the ramdisk */
++        icon = IG_RAM;
++        break;
++    case 'D':                   /* the disc */
++        icon = IG_DISC;
++        break;
++    case 'I':                   /* internal backup RAM: a fixed store */
++        icon = IG_HARD;
++        break;
++    case 'S':                   /* the cartridge: media you slot in */
++        icon = IG_FLOPPY;
++        break;
++    default:
++        icon = IG_HARD;
++    }
++
++    /*
++     * the two extra icons live in EMUICON.RSC, which is a file and can
++     * be absent; app_rdicon() has already run, so this is the same
++     * check app_parse() makes on an icon number read from an #M line.
++     * The same table is in tools/mkicon.py, which writes both that
++     * resource and the #M lines that normally make this moot.
++     */
++    if (icon >= G.g_numiblks)
++        icon = IG_HARD;
++
++    return icon;
++#else
++    return (drive > 1) ? IG_HARD : IG_FLOPPY;
++#endif
++}
++
++
+ /*
+  *  Create a default minimal internal EMUDESK.INF
+  */
+@@ -730,7 +783,7 @@ static void build_inf(char *infbuf, WORD xcnt, WORD ycnt)
+         {
+             drive_x = icon_index % xcnt; /* x position */
+             drive_y = icon_index / xcnt; /* y position */
+-            icon_type = (i > 1) ? IG_HARD : IG_FLOPPY;
++            icon_type = app_drive_icon(i);
+             drive_letter = 'A' + i;
+             text = desktop_str_addr(STDISK);
+             p += sprintf(p, "#M %02X %02X %02X FF %c %s %c@ @\r\n",
+diff --git a/desk/deskapp.h b/desk/deskapp.h
+index aeceed2..5dc14bb 100644
+--- a/desk/deskapp.h
++++ b/desk/deskapp.h
+@@ -68,6 +68,18 @@
+ #define IG_APPL_REV0    8       /* application icon */
+ #define IG_DOCU_REV0    40      /* document icon */
+ 
++#ifdef MACHINE_SEGACD
++/*
++ * two more, appended after the standard eight by tools/mkicon.py, which
++ * writes the EMUICON.RSC in the root of the boot drive.  That file can
++ * be missing -- app_rdicon() falls back to the built-in eight -- so
++ * these are never used without checking G.g_numiblks first, exactly as
++ * app_parse() checks an icon number read from an #M line.
++ */
++#define IG_RAM    8             /* the ramdisk: a memory chip */
++#define IG_DISC   9             /* the compact disc */
++#endif
++
+ 
+ /*
+  * configuration parameters
+@@ -166,6 +178,7 @@ void app_tran(WORD bi_num);
+ void app_start(void);
+ void app_save(WORD todisk);
+ void app_blddesk(void);
++WORD app_drive_icon(WORD drive);
+ ANODE *app_afind_by_id(WORD obid);
+ ANODE *app_afind_by_name(WORD atype, WORD ignore, char *pspec, char *pname, BOOL *pisapp);
+ void nomem_alert(void) NORETURN;
+diff --git a/desk/deskins.c b/desk/deskins.c
+index 9eb2687..28edcfa 100644
+--- a/desk/deskins.c
++++ b/desk/deskins.c
+@@ -247,7 +247,7 @@ static WORD install_drive(WORD drive)
+     sprintf(G.g_work,"%s %c",desktop_str_addr(STDISK),pa->a_letter);
+     scan_str(G.g_work, &pa->a_pappl);   /* set up disk name */
+     pa->a_pdata = "";                   /* point to empty string */
+-    pa->a_aicon = (drive > 1) ? IG_HARD : IG_FLOPPY;
++    pa->a_aicon = app_drive_icon(drive);
+     pa->a_dicon = NIL;
+     snap_icon(x,y,&pa->a_xspot,&pa->a_yspot, 0, 0);
+ 

@@ -1,0 +1,247 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 03:43:57 +0000
+Subject: [PATCH 069/184] segacd: the CDC address register is one register, and
+ two contexts used it
+
+cdc_grab programs the transfer -- byte count, buffer address, trigger,
+later the acknowledge -- through the address register at $FF8005, from
+the foreground, with interrupts enabled; the comment said 'as CDCTRN
+does'. But the level-5 handler moves the same register every 13.3 ms
+to read the header, and commercial software cannot hit this collision
+by construction: it calls CDCREAD and CDCTRN from the decoder
+interrupt itself, the same priority as the register's other user. Our
+split -- foreground transfer, interrupt-time header watch -- is a
+topology no Sega code ever ran, so no emulator ever needed to model
+the race.
+
+Let the interrupt land between two of those writes and the rest hit
+the wrong registers. A wrong DAC delivers the wrong sector's bytes as
+a success -- Fsfirst -33, a mounted C: whose folder opens empty, the
+V40 verdict. A wrong DBC or a lost trigger delivers nothing -- 'the
+sector never came round'. An interrupted DTACK wedges the decoder
+until the next full setup -- 'a fresh fill works where the retries
+inside one did not', recorded in this file as not understood. One
+race, three symptoms, and V82 against V80 across boots was it winning
+and losing the lottery. Every foreground address-register sequence is
+now masked to 7 for the handful of writes.
+
+With it: headers must be possible BCD before entering the ring (a
+console once reported second eighty; a poisoned ring turns a garbage
+match into a wrong sector accepted), rejects are counted in report
+word 34, and cd_why -- declared, reported, and never once written --
+now records one nibble per failed attempt: 1 timeout, 2 stream past,
+3 transfer failed, 4 drive refused.
+---
+ bios/segacd.c | 96 ++++++++++++++++++++++++++++++++++++++++-----------
+ 1 file changed, 76 insertions(+), 20 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 6c993ee..2ff9ceb 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -226,6 +226,7 @@ static UBYTE cd_gone;           /* the drive said the disc changed */
+ static UBYTE cd_badrun;         /* consecutive packets saying "nothing" */
+ static UBYTE cd_badstate;       /* ...and the state that said it */
+ static UWORD cd_notready;       /* reads that found the drive unfit */
++static UWORD cd_badhdr;         /* headers rejected as impossible BCD */
+ static UWORD cd_why;            /* nibble per attempt of the last
+                                  * failed fetch: 1 timed out, 2 the
+                                  * head was already past, 3 the
+@@ -792,16 +793,21 @@ static void cdc_setup(void)
+     cd_streaming = 0;
+     cd_ring_reset();
+ 
+-    *CDC_AR = 0x0F; *CDC_DATA = 0x00;                   /* RESET */
+-    *CDC_AR = 0x01; *CDC_DATA = 0x3A;                   /* IFCTRL */
+-    *CDC_AR = 0x08; *CDC_DATA = 0x00; *CDC_DATA = 0x00; /* WA = 0 */
+-    *CDC_AR = 0x0C; *CDC_DATA = 0x00; *CDC_DATA = 0x00; /* PT = 0 */
++    {   /* masked against the level-5 handler: shared address register */
++        WORD sr = set_sr(0x2700);
++
++        *CDC_AR = 0x0F; *CDC_DATA = 0x00;                   /* RESET */
++        *CDC_AR = 0x01; *CDC_DATA = 0x3A;                   /* IFCTRL */
++        *CDC_AR = 0x08; *CDC_DATA = 0x00; *CDC_DATA = 0x00; /* WA = 0 */
++        *CDC_AR = 0x0C; *CDC_DATA = 0x00; *CDC_DATA = 0x00; /* PT = 0 */
+ 
+-    GA_INTMASK |= 0x20;         /* level 5, once per sector decoded */
++        GA_INTMASK |= 0x20;     /* level 5, once per sector decoded */
+ 
+-    *CDC_AR = 0x0A; *CDC_DATA = 0xA0; *CDC_DATA = 0xF8; /* CTRL0, CTRL1 */
+-    if (!cdc_altctrl && !cd_late) {
+-        *CDC_AR = 0x0A; *CDC_DATA = 0xA7; *CDC_DATA = 0xF0;
++        *CDC_AR = 0x0A; *CDC_DATA = 0xA0; *CDC_DATA = 0xF8; /* CTRL0, CTRL1 */
++        if (!cdc_altctrl && !cd_late) {
++            *CDC_AR = 0x0A; *CDC_DATA = 0xA7; *CDC_DATA = 0xF0;
++        }
++        set_sr(sr);
+     }
+ }
+ 
+@@ -811,11 +817,14 @@ static void cdc_stop(void)
+ {
+     UBYTE m;
+ 
++    WORD sr = set_sr(0x2700);
++
+     GA_INTMASK &= (UBYTE)~0x20;
+     *CDC_AR = 0x01; *CDC_DATA = 0x38;
+     *CDC_AR = 0x01; *CDC_DATA = 0x3A;
+     m = *CDC_MODE_RD;
+     *CDC_MODE = m;
++    set_sr(sr);
+ }
+ 
+ /* Level 5: a sector has been decoded. Short on purpose -- level 4 is the
+@@ -867,7 +876,16 @@ void segacd_int_5_c(void)
+     /* Note it in the ring, whether or not anybody asked for it. Cheap:
+      * a couple of multiplies and three stores, against the alternative
+      * of a reader trying to be awake at the right moment. */
+-    if (h3 == 0x01 || h3 == 0x02) {     /* a data sector, mode 1 or 2 */
++    /* Only a header that could exist may enter the ring. A console
++     * once reported the head at 01:80:00 -- eighty is not a second --
++     * and a poisoned ring is worse than an empty one: a garbage entry
++     * that happens to equal the wanted LBA delivers the wrong sector
++     * as a success, which is how a directory read comes back plausible
++     * and empty. */
++    if ((h3 == 0x01 || h3 == 0x02)
++        && (h0 & 0x0F) <= 9 && (h0 >> 4) <= 9
++        && (h1 & 0x0F) <= 9 && h1 < 0x60
++        && (h2 & 0x0F) <= 9 && h2 < 0x75) {
+         UBYTE k = cd_ring_head;
+         ULONG lba = (ULONG)(((h0 >> 4) * 10 + (h0 & 0x0F))) * 4500UL
+                   + (ULONG)(((h1 >> 4) * 10 + (h1 & 0x0F))) * 75UL
+@@ -880,6 +898,8 @@ void segacd_int_5_c(void)
+             cd_ring_head = (UBYTE)((k + 1) % CD_RING);
+             cd_ring_newest = lba;
+         }
++    } else if (h3 == 0x01 || h3 == 0x02) {
++        cd_badhdr++;            /* decoded, mode plausible, MSF impossible */
+     }
+ }
+ 
+@@ -902,12 +922,32 @@ static BOOL cdc_grab(UWORD pt)
+ 
+     *CDC_MODE = CDC_DEST_SUB;
+ 
+-    *CDC_AR = 0x02;
+-    *CDC_DATA = (UBYTE)(count & 0xFF);          /* DBCL */
+-    *CDC_DATA = (UBYTE)(count >> 8);            /* DBCH */
+-    *CDC_DATA = (UBYTE)(pt & 0xFF);             /* DACL */
+-    *CDC_DATA = (UBYTE)(pt >> 8);               /* DACH */
+-    *CDC_DATA = 0x00;                           /* DTTRG: go */
++    /* Masked, and this mask may be the most important lines in the
++     * file. The address register at $FF8005 is one register, shared
++     * with the level-5 handler that fires every 13.3 ms and moves it
++     * to read the header. Let it fire between any two of the writes
++     * below and the rest of them land in the wrong registers: a wrong
++     * DAC delivers the wrong sector's bytes as a success, a wrong DBC
++     * or a lost trigger delivers nothing and reads as a timeout, and
++     * an interrupted DTACK wedges the decoder until the next full
++     * setup -- which is every failure this driver has shown on
++     * hardware, including the ones that looked like three different
++     * bugs. Sega's code cannot race itself here by construction:
++     * commercial software calls CDCREAD and CDCTRN from the decoder
++     * interrupt, the same priority as the register's other user. Our
++     * split -- foreground transfer, interrupt-time header watch -- is
++     * a topology no Sega code ever ran, so no emulator ever needed to
++     * model the collision. */
++    {
++        WORD sr = set_sr(0x2700);
++        *CDC_AR = 0x02;
++        *CDC_DATA = (UBYTE)(count & 0xFF);      /* DBCL */
++        *CDC_DATA = (UBYTE)(count >> 8);        /* DBCH */
++        *CDC_DATA = (UBYTE)(pt & 0xFF);         /* DACL */
++        *CDC_DATA = (UBYTE)(pt >> 8);           /* DACH */
++        *CDC_DATA = 0x00;                       /* DTTRG: go */
++        set_sr(sr);
++    }
+ 
+     for (n = 0; n < 2048; n++)                  /* CDCTRN's own bound */
+         if (*CDC_MODE_RD & CDC_DSR)
+@@ -942,7 +982,11 @@ static BOOL cdc_grab(UWORD pt)
+         cdc_fail = 1;                           /* never became ready */
+     }
+ 
+-    *CDC_AR = 0x07; *CDC_DATA = 0x00;           /* DTACK */
++    {   /* same register, same race, same mask */
++        WORD sr = set_sr(0x2700);
++        *CDC_AR = 0x07; *CDC_DATA = 0x00;       /* DTACK */
++        set_sr(sr);
++    }
+ 
+     *(volatile UWORD *)0xFF8022 &= (UWORD)~0x0008;
+     return ok;
+@@ -1260,8 +1304,7 @@ static void cdr_report(void)
+      * should be the length of the image the disc was built from. */
+     CDREPORT[32] = (UWORD)(((UWORD)cdd_len_m << 8) | cdd_len_s);
+     CDREPORT[33] = (UWORD)(((UWORD)cdd_len_f << 8) | cdd_len_ok);
+-    CDREPORT[34] = 0;           /* was: long seeks that earned $A.
+-                                 * Sega sends none, so neither do we. */
++    CDREPORT[34] = cd_badhdr;   /* impossible headers the ring refused */
+     CDREPORT[0] = CDREPORT_MAGIC;
+ }
+ 
+@@ -1537,6 +1580,7 @@ static BOOL cd_fetch(ULONG lba)
+     UWORD pt;
+     int attempt;
+     UBYTE settle, seen;
++    UBYTE why1;
+     BOOL got = FALSE;
+ 
+     /* Take the drive. The VBL rotates a status question at the CDD
+@@ -1544,6 +1588,7 @@ static BOOL cd_fetch(ULONG lba)
+      * other: queued while a read is in flight it replaces the read, or
+      * interrupts the streaming that read is waiting on. */
+     cd_busy = 1;
++    cd_why = 0;
+ 
+     /* Eight, up from three, after reading Sega's sample policy: it
+      * re-seeks up to thirty times before giving up. Time is the real
+@@ -1637,6 +1682,7 @@ static BOOL cd_fetch(ULONG lba)
+         settle = cdd_irqs;
+         seen = settle;
+         cd_badrun = 0;
++        why1 = 0;
+         while (cd_budget > 0 && cd_time_left()) {
+             cd_budget--;
+             if (cd_ring_find(lba, &pt))
+@@ -1684,8 +1730,10 @@ static BOOL cd_fetch(ULONG lba)
+                     cd_gone = 1;
+                     goto done;
+                 }
+-                if (act == CD_ABANDON)
++                if (act == CD_ABANDON) {
++                    why1 = 4;
+                     break;
++                }
+             }
+ 
+             if (cdc_ints) {
+@@ -1701,10 +1749,17 @@ static BOOL cd_fetch(ULONG lba)
+                  * only possible if the reader was away longer than the
+                  * decoder's buffer, which is a tenth of a second. Seek
+                  * rather than wait for a lap of the disc. */
+-                if (cd_ring_newest != 0xFFFFFFFFUL && cd_ring_newest > lba)
++                if (cd_ring_newest != 0xFFFFFFFFUL && cd_ring_newest > lba) {
++                    why1 = 2;
+                     break;
++                }
+             }
+         }
++        /* Out of the wait loop without the sector: one nibble per
++         * attempt, newest in the low bits. 1 timed out, 2 the stream
++         * was already past, 3 the transfer failed, 4 the drive's state
++         * said to stop asking. */
++        cd_why = (UWORD)((cd_why << 4) | (why1 ? why1 : 1));
+         continue;
+ 
+ collect:
+@@ -1713,6 +1768,7 @@ collect:
+             got = TRUE;
+         } else {
+             cd_streaming = 0;           /* the transfer is what failed */
++            cd_why = (UWORD)((cd_why << 4) | 3);
+         }
+     }
+ 

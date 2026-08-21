@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 07:00:25 +0000
+Subject: [PATCH 102/184] segacd: count what the ring's mode gate throws away,
+ and keep the byte
+
+The first hardware log from this driver: 119 sectors announced by the
+decoder during the attempt that timed out, and the ring still empty --
+not "nothing reached the target", empty, and cd_ring_reset runs at
+each re-seek so that is 119 announced after the reset with none
+entering. cd_badhdr was zero in both rounds, so they were not rejected
+for an impossible MSF; they never reached that test.
+
+The only gate in front of it is the mode byte. If HEAD3 is neither 1
+nor 2 on that console then the sector ring -- the centrepiece of the
+last twenty commits, added specifically to make hardware work -- has
+never held a single entry there, and the reads that did succeed came
+through the older direct path. That would explain wr 1 and fx 1
+sitting beside an empty ring.
+
+It is also a deduction, and the last deduction from this log was
+wrong: why 1111 turned out to be a nibble computed from a counter
+zeroed nineteen lines earlier, which could not have read otherwise.
+So this counts rather than believes. cd_badmode says how often the
+gate fires and cd_lasth3 says what the byte actually was, and the
+console can settle it.
+
+Already informative under gpgx, where reads mostly work: mode 30,
+h3 00. The gate fires there too, and the byte is zero rather than
+some other data mode -- which is the same shape as the round-one
+Fread that comes back all zeros while every counter reports success.
+Those may be one fault.
+---
+ bios/bios.c   | 12 +++++++++---
+ bios/segacd.c | 22 +++++++++++++++++++++-
+ bios/segacd.h |  3 ++-
+ 3 files changed, 32 insertions(+), 5 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 0fe2b96..5e8d88e 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1156,9 +1156,9 @@ void biosmain(void)
+         LONG h, rc;
+         UWORD run, arm, seeks, hits, errs, why, bad, wrong, torn, flag;
+         WORD wdelta;
+-        UWORD fix, flba, fsame, ts, tsf, tsrc, lints;
++        UWORD fix, flba, fsame, ts, tsf, tsrc, lints, badmode;
+         WORD lshort;
+-        UBYTE state;
++        UBYTE state, lasth3;
+         int i;
+ 
+         cprintf("\033E");
+@@ -1209,7 +1209,7 @@ void biosmain(void)
+             segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
+                             &bad, &wrong, &torn, &flag, &wdelta, &fix,
+                             &flba, &fsame, &ts, &tsf, &tsrc,
+-                            &lints, &lshort);
++                            &lints, &lshort, &badmode, &lasth3);
+             DLOG(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+                     state, seeks, hits, errs, why);
+             DLOG(" torn %u bcd %u wr %u l%d fx %u fl %u\r\n",
+@@ -1224,6 +1224,12 @@ void biosmain(void)
+              * ring stayed empty for the whole attempt, and int 65535
+              * that no fetch has timed out at all. */
+             DLOG(" timeout: int %u  d %d\r\n", lints, lshort);
++            /* And the gate in front of the ring. A sector only gets in
++             * if its mode byte is 1 or 2; mode counts the ones that
++             * were not, h3 is the last such byte. If mode tracks the
++             * announced count then the ring is being starved by this
++             * test alone, and h3 says what to widen it to. */
++            DLOG(" mode %u  h3 %02X\r\n", badmode, lasth3);
+             /* Phase one of the timeshare: is the machine's own CDBIOS
+              * still up there in Word RAM, and does it execute when
+              * exchanged back into low memory? CDBCHK is the smallest
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 038ab34..5ff3521 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -262,6 +262,19 @@ static UWORD cd_why;            /* nibble per attempt of the last
+  * the read never reached the drive; or it produced sectors that never
+  * got as far as the one wanted, meaning the drive is reading in the
+  * wrong place. These two numbers are the difference. */
++/* Why a decoded sector did not enter the ring.
++ *
++ * The first hardware log from this driver reported 119 sectors
++ * announced during a timeout and an empty ring, with cd_badhdr at
++ * zero -- so they were not being rejected for an impossible MSF, they
++ * were not reaching that test at all. The only gate in front of it is
++ * the mode byte, and if HEAD3 is neither 1 nor 2 on this console then
++ * the ring has never held a single entry here. That is a deduction,
++ * and the last deduction about this log was wrong, so it is counted
++ * rather than believed: cd_badmode says how often, cd_lasth3 says
++ * what the byte actually is. */
++static UWORD cd_badmode;        /* decoded, mode byte neither 1 nor 2 */
++static UBYTE cd_lasth3;         /* the last such byte, verbatim */
+ static UWORD cd_lastints = 0xFFFF;      /* decoder interrupts during the
+                                  * attempt that gave up: zero is a deaf
+                                  * drive, and 0xFFFF is no timeout yet --
+@@ -1067,6 +1080,10 @@ void segacd_int_5_c(void)
+         }
+     } else if (h3 == 0x01 || h3 == 0x02) {
+         cd_badhdr++;            /* decoded, mode plausible, MSF impossible */
++    } else {
++        cd_badmode++;           /* not even a data sector, as far as the
++                                 * mode byte is concerned */
++        cd_lasth3 = h3;
+     }
+ }
+ 
+@@ -2671,10 +2688,13 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+                      UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
+                      UWORD *flba, UWORD *fsame, UWORD *ts, UWORD *tsf,
+-                     UWORD *tsrc, UWORD *lints, WORD *lshort)
++                     UWORD *tsrc, UWORD *lints, WORD *lshort,
++                     UWORD *badmode, UBYTE *lasth3)
+ {
+     *lints = cd_lastints;
+     *lshort = cd_lastshort;
++    *badmode = cd_badmode;
++    *lasth3 = cd_lasth3;
+     *ts = cd_ts ? cd_ts_reads : 0xFFFF;
+     *tsf = cd_ts_fails;
+     *tsrc = cd_ts_rc;
+diff --git a/bios/segacd.h b/bios/segacd.h
+index c5301d8..bbe8f90 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -38,7 +38,8 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+                      UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
+                      UWORD *flba, UWORD *fsame, UWORD *ts, UWORD *tsf,
+-                     UWORD *tsrc, UWORD *lints, WORD *lshort);
++                     UWORD *tsrc, UWORD *lints, WORD *lshort,
++                     UWORD *badmode, UBYTE *lasth3);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
+ UBYTE segacd_bram_state(void);  /* 0 none 1 ours 2 Sega saves 3 RAM cart */
+ UWORD segacd_bios_probe(void);  /* exchange the CDBIOS in, call it, out */

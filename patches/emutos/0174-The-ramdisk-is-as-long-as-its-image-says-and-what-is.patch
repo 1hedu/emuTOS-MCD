@@ -1,0 +1,209 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 19 Aug 2026 08:40:00 +0000
+Subject: [PATCH 174/184] The ramdisk is as long as its image says, and what is
+ left is a payload's
+
+A payload that needs more than its 32000 bytes was told, by
+docs/payload.md, that sub $60000 upwards was free. It is the C: ramdisk
+-- the boot drive -- and ADISK_SECTORS was a constant covering the whole
+region between phystop and the timeshare's scratch whether the image
+filled it or not. Fifty kilobytes of Sonic's art landed on top of it.
+
+So the length comes from the image's own boot sector, which is the only
+party that knows it, clamped both ways so a corrupt field can neither
+read past the region nor make the drive zero-length. What is left over
+between the end of the ramdisk and $7C000 is published:
+
+  SCD_BULK_INFO    fills two longs, base and length; zero length means
+                   the ramdisk fills the region and there is none
+  SCD_PAYLOAD_BULK tells the servant where it is, as a bank and a
+                   512-byte block index, so the payload can be handed a
+                   window address rather than have to know the map
+
+And SCD_BOOT_OVER, because D: refuses every read until the desktop is up
+-- cd_booting, and deskmain() is what clears it -- so a program launched
+out of AUTO sees -34 from every name on it. That is correct and it is
+also useless to the program: this says the boot is over, which is what
+deskmain() would have said a moment later anyway. An afternoon and three
+theories about GEMDOS paths went into finding that out.
+---
+ bios/scdapi.h | 24 ++++++++++++++++-
+ bios/segacd.c | 72 +++++++++++++++++++++++++++++++++++++++++++++------
+ 2 files changed, 87 insertions(+), 9 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index ff689cc..ce66300 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  31
++#define SCD_VERSION  32
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -167,6 +167,28 @@ struct scd_snap {
+  * in video memory, not in the 32000 bytes of Genesis RAM a payload
+  * gets, and VRAM is free for as long as a payload owns the screen. */
+ #define SCD_PAYLOAD_VRAM  14
++/* Bulk data: a lot of memory that EmuTOS will never allocate, for a
++ * payload that needs more than the 32000 bytes it is handed.
++ *
++ * INFO fills two longs at a -- byte address and length -- with whatever
++ * is left between the end of the ramdisk and the timeshare's scratch. A
++ * length of zero means the ramdisk fills the region and there is none.
++ * The caller writes the data there itself: it is ordinary memory on
++ * this side, and no handshake moves it.
++ *
++ * BULK then tells the servant where it is, in a = the byte address and
++ * b = the length, so that the payload can be handed the window address
++ * rather than have to know the map. */
++#define SCD_BULK_INFO     15
++#define SCD_PAYLOAD_BULK  16
++/* "The boot is over." D: refuses every read until the desktop is up --
++ * see cd_booting in segacd.c, which exists so that a drive that cannot
++ * answer costs an icon rather than a minute -- and the desktop is what
++ * clears it. A program launched out of AUTO runs before that and sees
++ * -34 from every name on D:, which is correct and is also useless to
++ * it. This says so, and is what deskmain() would have said a moment
++ * later anyway. */
++#define SCD_BOOT_OVER     17
+ #define SCD_CARTSWAP      11            /* Mode 1: expect the cartridge to
+                                          * be pulled and another put in */
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 6eccdfd..fe25d1f 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3778,6 +3778,9 @@ static void scd_snapshot(struct scd_snap *s)
+ 
+ void cart_swap_arm(void);       /* defined with cart_seq, further down */
+ static ULONG scd_payload(LONG op, LONG a, LONG b);
++/* Tentative definitions: the real ones are down beside the ramdisk that
++ * decides them. */
++static ULONG bulk_base, bulk_len;
+ 
+ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+ {
+@@ -3799,7 +3802,12 @@ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+     case SCD_PAYLOAD_BLOCK:
+     case SCD_PAYLOAD_VRAM:
+     case SCD_PAYLOAD_RUN:
++    case SCD_PAYLOAD_BULK:
+         return scd_payload(op, a, b);
++    case SCD_BOOT_OVER: cd_boot_over(); break;
++    case SCD_BULK_INFO:
++        if (a) { ((ULONG *)a)[0] = bulk_base; ((ULONG *)a)[1] = bulk_len; }
++        return bulk_len;
+     case SCD_EJECT:
+         cdd_cmd_on = 1;         /* our commander carries it, always */
+         cdd_ask_eject();
+@@ -4271,17 +4279,36 @@ void segacd_int_2_c(void)
+  * we only do linear sector math (16 sectors/track, 1 side, 512 bytes). */
+ 
+ #define ADISK_BASE  ((UBYTE *)0x60000)
+-#define ADISK_SECTORS 224               /* 0x1C000 / 512.
+-                                         * Twelve KB shorter than it was:
+-                                         * 0x7C000-0x7EFFF is now the
++#define ADISK_TOP   0x7C000UL           /* 0x7C000-0x7EFFF is the
+                                          * timeshare's scratch -- stack,
+                                          * BIOS packet and read buffer for
+                                          * visits to the parked firmware.
+                                          * It has to live above phystop,
+                                          * where EmuTOS never allocates,
+                                          * and outside the 24 KB that gets
+-                                         * exchanged. This is the only
+-                                         * such region on the machine. */
++                                         * exchanged. */
++#define ADISK_MAX_SECTORS 224           /* 0x1C000 / 512 */
++
++/* How long the ramdisk is, taken from the image rather than assumed.
++ *
++ * It used to be a constant, and the constant was the whole of the space
++ * between phystop and the timeshare's scratch -- so the ramdisk owned
++ * every byte of PRG RAM that EmuTOS did not, whether it had anything in
++ * it or not. That was invisible until a payload wanted somewhere to put
++ * fifty kilobytes of art (docs/payload.md, "Bulk data"): the address
++ * the documentation said was free was the boot drive.
++ *
++ * The boot sector's total-sector count is what the builder wrote and is
++ * the only party that knows how big the image is, so it is the party
++ * asked. Clamped both ways: a corrupt field cannot make the drive read
++ * past the region, and cannot make it zero-length either. */
++static UWORD adisk_sectors;
++
++/* And what is left over, for whoever wants a lot of memory that EmuTOS
++ * will never allocate -- bulk_base and bulk_len, declared up beside
++ * scd_payload() because that is what answers for them. Zero length when
++ * the ramdisk fills the region, which is what a disc built before this
++ * existed will do. */
+ 
+ /* B: is the backup RAM cartridge, which only the Genesis-side CPU can
+  * reach. Sectors move through a bounce buffer at the top of the same
+@@ -4480,8 +4507,21 @@ void segacd_floppy_init(void)
+     /* the builder stamps "EmuTOSMD" as the OEM field at offset 2 */
+     adisk_present = (ADISK_BASE[2] == 'E' && ADISK_BASE[3] == 'm'
+                   && ADISK_BASE[4] == 'u' && ADISK_BASE[5] == 'T');
+-    if (adisk_present)
++    adisk_sectors = 0;
++    bulk_base = bulk_len = 0;
++    if (adisk_present) {
++        /* offset 19: total sectors, little-endian, as FAT has always
++         * had it. The image is a FAT12 one and never approaches the
++         * 65535 the field runs out at, so the 32-bit field at 32 is not
++         * consulted. */
++        UWORD n = (UWORD)(ADISK_BASE[19] | (ADISK_BASE[20] << 8));
++        if (n == 0 || n > ADISK_MAX_SECTORS)
++            n = ADISK_MAX_SECTORS;
++        adisk_sectors = n;
++        bulk_base = (ULONG)ADISK_BASE + (ULONG)n * SECTOR_SIZE;
++        bulk_len = ADISK_TOP - bulk_base;
+         segacd_event(5);
++    }
+     cart_sectors = CART_CNT_SECTORS;   /* published by the servant at startup */
+ 
+     /* Both, now, and not one or the other.
+@@ -4628,6 +4668,22 @@ static ULONG scd_payload(LONG op, LONG a, LONG b)
+         memcpy((void *)BOUNCE, (const void *)b, SECTOR_SIZE);
+         return (ULONG)cart_xfer(op == SCD_PAYLOAD_VRAM ? 6 : 4, (UWORD)a);
+     }
++    if (op == SCD_PAYLOAD_BULK) {
++        /* Where the bulk data is, in the servant's terms: which 128 KB
++         * bank of PRG RAM the window has to show, and how far into it.
++         * Sent as one word because that is what the request register
++         * carries -- bank in the top two bits, 512-byte block index in
++         * the rest, which is exact for anything the region can hold.
++         *
++         * The length goes across as a second request rather than being
++         * assumed: a payload that reads past the end of what was loaded
++         * reads the timeshare's scratch, and would rather be told. */
++        UWORD where = (UWORD)((((ULONG)a >> 17) & 3) << 14)
++                    | (UWORD)(((ULONG)a & 0x1FFFFUL) >> 9);
++        WORD r = cart_xfer(7, where);
++        if (r != E_OK) return (ULONG)r;
++        return (ULONG)cart_xfer(8, (UWORD)(((ULONG)b + 511) >> 9));
++    }
+     return (ULONG)cart_xfer(5, 0);
+ }
+ 
+@@ -4652,7 +4708,7 @@ LONG segacd_ramdisk_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+ 
+     if (!adisk_present)
+         return EUNDEV;
+-    if (sector < 0 || sector + count > ADISK_SECTORS)
++    if (sector < 0 || sector + count > adisk_sectors)
+         return ESECNF;
+ 
+     p = ADISK_BASE + sector * SECTOR_SIZE;
+@@ -4672,7 +4728,7 @@ LONG segacd_ramdisk_ioctl(WORD op, void *arg)
+ 
+     switch (op) {
+     case GET_DISKINFO:
+-        info[0] = ADISK_SECTORS;
++        info[0] = adisk_sectors;
+         info[1] = SECTOR_SIZE;
+         return E_OK;
+     case GET_DISKNAME:

@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 18 Aug 2026 00:00:38 +0000
+Subject: [PATCH 168/184] Sega CD: a cartridge can be changed with the power on
+ after all
+
+segacd_cart_ioctl() answered GET_MEDIACHANGE with MEDIANOCHANGE and a
+comment saying a cartridge cannot be swapped while the machine runs.
+On the Mode 1 branch it can: the boot cartridge comes out and a backup
+RAM cart goes in, and the geometry with it.
+
+cart_refresh() re-reads CART_CNT and reports whether the five bits above
+the sector count have moved. It does not care what they mean -- on the
+CD branch they are the probe's findings and never change after boot, on
+Mode 1 they are a counter the servant bumps on a swap -- only that a
+change means this is not the cartridge the drive was mounted against.
+Treating them as an opaque generation keeps one driver honest about two
+servants.
+
+The refresh runs before the empty-slot refusal, so a swap into or out of
+an empty slot is still reported, and on every read and write so the
+geometry follows the cartridge.
+---
+ bios/segacd.c | 39 +++++++++++++++++++++++++++++++++++----
+ 1 file changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 5586142..25013af 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -4698,8 +4698,15 @@ LONG segacd_bram_ioctl(WORD op, void *arg)
+  * ahead of the disc, so on a Mode 1 boot the storage that is certainly
+  * present gets the first letter and the disc gets D:.
+  */
++static WORD cart_refresh(void);         /* defined with the ioctl below */
++
+ LONG segacd_cart_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+ {
++    /* A cartridge used not to be changeable with the power on. On the
++     * Mode 1 branch it is: the boot cartridge comes out and a backup RAM
++     * cart goes in, and the geometry with it. */
++    (void)cart_refresh();
++
+     WORD err;
+ 
+     if (!cart_sectors)
+@@ -4726,9 +4733,37 @@ LONG segacd_cart_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+     return E_OK;
+ }
+ 
++/* Has the servant changed what it is talking to?
++ *
++ * CART_CNT's low eleven bits are the sector count and the five above
++ * are whatever the servant put there. This does not care what they
++ * mean -- on the CD branch they are the probe's findings and never move
++ * after boot; on the Mode 1 branch they are a counter that goes up when
++ * the cartridge is swapped -- only that a change in them means the
++ * cartridge is not the one this drive was mounted against. Treating it
++ * as an opaque generation keeps one driver honest about two servants.
++ */
++static UWORD cart_gen = 0xFFFF;
++
++static WORD cart_refresh(void)
++{
++    UWORD now = (UWORD)(CART_CNT >> 11);
++    WORD changed = (cart_gen != 0xFFFF) && (now != cart_gen);
++
++    cart_gen = now;
++    cart_sectors = CART_CNT_SECTORS;
++    return changed;
++}
++
+ LONG segacd_cart_ioctl(WORD op, void *arg)
+ {
+     ULONG *info = (ULONG *)arg;
++    WORD changed = cart_refresh();
++
++    /* The change has to be reported even when the slot has gone empty,
++     * so the refresh comes before the refusal. */
++    if (op == GET_MEDIACHANGE)
++        return changed ? MEDIACHANGE : MEDIANOCHANGE;
+ 
+     if (!cart_sectors)
+         return EUNDEV;
+@@ -4741,10 +4776,6 @@ LONG segacd_cart_ioctl(WORD op, void *arg)
+     case GET_DISKNAME:
+         strcpy((char *)arg, "Cart");
+         return E_OK;
+-    case GET_MEDIACHANGE:
+-        /* A cartridge cannot be changed with the power on, and the
+-         * power going off ends EmuTOS along with the question. */
+-        return MEDIANOCHANGE;
+     }
+     return ERR;
+ }

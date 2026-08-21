@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 09:32:19 +0000
+Subject: [PATCH 144/184] Settle to pause before the retry, and what Doom
+ actually does
+
+Two things, one shipped and one written down.
+
+Shipped: cd_read_block's second fill was starting against a drive still
+in flight. cd_fetch's failure path tells the drive to pause and returns
+immediately, so the retry faced exactly the coin toss the per-attempt
+reissue exists to avoid, one level up. Sega's hardware notes are
+explicit that a read issued from pause starts instantly -- in state 4
+the head keeps reading and jumps back a track each pass, hovering over
+the right place rather than travelling. Wait for state 4, bounded by
+twenty of the drive's own exchanges and by the fill's clock.
+
+The console said this in the one way that could not be misread: both
+reads that failed at the desktop -- opening D:, then opening the file
+-- raised GEMDOS's critical-error alert, and both succeeded on the
+first press of Retry. The difference between our retry and the human's
+is a second of the drive settling.
+
+Written down, from Doom CD32X Fusion's sub program in the cartridge at
+0xC40 (its disc is not bootable either -- sector 0 is empty -- so it is
+a Mode 1 data reader, the same problem we have):
+
+  6866: movem.l d0-d1/a0-a1,-(sp)   d0 start, d1 count, a0 dest
+        move.w #$89,d0   CDCSTOP
+        jsr $5F22
+        movea.l sp,a0
+        move.w #$20,d0   ROMREADN
+        jsr $5F22
+
+One CDCSTOP and one ROMREADN for a run of COUNT sectors, then
+CDCSTAT/CDCREAD/CDCTRN/CDCACK per sector with no drive command in
+between. This driver sends a Play per 2048-byte sector and re-decides
+the seek each time: 69 seeks for 84 sectors on the console.
+
+And its init, which is four instructions we do not have:
+
+  65fe: lea $694C,a0
+        move.w #$10,d0   DRV_INIT
+        jsr $5F22
+        move.w #0,d1
+        move.w #$96,d0   CDCSETMODE
+        jsr $5F22
+
+DRV_INIT appears at three sites in Doom. The claim in this file that
+"no Sega code that reads a sector calls DRV_INIT" is wrong, and the
+console had already contradicted it: DRV_INIT is what brings this drive
+out of its no-information state. CDCSETMODE we have never called at
+all -- we write a hard-coded CTRL0/CTRL1 ladder and let a heuristic
+pick a rung, against 95% chaff out of the decoder.
+---
+ bios/segacd.c | 33 +++++++++++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 1cca856..3c328ed 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3043,6 +3043,39 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+                 cd_leash = go ? (UWORD)(leash * 2) : leash;
+                 if (cd_fill(lba))
+                     break;
++
++                /* Let it reach the pause before trying again.
++                 *
++                 * cd_fetch's failure path tells the drive to pause and
++                 * returns immediately, so the retry above was starting
++                 * against a drive still in flight -- the coin toss the
++                 * per-attempt reissue was written to avoid, repeated
++                 * one level up. Sega's hardware notes are explicit
++                 * that a read issued from pause starts instantly,
++                 * because in state 4 the head keeps reading and jumps
++                 * back a track each pass; it is hovering over the
++                 * right place rather than travelling.
++                 *
++                 * The console said this out loud, in the one way this
++                 * project could not misread. Both reads that failed at
++                 * the desktop -- opening D:, then opening the file --
++                 * came back with GEMDOS's critical-error alert, and
++                 * both succeeded on the first press of Retry. The
++                 * difference between our retry and the human's is a
++                 * second or two of the drive settling, and that is all
++                 * this is.
++                 *
++                 * Bounded twice, by the drive's own exchanges and by
++                 * the fill's clock, so a drive that never pauses costs
++                 * a quarter of a second and not the session. */
++                {
++                    UBYTE base = cdd_irqs;
++
++                    while ((UBYTE)(cdd_irqs - base) < 20 && cd_time_left()) {
++                        if (cdd_valid && cdd_stat[0] == 0x4)
++                            break;
++                    }
++                }
+                 if (go) {
+                     cd_leash = leash;
+                     return FALSE;

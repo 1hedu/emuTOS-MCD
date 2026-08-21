@@ -1,0 +1,287 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 05:30:32 +0000
+Subject: [PATCH 031/184] segacd: let the drive pick the way to talk to it
+
+Four discs, four guesses of mine about how a command reaches the CDD,
+four wrong. Spending somebody else's CD-Rs one hypothesis at a time is
+the wrong shape for this problem, so the guessing moves into the
+firmware.
+
+It carries six ways of sending: the ten nibbles as five words or as
+ten bytes, crossed with what happens to HOCK afterwards -- nothing,
+set it, or take it low and back up, which is the edge the last commit
+claimed to produce and did not, since writing a set bit is not an
+edge. Each gets eight attempts before the next one's turn.
+
+The drive is the judge. A strategy counts as working only when the
+reply names the sub-command it was asked for, and only after doing so
+for two different sub-commands, since a single match could be a value
+already sitting in the register. The winner is latched and the normal
+seven-question sweep resumes on top of it.
+
+Six failures would be worth as much as any success: that rules out the
+trigger being a write performed in the wrong order or the wrong width,
+which is the entire family of theories tried so far.
+
+Verified with the answer detection forced off, so the search really
+does cycle 0-5 and wrap, on both cores, without the link score
+dropping or the machine hanging -- including the two strategies that
+take HOCK low, which are the only ones that could plausibly end a
+working link.
+---
+ bios/segacd.c | 175 +++++++++++++++++++++++++++++++++++++++-----------
+ 1 file changed, 137 insertions(+), 38 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 0d6f817..14c15d4 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -122,6 +122,9 @@ const UBYTE *segacd_physbase(void)
+  * about the disc, selected by nibble 3; sub-command 0 is "where is the
+  * head now", which touches nothing and is therefore the safe way to
+  * prove a command round-trip on real hardware. */
++#define CDD_NSTRAT  6
++#define CDD_NOWIN   0x0F        /* nothing has worked yet */
++
+ #define CDD_CMD_STAT    0x00
+ #define CDD_CMD_INFO    0x02
+ 
+@@ -144,7 +147,14 @@ static UBYTE subvbl;            /* the sub CPU's own heartbeat */
+ static UBYTE cdd_ctrl;          /* DTS/DRS as last sampled */
+ static UBYTE cdd_ctrl_ever;     /* DTS/DRS ever seen set at all */
+ static UBYTE cdd_blocked;       /* interrupts spent waiting for DTS/DRS */
+-static UBYTE cdd_hock_edge;     /* holding B: take HOCK low to make an edge */
++static UBYTE cdd_strat;         /* which way of sending we are trying */
++static UBYTE cdd_won = CDD_NOWIN;   /* the one the drive answered */
++static UBYTE cdd_tries;         /* attempts spent on this strategy */
++static UBYTE cdd_hits;          /* answers it has earned */
++static UBYTE cdd_hitsub = 0xFF; /* which question the last answer named */
++static UBYTE cdd_want;          /* the sub-command last asked for */
++static UBYTE cdd_answered;      /* the reply named it */
++static UBYTE cdd_alt;           /* alternates the two search questions */
+ 
+ void segacd_cdd_init(void)
+ {
+@@ -170,7 +180,6 @@ void segacd_cdd_init(void)
+         } while ((f & 0xFF00) != 0x5A00 && --spin);
+ 
+         cdd_cmd_on = (UBYTE)((f & 1) ? 0 : 1);
+-        cdd_hock_edge = (UBYTE)((f & 2) ? 1 : 0);
+     }
+ 
+     /* Vector first, then unmask, then start the clock: the first packet
+@@ -180,47 +189,84 @@ void segacd_cdd_init(void)
+     *CDD_CTRL = CDD_HOCK;       /* start the 75 Hz status reports */
+ }
+ 
+-/* Written as five 16-bit registers, two nibbles to a word, rather than
+- * ten byte writes. The gate array documents this block as words and
+- * hardware behaves as though it means it: byte writes leave the drive
+- * posting status that no longer checksums, permanently, from the very
+- * first command. Both emulators accept either. */
+-static void cdd_command(const UBYTE *nib)       /* nine nibbles */
++/* Six candidate ways to hand a command to the drive.
++ *
++ * Every disc so far tested one guess of mine, and every one of them was
++ * wrong, which is a poor use of somebody else's CD-Rs. So the guessing
++ * moves into the firmware: it tries each of these in turn and keeps
++ * whichever one the drive demonstrably answers. Six wrong guesses then
++ * cost one disc instead of six -- and six failures would be worth as
++ * much as any success, because that eliminates the whole idea that the
++ * trigger is a write being done in the wrong order or the wrong width.
++ *
++ * They differ in two things: whether the ten nibbles go down as five
++ * words or ten bytes, and what is done to HOCK afterwards. HOCK is
++ * documented as "starts communication with the CDD", which reads as a
++ * strobe -- and a strobe needs an edge, which writing an already-set
++ * bit does not produce. Taking it low also writes 0 to DTS and DRS,
++ * documented as aborting a transfer, so it only happens when the
++ * caller has just checked that neither is running. */
++static void cdd_load_words(const UBYTE *nib, UBYTE ck)
+ {
+     volatile UWORD *w = (volatile UWORD *)0xFF8042;
+-    UBYTE sum = 0;
+-    int i;
+-
+-    for (i = 0; i < 9; i++)
+-        sum = (UBYTE)(sum + nib[i]);
+ 
+     w[0] = (UWORD)((nib[0] << 8) | nib[1]);
+     w[1] = (UWORD)((nib[2] << 8) | nib[3]);
+     w[2] = (UWORD)((nib[4] << 8) | nib[5]);
+     w[3] = (UWORD)((nib[6] << 8) | nib[7]);
+-    w[4] = (UWORD)((nib[8] << 8) | ((~sum) & 0x0F));
+-
+-    /* HOCK is documented as starting a communication, so on hardware
+-     * that reads as a strobe -- but the register already holds it, and
+-     * writing a bit that is already set produces no edge at all. The
+-     * first attempt at "pulsing" it did exactly that and changed
+-     * nothing, which is its own small lesson. A real edge means taking
+-     * it low first, and taking it low also writes 0 to DTS and DRS,
+-     * which is documented as aborting a transfer -- harmless only
+-     * because the caller has just checked that neither is running.
+-     *
+-     * Gated on holding B, because clearing the bit that started the
+-     * link is the one action here that could plausibly end it. */
+-    if (cdd_hock_edge) {
++    w[4] = (UWORD)((nib[8] << 8) | ck);
++}
++
++static void cdd_load_bytes(const UBYTE *nib, UBYTE ck)
++{
++    int i;
++
++    for (i = 0; i < 9; i++)
++        CDD_CMD[i] = nib[i];
++    CDD_CMD[9] = ck;            /* last, in case this write is the trigger */
++}
++
++static void cdd_command(const UBYTE *nib)       /* nine nibbles */
++{
++    UBYTE ck, sum = 0;
++    int i;
++
++    for (i = 0; i < 9; i++)
++        sum = (UBYTE)(sum + nib[i]);
++    ck = (UBYTE)((~sum) & 0x0F);
++
++    switch (cdd_strat) {
++    default:
++    case 0:                             /* words; the last write is it */
++        cdd_load_words(nib, ck);
++        break;
++    case 1:                             /* words, then set HOCK again */
++        cdd_load_words(nib, ck);
++        *CDD_CTRL = CDD_HOCK;
++        break;
++    case 2:                             /* words, then a real HOCK edge */
++        cdd_load_words(nib, ck);
++        *CDD_CTRL = 0;
++        *CDD_CTRL = CDD_HOCK;
++        break;
++    case 3:                             /* loaded with the clock stopped */
+         *CDD_CTRL = 0;
++        cdd_load_words(nib, ck);
+         *CDD_CTRL = CDD_HOCK;
++        break;
++    case 4:                             /* bytes; the last write is it */
++        cdd_load_bytes(nib, ck);
++        break;
++    case 5:                             /* bytes, then a real HOCK edge */
++        cdd_load_bytes(nib, ck);
++        *CDD_CTRL = 0;
++        *CDD_CTRL = CDD_HOCK;
++        break;
+     }
+ 
+-    /* Now watch for the transfer actually starting. The bit was
+-     * previously only ever sampled at the top of the interrupt --
+-     * which is to say, before the write that was supposed to set it,
+-     * and a whole packet period after the last one. "Never observed"
+-     * meant nothing at all; this is where it has to be looked for. */
++    /* Watch for the transfer actually starting, here rather than at the
++     * top of the next interrupt: sampling it there samples before the
++     * write that would set it, so "never observed" meant nothing. */
+     {
+         UWORD n;
+         for (n = 0; n < 512; n++) {
+@@ -255,15 +301,62 @@ static const UBYTE cdd_probes[][2] = {
+ };
+ #define CDD_NPROBES (sizeof(cdd_probes) / sizeof(cdd_probes[0]))
+ 
+-static void cdd_ask_next(void)
++static void cdd_ask(UBYTE cmd, UBYTE sub)
+ {
+     int i;
+ 
+     for (i = 0; i < 9; i++)
+         cdd_queued[i] = 0;
+-    cdd_queued[0] = cdd_probes[cdd_probe][0];
+-    cdd_queued[3] = cdd_probes[cdd_probe][1];
++    cdd_queued[0] = cmd;
++    cdd_queued[3] = sub;
++    cdd_want = sub;
++    cdd_answered = 0;
+     cdd_pending = 1;
++}
++
++/* Until something is known to work, every command is an experiment.
++ *
++ * The drive decides, not me: a strategy counts as working only when the
++ * reply names the sub-command it was asked for, and only after it has
++ * done that for two *different* sub-commands -- one match could be a
++ * default value sitting in the register. Ask for the total disc length
++ * and then the current track, since 3 and 2 are values nothing would
++ * report by accident.
++ *
++ * Eight unanswered attempts and the next strategy gets its turn. If all
++ * six go round without a single answer, that is a real result and not a
++ * blank one: it rules out the trigger being a write we are performing
++ * in the wrong order or the wrong width, and points somewhere else
++ * entirely. */
++static void cdd_search(void)
++{
++    static const UBYTE ask[2] = { 0x03, 0x02 };
++
++    if (cdd_answered) {                 /* the reply named what we asked */
++        if (cdd_hits < 2 && cdd_want != cdd_hitsub) {
++            cdd_hitsub = cdd_want;
++            if (++cdd_hits >= 2)
++                cdd_won = cdd_strat;    /* twice, on two questions: keep it */
++        }
++    } else if (++cdd_tries >= 8) {      /* this one has had its chance */
++        cdd_tries = 0;
++        cdd_hits = 0;
++        cdd_hitsub = 0xFF;
++        if (++cdd_strat >= CDD_NSTRAT)
++            cdd_strat = 0;
++    }
++
++    cdd_ask(CDD_CMD_INFO, ask[cdd_alt ^= 1]);
++}
++
++static void cdd_ask_next(void)
++{
++    if (cdd_won == CDD_NOWIN) {
++        cdd_search();
++        return;
++    }
++
++    cdd_ask(cdd_probes[cdd_probe][0], cdd_probes[cdd_probe][1]);
+ 
+     if (++cdd_probe >= CDD_NPROBES)
+         cdd_probe = 0;
+@@ -280,6 +373,12 @@ static void cdd_poll(void)
+     for (i = 0; i < 9; i++)
+         sum = (UBYTE)(sum + cdd_stat[i]);
+     cdd_valid = (UBYTE)((((~sum) & 0x0F) == cdd_stat[9]) ? 1 : 0);
++
++    /* The only evidence that a command arrived: the drive naming the
++     * sub-command it was asked for. Checked on every packet, because
++     * the reply may be a packet or two behind the request. */
++    if (cdd_valid && cdd_stat[0] != 0x0F && cdd_stat[1] == cdd_want)
++        cdd_answered = 1;
+ }
+ 
+ /* Level 4: a status packet has arrived, 75 times a second. Read it,
+@@ -585,8 +684,8 @@ void segacd_int_2_c(void)
+      * the high two. Minutes lost its place to that, and deserved to. */
+     *(volatile UWORD *)0xFF8028 = (UWORD)(((UWORD)cdd_stat[0] << 12)
+         | ((UWORD)cdd_stat[1] << 8)
+-        | ((UWORD)cdd_stat[8] << 4)
+-        |  (UWORD)(cdd_ctrl | (cdd_ctrl_ever << 2)));
++        | ((UWORD)(cdd_strat & 0x0F) << 4)
++        |  (UWORD)(cdd_won & 0x0F));
+ 
+     /* Sound telemetry, packed into the spare bits of the drive status
+      * word: no comm register is free, and this answers the only
+@@ -604,7 +703,7 @@ void segacd_int_2_c(void)
+         | ((conterm & 1) ? 0x40 : 0)
+         | (cdd_cmd_on ? 0x80 : 0)
+         | ((UWORD)(cdd_stormed ? 1 : 0) << 8)
+-        | ((UWORD)(pcm_clicks & 0x07) << 9)
++        | ((UWORD)((cdd_ctrl | (cdd_ctrl_ever << 2)) & 0x07) << 9)
+         | ((UWORD)(cdd_sent & 0x0F) << 12));
+ 
+     if (pcm_countdown) {                /* silence the bell when it is due */

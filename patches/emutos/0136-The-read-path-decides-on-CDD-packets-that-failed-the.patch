@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 07:30:54 +0000
+Subject: [PATCH 136/184] The read path decides on CDD packets that failed
+ their checksum
+
+cd_state_action() and cd_prepare() both read cdd_stat[0] with no regard
+for whether the packet carrying it checksummed. Every value that switch
+can be handed is a decision: 5, B and E throw the sector cache away and
+declare the disc gone; 0, 6, 7, 8, D and F abandon the read. Nine of
+sixteen nibbles do damage, so noise does damage two times in three.
+
+The guard was already in this file -- cdd_poll() writes cdd_answered
+and the disc length only behind `cdd_valid &&` -- and had never been
+applied to the one path where the nibble decides anything.
+
+The console names the cost now that the score is published. Round one
+reported "drive 7./0": the last packet checksummed, and zero of the
+sixteen before it did. That round recorded why nibble 4, the abandon
+verdict, on its first attempt. Round two, with the link at 15 of 16,
+reported the same state 7 -- and that one is real.
+
+An unreadable packet is not the drive refusing; it is the drive not
+having been heard. Keep waiting.
+---
+ bios/segacd.c | 33 +++++++++++++++++++++++++++++----
+ 1 file changed, 29 insertions(+), 4 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 64e8340..8e9ad20 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2115,10 +2115,16 @@ static UBYTE cd_prepare(void)
+     for (round = 0; round < 6 && cd_time_left(); round++) {
+         UBYTE st = cdd_stat[0];
+ 
+-        if (st == 0x1 || st == 0x4 || st == 0xC)
+-            return CD_READY;
+-        if (st == 0x5 || st == 0xB || st == 0xE)
+-            return CD_NODISC;
++        /* Only a packet that checksummed gets to answer the question.
++         * Same reasoning as cd_state_action(): an invalid nibble
++         * declaring the disc gone is worse than no answer, and an
++         * invalid nibble declaring the drive ready is worse still. */
++        if (cdd_valid) {
++            if (st == 0x1 || st == 0x4 || st == 0xC)
++                return CD_READY;
++            if (st == 0x5 || st == 0xB || st == 0xE)
++                return CD_NODISC;
++        }
+ 
+         cdd_ask_ready();
+ 
+@@ -2154,6 +2160,25 @@ static UBYTE cd_prepare(void)
+  * six seconds of silence, three times over, reported as bad luck. */
+ static UBYTE cd_state_action(void)
+ {
++    /* A packet that failed its checksum has a nibble 0 like any other,
++     * and every value this switch can be handed is a decision: 5, B or
++     * E throws the cache away and declares the disc gone, and six more
++     * abandon the read. Garbage lands in one of those nine two times in
++     * three.
++     *
++     * The guard exists elsewhere in this file already -- cdd_poll()
++     * writes cdd_answered and the disc length only behind `cdd_valid
++     * &&` -- and was never applied to the read path, which is the one
++     * place it decides anything. The console says what that cost: a
++     * round whose CDD score read 0 of the last 16 packets recorded
++     * "why 4", the abandon verdict, on its first attempt.
++     *
++     * An unreadable packet is not the drive refusing. It is the drive
++     * not having been heard, and the answer to that is to keep
++     * waiting. */
++    if (!cdd_valid)
++        return CD_WAIT;
++
+     switch (cdd_stat[0]) {
+     case 0x1:                   /* the mode variable goes to 3: reading */
+     case 0x2:                   /* head moving; position lost, disc known */

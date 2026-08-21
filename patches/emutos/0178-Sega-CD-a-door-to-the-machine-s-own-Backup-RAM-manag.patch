@@ -1,0 +1,378 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 20 Aug 2026 08:22:12 +0000
+Subject: [PATCH 178/184] Sega CD: a door to the machine's own Backup RAM
+ manager
+
+This port lays a FAT12 volume over the whole of the backup memory, and
+Sega's volume keeps its footer in the last 0x40 bytes, so a cartridge
+can carry our files or a game's saves and not both. The way out is not
+to write Sega's format ourselves; it is to stop writing over it.
+
+The machine already has a Backup RAM file manager behind _BURAM at sub
+0x5F16 -- BRMINIT, BRMSTAT, BRMSERCH, BRMREAD, BRMWRITE, BRMDEL,
+BRMFORMAT, BRMDIR, BRMVERIFY. segacd_buram_call is the same visit to the
+parked firmware that segacd_bios_call already makes to CDBIOS at 0x5F22,
+three words along. Going through it keeps the directory layout, the
+allocation and the free count as Sega's code's problem, permanently.
+
+Two things about the visit are load-bearing and both are old lessons:
+
+  Everything passed by pointer must live above 0x6000. The visit
+  exchanges 0..0x6000; EmuTOS's stack is at 0x800, its .bss starts at
+  0x2140, and segacd.o's own .bss runs 0x35F8..0x7FF2 -- straddling the
+  line, so a static lands inside or outside by declaration order alone.
+  That is how the printer's page buffer ended up at 0x2140. The work
+  area, string buffer and call block go at 0x7E000 instead, inside the
+  region already set aside for visits to the parked firmware, with an
+  #error if the timeshare's read buffer ever grows into them.
+
+  It must be called in supervisor mode. SCD_BRAM_INFO reaches an
+  `ori.w #0x0700,sr`, and a .PRG calling through the cookie arrives in
+  user mode. progs/cdtest.c documents this exact panic, sr=0010, about
+  this exact mistake. It was made again here anyway.
+
+SCD_BRAM_INFO (op 19) packs BRMINIT's status and size with BRMSTAT's
+free and file count. It reads and does not write.
+
+Measured, on a CD boot and a Mode 1 cartridge boot alike -- the Mode 1
+loader parks the firmware too, so there is no boot path without this:
+
+    raw 03027D00 -- Sega formatted, 2 blocks of 4096, 125 free, 0 files
+
+and the volume byte-identical afterwards, footer intact, every byte
+before it still zero.
+
+BRMSTAT's unit is 0x40 bytes, not the 0x1000 megadev's header claims for
+it: 125 against 8 KB is only true of 64-byte blocks, and Genesis Plus GX
+computes the same 125 the same way. Two sources, one number; the header
+is what is wrong. Noted in scdapi.h so the next reader does not have to
+find it twice.
+
+Nothing writes through this yet, and nothing should until it is known
+whether a file's data can be altered in place under BRMSERCH's pointer.
+docs/bram-filesystem.md has that question and the two after it.
+
+SCD_VERSION 35.
+---
+ bios/scdapi.h  |  25 +++++++++-
+ bios/segacd.c  | 127 +++++++++++++++++++++++++++++++++++++++++++++++++
+ bios/segacd.h  |  39 +++++++++++++++
+ bios/segacd2.S |  59 +++++++++++++++++++++++
+ 4 files changed, 249 insertions(+), 1 deletion(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index af220bd..ccf0191 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  34
++#define SCD_VERSION  35
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -202,6 +202,29 @@ struct scd_snap {
+  * when the servant took the job, EBUSY while one is still on the wire.
+  * The buffer must stay put and unchanged until then. */
+ #define SCD_PRINT_PAGE    18
++/* Ask Sega's own Backup RAM manager what it sees, through the parked
++ * firmware -- BRMINIT then BRMSTAT, reading nothing and writing nothing.
++ * Packed into one long because that is what control() returns:
++ *
++ *   bits 31-24  status  0 no RAM, 1 unformatted, 2 another format,
++ *                       3 Sega formatted, 0xFF could not ask at all
++ *                       (no firmware parked, or our buffers landed
++ *                       inside the region the visit exchanges)
++ *   bits 23-16  size, in blocks of 0x1000 -- 2 is the internal 8 KB
++ *   bits 15-8   free, in blocks of 0x40
++ *   bits 7-0    files in the directory
++ *
++ * The two block sizes are not a transcription error. BRMINIT reports
++ * the memory in 0x1000s (2 to 0x100, so 8 KB to 1 MB) and BRMSTAT
++ * reports free space in the 0x40 units the directory allocates in --
++ * megadev's header says 0x1000 for both, and the console disagrees:
++ * against the internal 8 KB it answered 125, which is 8192/64 - 3, the
++ * three being the blocks the volume footer occupies. Genesis Plus GX
++ * computes the same 125 the same way. Two sources, one number.
++ *
++ * Every field is a byte because every one of them fits: 0x100 blocks is
++ * the largest memory, and free space clamps. */
++#define SCD_BRAM_INFO     19
+ #define SCD_CARTSWAP      11            /* Mode 1: expect the cartridge to
+                                          * be pulled and another put in */
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 1ff5adf..d4531a7 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3809,6 +3809,7 @@ static ULONG bulk_base, bulk_len, disk_base, disk_len;
+  * of paper.
+  */
+ static WORD cart_xfer(UWORD op, UWORD lba);     /* below, with the cart */
++static ULONG segacd_buram_info(BOOL again);      /* below, with the BRAM */
+ 
+ #define PRN_PAGE    4096
+ #define PRN_IDLE_TICKS  100     /* hz_200: half a second of silence ends it */
+@@ -3946,6 +3947,7 @@ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+     case SCD_BIOS_PROBE:    return segacd_bios_probe();
+     case SCD_BIOS_READTEST: return segacd_bios_readtest();
+     case SCD_BIOS_NEARREAD: return segacd_bios_nearread();
++    case SCD_BRAM_INFO:     return segacd_buram_info(a != 0);
+     case SCD_BIOS_SWAPS:    return segacd_bios_swaps();
+     }
+     return 0;
+@@ -4551,6 +4553,131 @@ static void bram_format(void)
+     }
+ }
+ 
++/* ---- Sega's own Backup RAM manager --------------------------------------
++ *
++ * Everything above lays a FAT12 volume over the whole of the memory,
++ * which is why a cartridge cannot hold our files and a game's saves at
++ * the same time: the Sega volume's footer is the last 0x40 bytes, and
++ * our filesystem's data area runs straight through it.
++ *
++ * The footer, for reference -- Genesis Plus GX libretro.c `brm_format`,
++ * which is the check every emulator and the BIOS agree on:
++ *
++ *   end-0x40  0x5F x11, 0x00 x4, 0x40
++ *   end-0x30  the free-block count, big-endian, written four times over
++ *   end-0x28  0x00 x8
++ *   end-0x20  "SEGA_CD_ROM\0" 0x01 0x00 0x00 0x00
++ *   end-0x10  "RAM_CARTRIDGE___"
++ *
++ * A volume is Sega's if and only if the last 0x20 bytes match. Blocks
++ * are 0x40 bytes; the count excludes the three the footer occupies.
++ *
++ * None of which this file needs to write, and that is the point of
++ * going through _BURAM: the directory layout, the allocation and the
++ * free count stay Sega's code's problem. We only have to be able to
++ * call it.
++ */
++/* Everything the manager is handed a pointer to goes at a fixed address,
++ * and that is not a style choice.
++ *
++ * The visit exchanges 0..0x6000, so during the call that region holds
++ * EmuTOS's bytes instead of its own. EmuTOS's stack is at 0x800 and its
++ * .bss begins at 0x2140, both inside it -- and segacd.o's own .bss runs
++ * 0x35F8..0x7FF2, which *straddles* the line. A static would therefore
++ * land inside or outside the exchange depending on nothing more than
++ * declaration order, which is not a property to rest correctness on and
++ * is exactly how the printer's page buffer ended up at 0x2140.
++ *
++ * So they go in the region already set aside for this: 0x7C000-0x7EFFF,
++ * "stack, BIOS packet and read buffer for visits to the parked
++ * firmware", above phystop where EmuTOS never allocates. The timeshare
++ * claims 8 KB at 0x7D000 and uses CD_TS_SECTORS of it; this takes the
++ * page at 0x7E000, and the check below is what stops the two ever
++ * meeting quietly. */
++#define BRM_SCRATCH 0x7E000UL
++#if CD_TS_SECTORS * 512 > (BRM_SCRATCH - 0x7D000UL)
++#error "the timeshare's read buffer now reaches the BRAM work area"
++#endif
++#if BRM_SCRATCH < 0x6000UL
++#error "the BRAM work area is inside the region the BIOS visit exchanges"
++#endif
++
++static UBYTE *const brm_work  = (UBYTE *)BRM_SCRATCH;          /* 0x640 */
++static UBYTE *const brm_names = (UBYTE *)(BRM_SCRATCH + 0x640);/* 12 */
++static struct brmcall *const brmc =
++                (struct brmcall *)(BRM_SCRATCH + 0x680);
++static UWORD brm_size, brm_stat, brm_free, brm_files;
++static UBYTE brm_checked, brm_usable;
++
++/* Is the manager reachable, and are our buffers somewhere it can see?
++ *
++ * The visit exchanges 0..0x6000, so anything the BIOS is handed a
++ * pointer to has to live above that line. EmuTOS's .bss begins at
++ * 0x2140 and its stack is at 0x800, so this is a real question and not
++ * a formality -- the printer's page buffer landed at 0x2140 for exactly
++ * this reason and streamed a page of nothing.
++ *
++ * The addresses are fixed and checked at compile time above, so what
++ * is left to ask here is only whether there is any firmware parked to
++ * visit -- on a Mode 1 boot there is not. */
++static BOOL segacd_buram_ready(void)
++{
++    return bios_parked();
++}
++
++/* BRMINIT, then BRMSTAT. Reads nothing and writes nothing: this asks
++ * the manager what it can see, which is the whole of stage one. */
++static void segacd_buram_probe(void)
++{
++    brm_checked = 1;
++    brm_usable = 0;
++    brm_size = brm_stat = brm_free = brm_files = 0;
++
++    if (!segacd_buram_ready()) {
++        brm_stat = 0xFFFF;              /* could not even ask */
++        return;
++    }
++
++    brmc->fn = BRM_INIT;
++    brmc->d1in = 0;
++    brmc->a0in = (ULONG)brm_work;
++    brmc->a1in = (ULONG)brm_names;
++    segacd_buram_call(brmc);
++    brm_size = brmc->d0out;
++    /* Carry clear is "Sega formatted"; the status word only means
++     * anything when it is set. megadev's wrapper folds that into a
++     * fourth value and so does this. */
++    brm_stat = brmc->cs ? brmc->d1out : BRM_ST_SEGA;
++    if (brmc->cs)
++        return;
++
++    brmc->fn = BRM_STAT;
++    brmc->d1in = 0;
++    brmc->a0in = 0;
++    brmc->a1in = (ULONG)brm_names;
++    segacd_buram_call(brmc);
++    brm_free = brmc->d0out;
++    brm_files = brmc->d1out;
++    brm_usable = 1;
++}
++
++/* Packed for SCD_BRAM_INFO. Probed on demand rather than at boot: two
++ * visits to the parked firmware cost about six milliseconds, and until
++ * something asks there is nothing to spend them on. */
++static ULONG segacd_buram_info(BOOL again)
++{
++    ULONG st, sz, fr, nf;
++
++    if (!brm_checked || again)
++        segacd_buram_probe();
++
++    st = (brm_stat == 0xFFFF) ? 0xFFUL : (ULONG)brm_stat;
++    sz = (brm_size  > 0xFF)   ? 0xFFUL : (ULONG)brm_size;
++    fr = (brm_free  > 0xFF)   ? 0xFFUL : (ULONG)brm_free;
++    nf = (brm_files > 0xFF)   ? 0xFFUL : (ULONG)brm_files;
++    return (st << 24) | (sz << 16) | (fr << 8) | nf;
++}
++
+ static void bram_probe(void)
+ {
+     UBYTE save;
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 6868483..3328e54 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -114,6 +114,45 @@ void segacd_cdd_put(const UBYTE *src);  /* ten command bytes, BIOS form */
+ void segacd_cdc_read(UWORD *hdr, UWORD *data, LONG groups);
+ void segacd_call_5ms(void);
+ 
++/* Sega's own Backup RAM manager, through the parked firmware.
++ *
++ * Layout is shared with segacd2.S by offset, so the two must be changed
++ * together. Everything reachable from here by pointer -- this block, the
++ * work area, the string buffer, any data -- has to sit outside the 24 KB
++ * the visit exchanges, which rules out both the stack (0x800) and the
++ * start of .bss (0x2140). segacd_buram_ready() is where that is checked
++ * rather than assumed. */
++struct brmcall {
++    UWORD fn;                   /* BRM_* below */
++    UWORD d0out;
++    UWORD d1out;
++    UWORD cs;                   /* nonzero: the BIOS reported failure */
++    ULONG d1in;
++    ULONG a0in;
++    ULONG a1in;
++    ULONG a0out;
++};
++void segacd_buram_call(struct brmcall *c);      /* segacd2.S */
++
++/* Function codes for _BURAM (0x5F16). megadev lib/sub/bram.def.h, MIT. */
++#define BRM_INIT    0x0000
++#define BRM_STAT    0x0001
++#define BRM_SERCH   0x0002
++#define BRM_READ    0x0003
++#define BRM_WRITE   0x0004
++#define BRM_DEL     0x0005
++#define BRM_FORMAT  0x0006
++#define BRM_DIR     0x0007
++#define BRM_VERIFY  0x0008
++
++/* BRMINIT's status in d1 when it fails: 0 no RAM, 1 unformatted, 2 some
++ * other format. Success is carry clear, and then d0 is the size in
++ * blocks of 0x1000 bytes -- 2 for the internal 8 KB, up to 0x100. */
++#define BRM_ST_NONE     0
++#define BRM_ST_UNFORMAT 1
++#define BRM_ST_OTHER    2
++#define BRM_ST_SEGA     3       /* ours, for the carry-clear case */
++
+ #endif /* MACHINE_SEGACD */
+ 
+ #endif /* SEGACD_H */
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 66402d4..cf34d98 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -200,6 +200,65 @@ _segacd_bios_call:
+         movem.l (sp)+,d1-d7/a0-a6
+         rts
+ 
++// void segacd_buram_call(struct brmcall *c)
++//
++// The same visit, to the other door. 0x5F22 is the CDBIOS dispatch that
++// segacd_bios_call above uses; 0x5F16, three words below it, is _BURAM,
++// which is the machine's own Backup RAM file manager -- BRMINIT,
++// BRMSTAT, BRMSERCH, BRMREAD, BRMWRITE, BRMDEL, BRMFORMAT, BRMDIR,
++// BRMVERIFY. (Vector and function codes: megadev lib/sub/bram.def.h,
++// MIT.) Sega's format is then Sega's code's problem and never ours,
++// which is the entire reason for going through here rather than laying
++// our own volume over the top of it as this port has done until now.
++//
++// Everything the BIOS is handed a pointer to -- the call block, the
++// 0x640-byte work area, the string buffer, any data buffer -- MUST live
++// outside the 24 KB that gets exchanged, because during the call that
++// region is holding EmuTOS's bytes rather than its own. EmuTOS's .bss
++// starts at 0x2140, which is inside it, so a plain static is exactly
++// the wrong place and the C side checks the address rather than
++// assuming. Its stack is at 0x800 and is inside it too, so nothing may
++// be passed by reference off the stack either.
++//
++// The block, matching struct brmcall in segacd.h exactly:
++//   +0  w  fn        the function code, in
++//   +2  w  d0out     +4  w  d1out    +6  w  cs (nonzero = the call failed)
++//   +8  l  d1in      +12 l  a0in     +16 l  a1in     +20 l  a0out
++        .globl  _segacd_buram_call
++_segacd_buram_call:
++        move.l  4(sp),d0                // the call block
++        movem.l d1-d7/a0-a6,-(sp)
++        move.l  d0,a5                   // outside the swap; the BRM
++                                        // functions clobber only d0-d1
++                                        // and a0-a1
++        move.w  sr,-(sp)
++        ori.w   #0x0700,sr
++
++        move.l  sp,a6
++        move.l  #0xB9F00,sp             // the same scratch stack
++
++        bsr     bios_xchg
++        move.w  (a5),d0                 // fn
++        move.l  8(a5),d1                // d1 in
++        move.l  12(a5),a0               // a0 in
++        move.l  16(a5),a1               // a1 in
++        jsr     0x5F16                  // _BURAM
++        // Carry first: every one of these functions answers cc/cs, and
++        // d0 means something different in each. Taken before anything
++        // else can disturb it.
++        moveq   #0,d2
++        scs     d2
++        move.w  d0,2(a5)
++        move.w  d1,4(a5)
++        move.w  d2,6(a5)
++        move.l  a0,20(a5)
++        bsr     bios_xchg
++
++        move.l  a6,sp
++        move.w  (sp)+,sr
++        movem.l (sp)+,d1-d7/a0-a6
++        rts
++
+ // Exchange low memory with the park. Uses only registers and the
+ // scratch stack; touches nothing in the region it is moving.
+ bios_xchg:

@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 20:09:09 +0000
+Subject: [PATCH 154/184] The timeshare read works: Doom's loop, mirrored, both
+ carry tests were inverted
+
+With the interlock keeping the servant off, the firmware's read finally
+ran far enough to show its own bugs. Two, both against Doom's sub
+program at $6898, and both now fixed by mirroring it instruction for
+instruction:
+
+The destination. $4146's job -- select sub-CPU host read before
+CDCREAD -- was missing entirely, and the first fix (a byte store of 3)
+was wrong in a subtler way: the byte at $FF8004 also carries EDT and
+DSR, and overwriting them cut every transfer to a 32-byte fragment.
+Doom does a read-modify-write: andi.w #$F8FF then ori.w #$0300.
+
+The carry sense, on both calls that move data. Doom retries CDCREAD
+while carry is SET and proceeds on clear; ours retried while carry was
+CLEAR -- re-arming the byte counter after every successful arm. Doom
+treats a carry-SET CDCTRN as failed and goes back to CDCSTAT; ours
+treated it as finished and ACKed. Every sector the old loop "delivered"
+was accounting, not data: rc 0, counters perfect, scratch full of
+zeros. "The folder opened and listed no files" end to end.
+
+Proof, headless: CDTEST now auto-runs under the emulator (Down held via
+the input script, log recovered from cart SRAM through a core patch),
+and twelve consecutive rounds mount D:, list READCD.TXT and read its
+contents -- every firmware round clean, rd counting real deliveries.
+
+Known and kept in view: the fallback rounds (ts off, our own CDC
+driver) mostly pass but show wrong-sector churn in the emulator (why
+5555 on two rounds of twelve). The shipping path serves D: through the
+firmware, so this is a fallback-quality issue, logged, not blocking.
+
+Also: holding Down at power-on now runs CDTEST from autoexec -- on
+hardware it saves the desktop navigation, in the harness it is what
+makes headless diagnostics possible at all.
+---
+ bios/bios.c    | 12 ++++++++++++
+ bios/scdapi.h  |  2 +-
+ bios/segacd2.S | 27 +++++++++++++++++++++++++--
+ 3 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index ccd8d23..c259e7f 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -744,6 +744,18 @@ static void autoexec(void)
+     DTA dta;
+     WORD err;
+ 
++#ifdef MACHINE_SEGACD
++    /* Down held at power-on: run the disc diagnostic without a person
++     * navigating the desktop. On hardware that saves d-pad gymnastics;
++     * in the emulator harness it is the difference between having a
++     * diagnostic and not, because the harness cannot drive the mouse
++     * to CDTEST's icon -- and CDLOG.TXT lands in cart SRAM, which the
++     * harness persists as cart.brm, so a full eight-round hardware-
++     * shaped log can now come out of a headless emulator run. */
++    if (segacd_diag)
++        Pexec(PE_LOADGO, "A:\\CDTEST.PRG", "", NULL);
++#endif
++
+     /* check if the user does not want to run AUTO programs */
+     if (bootflags & BOOTFLAG_SKIP_AUTO_ACC)
+         return;
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index a673879..9564150 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  22
++#define SCD_VERSION  23
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 2d8fec9..9654a7e 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -695,19 +695,42 @@ brd_stat:
+         move.w  d0,50(a5)
+         jsr     0x5F22
+         bcs     brd_stat                // no sector ready yet
++
++        // Doom's loop, mirrored instruction for instruction from its
++        // sub program at $6898 -- because ours had the carry tests
++        // INVERTED on both calls that move data, and the destination
++        // write wrong besides. What Doom does between CDCSTAT and
++        // CDCREAD:
++        //
++        //   68a2: andi.w #$F8FF,$FF8004    clear the destination bits
++        //   68a8: ori.w  #$0300,$FF8004    sub-CPU host read
++        //   68ae: CDCREAD;  bcs 68ae       retry while carry SET
++        //   68c0: CDCTRN;   bcs 6886       carry SET = failed, re-STAT
++        //   68ce: CDCACK
++        //
++        // A read-modify-write, not a byte store: the byte at $FF8004
++        // also carries EDT and DSR, and overwriting them is what cut
++        // the last attempt's transfers to 32-byte fragments. And the
++        // carry sense: ours retried CDCREAD while carry was CLEAR --
++        // that is, re-armed the byte counter after every successful
++        // arm -- and treated a failed CDCTRN as a finished one. Every
++        // sector "delivered" by the previous shape of this loop was
++        // accounting, not data.
++        andi.w  #0xF8FF,0xFF8004
++        ori.w   #0x0300,0xFF8004
+ brd_read:
+         cmpi.l  #200,_segacd_bios_frames
+         bcc     brd_fail_read
+         move.w  #0x008B,d0              // CDCREAD
+         move.w  d0,50(a5)
+         jsr     0x5F22
+-        bcc     brd_read
++        bcs     brd_read                // not accepted yet: re-ask
+         movea.l 8(a5),a0                // where this sector goes
+         lea     12(a5),a1               // header scratch
+         move.w  #0x008C,d0              // CDCTRN
+         move.w  d0,50(a5)
+         jsr     0x5F22
+-        bcc     brd_read                // transfer incomplete, go again
++        bcs     brd_stat                // failed: wait for another sector
+         move.w  #0x008D,d0              // CDCACK
+         move.w  d0,50(a5)
+         jsr     0x5F22

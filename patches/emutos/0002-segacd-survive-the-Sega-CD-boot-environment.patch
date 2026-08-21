@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 03:15:54 +0000
+Subject: [PATCH 002/184] segacd: survive the Sega CD boot environment
+
+Four hardware truths found by bisection, each fatal alone:
+
+- CONF_WITH_RESET 0: the 68000 RESET instruction resets the gate
+  array; Word RAM assignment reverts and the CPU loses the memory it
+  executes from
+- CONF_WITH_CARTRIDGE 0: the Atari cartridge probe reads 0xFA0000,
+  which bus-errors on the sub CPU and restarts boot forever
+- USE_STOP_INSN_TO_FREE_HOST_CPU 0: a STOPped sub CPU starves
+  main-side bus-request grants under emulation (as MACHINE_LISA does)
+- Mask all gate-array interrupt sources at _main before anything
+  lowers the interrupt priority; enable each level only when its
+  handler is installed (the CDBIOS leaves INT2/CDD/CDC enabled)
+
+Plus boot-trace markers (MACHINE_SEGACD only) written to the sub->main
+comm register at startup phases, which is how the above were found.
+---
+ bios/bios.c      |  3 +++
+ bios/segacd.c    |  5 ++---
+ bios/startup.S   | 19 +++++++++++++++++++
+ include/config.h | 14 ++++++++++++++
+ 4 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 240fa01..48dfc0a 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -807,6 +807,9 @@ BOOL can_shutdown(void)
+ 
+ void biosmain(void)
+ {
++#ifdef MACHINE_SEGACD
++    *(volatile UWORD *)0xFF8020 = 0xE005;   /* boot trace: biosmain */
++#endif
+     BOOL show_initinfo;         /* TRUE if welcome screen must be displayed */
+     ULONG shiftbits;
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 50b8285..805c326 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -53,9 +53,7 @@ void segacd_screen_init(void)
+ 
+     /* VBL arrives from the main CPU as level 2 */
+     VEC_LEVEL2 = segacd_int_2;
+-
+-    /* enable level 2 (VBL) + level 3 (timer) in the gate array */
+-    GA_INTMASK |= 0x0C;
++    GA_INTMASK |= 0x04;         /* now safe to take INT2 */
+ }
+ 
+ void segacd_setphys(const UBYTE *addr)
+@@ -77,6 +75,7 @@ const UBYTE *segacd_physbase(void)
+ void segacd_init_system_timer(void)
+ {
+     VEC_LEVEL3 = segacd_int_3;
++    GA_INTMASK |= 0x08;         /* now safe to take INT3 */
+     GA_TIMER = TIMER_200HZ;     /* starts the countdown */
+ }
+ 
+diff --git a/bios/startup.S b/bios/startup.S
+index a6d1753..b797c19 100644
+--- a/bios/startup.S
++++ b/bios/startup.S
+@@ -348,6 +348,15 @@ _realmain:
+         move.w  #0x0000,0xffff8606.w
+ #endif
+ 
++#ifdef MACHINE_SEGACD
++        // The Sega CDBIOS era leaves gate-array interrupt sources enabled
++        // (INT2 from the main CPU, CDD/CDC/subcode from the drive). Mask
++        // everything before any code lowers the interrupt priority; each
++        // level is re-enabled only once its handler is installed.
++        clr.b   0xFF8033
++        move.w  #0xE001,0xFF8020        // boot trace: _main entered
++#endif
++
+ #ifdef MACHINE_AMIGA
+         // It is *mandatory* to call this as soon as possible,
+         // to do early initialization of the Amiga hardware.
+@@ -495,6 +504,10 @@ not_68030:
+ mmu_done:
+ #endif
+ 
++#ifdef MACHINE_SEGACD
++        move.w  #0xE002,0xFF8020        // boot trace: probes done
++#endif
++
+ /*
+  * Check, if we should jump to a reset vector after warmboot
+  */
+@@ -524,8 +537,14 @@ noreset:
+  */
+ 
+         .globl  memdone         // return to, if memory config done
++#ifdef MACHINE_SEGACD
++        move.w  #0xE003,0xFF8020        // boot trace: entering meminit
++#endif
+         jmp     meminit         // do/test memory config and clear it (needs sp)
+ memdone:
++#ifdef MACHINE_SEGACD
++        move.w  #0xE004,0xFF8020        // boot trace: meminit done
++#endif
+ 
+ /*
+  * From now, the stack is allowed, and C code can be used.
+diff --git a/include/config.h b/include/config.h
+index b639761..68afec7 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -614,6 +614,20 @@
+ # ifndef CONF_STRAM_SIZE
+ #  define CONF_STRAM_SIZE (384UL*1024)
+ # endif
++# ifndef CONF_WITH_RESET
++   /* The RESET instruction resets the gate array: Word RAM assignment
++    * reverts and the CPU loses the memory it is executing from. Never. */
++#  define CONF_WITH_RESET 0
++# endif
++# ifndef CONF_WITH_CARTRIDGE
++   /* The Atari cartridge probe reads 0xFA0000: bus error on the sub CPU */
++#  define CONF_WITH_CARTRIDGE 0
++# endif
++# ifndef USE_STOP_INSN_TO_FREE_HOST_CPU
++   /* A STOPped sub CPU starves main-side bus-request grants under
++    * emulation; idle with a plain loop instead (as the Lisa port does) */
++#  define USE_STOP_INSN_TO_FREE_HOST_CPU 0
++# endif
+ # ifndef CONF_WITH_FLOPPY
+ #  define CONF_WITH_FLOPPY 0
+ # endif

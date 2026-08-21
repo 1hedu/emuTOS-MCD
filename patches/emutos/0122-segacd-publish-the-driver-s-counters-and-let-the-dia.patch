@@ -1,0 +1,655 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 23:14:58 +0000
+Subject: [PATCH 122/184] segacd: publish the driver's counters, and let the
+ diagnostic be a program
+
+The disc diagnostic was 222 lines inside biosmain. The only reason it
+had to be there is that everything it prints is this driver's private
+counters -- so those are published instead: a struct scd_api in the
+cookie jar under 'SgCD', one call that fills a snapshot and one that
+pulls the levers. That is how a TOS program has always found a driver.
+
+What is left in the operating system is one Pexec of A:\CDTEST.PRG,
+still on Down, because holding a button is the quickest way to start a
+test on a console with no keyboard and because a program only the
+desktop can launch is no use when the fault stops the desktop
+appearing. The difference is that it is a program either way now: it
+runs from the desktop whenever it is wanted, and it cannot take the
+boot down with it -- which it did, the first time the drive-wake went
+in front of it.
+
+The image was four bytes under the wall where the CDBIOS parks. It is
+2334 under it now, and 29 KB of RAM comes back with the 28 KB log
+buffer, which the program owns instead.
+
+One snapshot call rather than twenty accessors, so every number in a
+printed round describes the same moment. Both structs carry their own
+size and version, and a program that finds a size it was not built
+against refuses to read the fields -- reading the wrong offsets
+confidently is a thing this project has already done to itself.
+
+The size check is not enough on its own, and finding that out cost a
+build: control() first took `short` arguments. EmuTOS is compiled
+-mshort and a .PRG is not, so one side pushed two bytes where the other
+read four, every op arrived as op 0, and the struct was the same size
+either way so nothing complained. long is four bytes to both.
+---
+ bios/bios.c   | 345 ++++----------------------------------------------
+ bios/scdapi.h | 104 +++++++++++++++
+ bios/segacd.c |  98 ++++++++++++++
+ bios/segacd.h |   1 +
+ 4 files changed, 226 insertions(+), 322 deletions(-)
+ create mode 100644 bios/scdapi.h
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 2da2954..75b35e3 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -291,6 +291,11 @@ static void bios_init(void)
+     SCTRACE(11); cookie_init();      /* sets a cookie jar */
+     KDEBUG(("fill_cookie_jar()\n"));
+     SCTRACE(12); fill_cookie_jar();  /* detect hardware features and fill the cookie jar */
++#ifdef MACHINE_SEGACD
++    /* ...and the CD driver's own, so a program on A: can read the
++     * counters that used to be printable only from inside biosmain. */
++    segacd_publish_api();
++#endif
+     KDEBUG(("font_init()\n"));
+     SCTRACE(13); font_init();        /* initialize font ring (requires cookie_akp) */
+ 
+@@ -818,108 +823,6 @@ BOOL can_shutdown(void)
+  * exec the user interface (shell or AES)
+  */
+ 
+-#ifdef MACHINE_SEGACD
+-/* The diagnostic outgrew the tube.
+- *
+- * Ten lines a round, a round every few seconds, and the answer to
+- * "which sector does it die on" scrolls off a CRT that has no
+- * scroll-back. So every line goes to two places: the screen, and
+- * B:\CDLOG.TXT, rewritten whole after each round.
+- *
+- * C: first, B: second.
+- *
+- * C: is the cartridge's save RAM, and on a Mode 1 boot the flash cart
+- * writes it to an SD card by itself. That closes the loop: hold Down,
+- * read the log off the card. It used to take a second boot into a
+- * different ROM -- boot/m1tool.S existed to copy B: across -- and
+- * before that a CD-R per question.
+- *
+- * B: is the fallback and used to be the only choice: 8 KB of internal
+- * backup RAM on the sub CPU's own bus. EmuTOS will not touch it while
+- * it holds Sega-format game saves, so the log had nowhere to go until
+- * C was held at power-on once to claim it. On a CD boot with no
+- * cartridge fitted, C: is the disc, Fcreate fails on it because it is
+- * a compact disc, and the fallback does the right thing without being
+- * told which machine it is on.
+- *
+- * When the buffer fills it stops: the file stops changing and says so,
+- * and the screen keeps running.
+- *
+- * The size is everything C: can hold. 63 sectors of 512, less one
+- * reserved, two FATs and a four-sector 64-entry root, is 56 sectors of
+- * data in fourteen 2 KB clusters: 28672 bytes. A round costs about 305,
+- * so that is ninety-odd rounds against B:'s eighteen -- and eighteen
+- * was set by B:'s eleven usable sectors, not by anything wanted. On B:
+- * only the first 5632 bytes are written, because that is still all it
+- * can hold. */
+-#define CDLOG_MAX 28672
+-#define CDLOG_B_MAX 5632        /* eleven usable sectors of the 8 KB */
+-
+-/* The disc's drive letter, and the Dfree/Dsetdrv number that goes with
+- * it (1 = A:). One place, because it has already moved once. */
+-#define CDDRV     "D"
+-#define CDDRV_NO  4
+-
+-static char cdlog[CDLOG_MAX];
+-static UWORD cdlog_len;
+-static UBYTE cdlog_full;
+-
+-static void cdlog_putc(int c)
+-{
+-    if (cdlog_len < CDLOG_MAX)
+-        cdlog[cdlog_len++] = (char)c;
+-    else
+-        cdlog_full = 1;
+-}
+-
+-PRINTF_STYLE static void cdlog_printf(const char *fmt, ...);
+-static void cdlog_printf(const char *fmt, ...)
+-{
+-    va_list ap;
+-
+-    va_start(ap, fmt);
+-    doprintf(cdlog_putc, fmt, ap);
+-    va_end(ap);
+-}
+-
+-/* Both at once. Every line the diagnostic prints is a line worth
+- * keeping, so there is no version of this where they can drift. */
+-#define DLOG(...)                                                       \
+-    do { cprintf(__VA_ARGS__); cdlog_printf(__VA_ARGS__); } while (0)
+-
+-/* Which drive took it last: 'C', 'B', or '-' for neither. Printed, so
+- * a log that turns up on a card says where it came from and a log that
+- * does not can be told from one that was never written. */
+-static char cdlog_where;   /* 0 until one of them takes it */
+-
+-static LONG cdlog_save(void)
+-{
+-    /* One mutable path with the drive letter poked into it, rather
+-     * than two strings and a pointer table. The image is within a
+-     * hundred bytes of the CDBIOS park at Word RAM 0xBA000 and every
+-     * literal counts. */
+-    static char path[] = "C:\\CDLOG.TXT";
+-    LONG h = -1L, rc, n;
+-    int i;
+-
+-    for (i = 0; i < 2; i++) {
+-        path[0] = i ? 'B' : 'C';
+-        h = Fcreate(path, 0);
+-        if (h < 0L)
+-            continue;
+-        n = (LONG)cdlog_len;
+-        if (i && n > CDLOG_B_MAX)
+-            n = CDLOG_B_MAX;
+-        rc = Fwrite((WORD)h, n, cdlog);
+-        Fclose((WORD)h);
+-        cdlog_where = path[0];
+-        return rc;
+-    }
+-    cdlog_where = 0;
+-    return h;
+-}
+-#endif
+-
+ void biosmain(void)
+ {
+ #ifdef MACHINE_SEGACD
+@@ -1161,229 +1064,27 @@ void biosmain(void)
+      * that can only answer the question I thought of while building it
+      * is worth much less than one that can be asked again.
+      */
++#ifdef MACHINE_SEGACD
++    /* The disc diagnostic was 222 lines here. It is CDTEST.PRG on the
++     * A: ramdisk now, reading the same counters through the 'SgCD'
++     * cookie that segacd_publish_api() puts in the jar -- so what is
++     * left in the operating system is one Pexec.
++     *
++     * Down still runs it, because holding a button is the quickest way
++     * to start a test on a console with no keyboard, and because a
++     * program that only the desktop can launch is no use when the fault
++     * being chased is one that stops the desktop appearing. The
++     * difference is that it is now a program either way: it can be run
++     * from the desktop whenever it is wanted, it cannot take the boot
++     * down with it, and it is 222 lines the image no longer carries. */
+     if (segacd_diag) {
+-        /* The diagnostic is the experiment now, not just the meter.
+-         *
+-         * The first cut of this put one variable on a boot button, and
+-         * the button's detection was displayed nowhere -- so its one
+-         * hardware run produced a result that could not be told apart
+-         * from the button not working. On the last disc anyone is
+-         * burning, that is the worst possible instrument. So: no
+-         * levers. Every round sets its own configuration, prints it,
+-         * and prints the raw button word too, and four rounds cover
+-         * the whole matrix --
+-         *
+-         *   lead: command the read 20 frames early (this driver's
+-         *         habit) or 2 (the CDBIOS's, measured in the trace);
+-         *   hold: send command 6 after each fill (the build that ran
+-         *         best on hardware) or nothing (what the traced BIOS
+-         *         sends between reads).
+-         *
+-         * Whichever arm's counters stay clean is the answer, read off
+-         * a CRT, no reburn required. */
+-        static const UWORD arm_lead[8] = { 20, 2, 20, 2, 20, 2, 20, 2 };
+-        static const UWORD arm_hold[8] = {  0, 0,  1, 1,  0, 0,  1, 1 };
+-        static const UWORD arm_late[8] = {  0, 0,  0, 0,  1, 1,  1, 1 };
+-        /* And the one the timeshare cares about: wake the firmware with
+-         * DRV_INIT, or go at the drive the way Sega's own read routines
+-         * do. Alternating, so consecutive rounds compare directly. */
+-        static const UWORD arm_drvi[8] = {  0, 1,  0, 1,  0, 1,  0, 1 };
+-        /* ...and whether the firmware gets D: at all. The first four
+-         * rounds are our own driver, which is the one that has read a
+-         * file on this console; the last four are the timeshare, which
+-         * has not. Forcing it on for every round is how twelve rounds
+-         * of hardware log came back without our cd_fetch running once. */
+-        static const UWORD arm_ts[8]   = {  0, 0,  0, 0,  1, 1,  1, 1 };
+-        static char buf[512];
+-        static UBYTE raw[8];
+-        static DTA dta;
+-        LONG h, rc;
+-        UWORD run, arm, seeks, hits, errs, why, bad, wrong, torn, flag;
+-        WORD wdelta;
+-        UWORD fix, flba, fsame, ts, tsf, tsrc, lints, badmode;
+-        WORD lshort;
+-        UWORD ringok, dsr, edt, nz, boff, bnz, slotbad;
+-        ULONG newest, blba, swant, sgot, sbase;
+-        UBYTE shave, ssrc;
+-        UWORD v[4];
+-        UBYTE bsrc;
+-        UBYTE hdr[4], st4[4];
+-        UBYTE state, lasth3, h3first;
+-        UWORD h3same;
+-        int i;
+-
+-        cprintf("\033E");
+-        for (run = 0; ; run++) {
+-            arm = (UWORD)(run & 7);
+-            segacd_cd_tune(arm_lead[arm], arm_hold[arm], arm_late[arm]);
+-            segacd_ts_tune((WORD)arm_drvi[arm]);
+-            segacd_ts_arm((WORD)arm_ts[arm]);
+-            segacd_ts_rearm();
+-            /* Short because the line is forty columns and the last
+-             * field kept falling off the edge of the tube. L lead,
+-             * H hold, A late, I DRV_INIT, B the raw button word. */
+-            DLOG("D: T%u  L%u H%u A%u I%u T%u  B%02X\r\n",
+-                    run + 1, arm_lead[arm], arm_hold[arm], arm_late[arm],
+-                    arm_drvi[arm], arm_ts[arm], segacd_bootflags);
+-
+-            /* The disc, which is D: since the cartridge took C:.
+-             *
+-             * These were C: and drive 3, and stayed correct for exactly
+-             * as long as the disc was the only block device. The round
+-             * after the cartridge became a drive, the diagnostic was
+-             * quietly interrogating cart SRAM instead -- and said so,
+-             * if anyone read it: "13 of 14 free" is fourteen 2 KB
+-             * clusters, which is the cartridge's geometry and nothing
+-             * like a disc. Named, so the next drive letter to appear
+-             * cannot do this again. */
+-            rc = Dfree((LONG *)buf, CDDRV_NO);
+-            DLOG(" Dfree %ld %ld/%ld free\r\n",
+-                    rc, *(LONG *)buf, *((LONG *)buf + 1));
+-            rc = Dsetpath(CDDRV ":\\");
+-            DLOG(" Dsetpath %ld\r\n", rc);
+-
+-            Fsetdta(&dta);
+-            rc = Fsfirst(CDDRV ":\\*.*", 0x17);
+-            DLOG(" Fsfirst  %ld   [%s]\r\n", rc, dta.d_fname);
+-
+-            h = Fopen(CDDRV ":\\READCD.TXT", 0);
+-            DLOG(" Fopen    %ld\r\n", h);
+-            if (h >= 0L) {
+-                rc = Fread((WORD)h, 32L, buf);
+-                Fclose((WORD)h);
+-                memcpy(raw, buf, 8);            /* before the sanitiser */
+-                for (i = 0; i < 24; i++)
+-                    if (buf[i] < 32 || buf[i] > 126)
+-                        buf[i] = '.';
+-                buf[24] = 0;
+-                DLOG(" Fread    %ld   [%s]\r\n", rc, buf);
+-                /* And the same bytes as numbers. A sanitised string
+-                 * turns every wrong answer into the same row of dots,
+-                 * and the three wrong answers need telling apart: the
+-                 * right file at the wrong offset, a different sector
+-                 * altogether, and a buffer nothing was written into. */
+-                /* Only when Fread wrote something: on a failure buf
+-                  * still holds the previous round's sanitised dots,
+-                  * and printing those reads as data. */
+-                if (rc > 0)
+-                DLOG(" raw %02X%02X%02X%02X %02X%02X%02X%02X\r\n",
+-                     raw[0], raw[1], raw[2], raw[3],
+-                     raw[4], raw[5], raw[6], raw[7]);
+-            }
+-
+-            segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
+-                            &bad, &wrong, &torn, &flag, &wdelta, &fix,
+-                            &flba, &fsame, &ts, &tsf, &tsrc,
+-                            &lints, &lshort, &badmode, &lasth3,
+-                            &h3first, &h3same);
+-            DLOG(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+-                    state, seeks, hits, errs, why);
+-            DLOG(" torn %u bcd %u wr %u l%d fx %u fl %u\r\n",
+-                    torn, bad, wrong, wdelta, fix, flag);
+-            DLOG(" lastfail %u x%u  CDBIOS rd %u bad %u %04X\r\n",
+-                    flba, fsame, ts, tsf, tsrc);
+-            /* What the timeout meant. int is how many sectors the
+-             * decoder announced while the attempt waited; d is how far
+-             * the newest one got relative to the one wanted. int 0 is a
+-             * drive that never started reading. A large negative d is a
+-             * drive reading well before the target. 32767 means the
+-             * ring stayed empty for the whole attempt, and int 65535
+-             * that no fetch has timed out at all. */
+-            DLOG(" timeout: int %u  d %d\r\n", lints, lshort);
+-            /* And the gate in front of the ring. A sector only gets in
+-             * if its mode byte is 1 or 2; mode counts the ones that
+-             * were not, h3 is the last such byte. If mode tracks the
+-             * announced count then the ring is being starved by this
+-             * test alone, and h3 says what to widen it to. */
+-            /* first says which byte the rejects started with and same
+-             * how many of them matched it. same == mode means the
+-             * decoder is handing back one constant, which is a header
+-             * read from the wrong place; same well below mode means
+-             * they are varied, and varied means real non-data sectors
+-             * we are right to be dropping. */
+-            DLOG(" mode %u h3 %02X f%02X x%u\r\n",
+-                 badmode, lasth3, h3first, h3same);
+-            segacd_cd_probe(&ringok, &newest, &dsr, &edt, &nz, hdr, st4,
+-                            &blba, &boff, &bsrc, &bnz,
+-                            &slotbad, &swant, &sgot,
+-                            &sbase, &shave, &ssrc, v);
+-            /* Has the ring ever taken an entry on this machine, and
+-             * what is the newest sector in it. 4294967295 is empty. */
+-            DLOG(" ring %u  new %ld\r\n", ringok, newest);
+-            /* The two handshakes inside a transfer, and whether the
+-             * sector had any bytes in it: 2048 means the wait gave up,
+-             * and nz 0 out of 512 means nothing arrived. */
+-            DLOG(" dsr %u edt %u  nz %u\r\n", dsr, edt, nz);
+-            /* The header and decoder status of the last sector, raw. */
+-            /* The last block handed to GEMDOS: which CD sector and
+-             * offset it came from, whether it was a cache hit (0), the
+-             * mount probe (1) or a refill (2), and how many of its 128
+-             * longs were not zero. */
+-            DLOG(" blk %ld+%u s%u nz %u\r\n", blba, boff, bsrc, bnz);
+-            /* The invariant: the slot the hand-off indexed must hold
+-             * the sector it was asked for. Nonzero here is data handed
+-             * to GEMDOS that never came off the disc. */
+-            DLOG(" slot %u  want %ld got %ld\r\n", slotbad, swant, sgot);
+-            DLOG(" base %ld have %u src %u\r\n", sbase, shave, ssrc);
+-            /* STAT0 bit 7 against the mode byte. 11 both say real, 00
+-             * both say not, 10 and 01 are where they disagree. If the
+-             * disagreements are near zero the flag is the mode test. */
+-            DLOG(" v11 %u v10 %u v01 %u v00 %u\r\n",
+-                 v[0], v[1], v[2], v[3]);
+-            DLOG(" hdr %02X%02X%02X%02X st4 %02X%02X%02X%02X\r\n",
+-                 hdr[0], hdr[1], hdr[2], hdr[3],
+-                 st4[0], st4[1], st4[2], st4[3]);
+-            /* Phase one of the timeshare: is the machine's own CDBIOS
+-             * still up there in Word RAM, and does it execute when
+-             * exchanged back into low memory? CDBCHK is the smallest
+-             * call that proves it -- no interrupt, no drive command,
+-             * immediate return. 0xFFFF means nothing is parked. */
+-            if (run == 0) {
+-                UWORD br = segacd_bios_probe();
+-                UWORD rr = segacd_bios_readtest();
+-                ULONG i4, own, vec4;
+-                UWORD ctrl, lost;
+-
+-                segacd_bios_ipath(&i4, &own, &vec4, &ctrl, &lost);
+-                DLOG(" CDBIOS probe %04X near %04X far %04X sw %u\r\n",
+-                        br, segacd_bios_nearread(), rr,
+-                        segacd_bios_swaps());
+-                DLOG(" i4 %lu/%lu v4 %06lX ctl %04X ls %02X\r\n",
+-                        own, i4, vec4, ctrl, lost);
+-                {   /* The one exchange that matters, in full. */
+-                    ULONG st, cm;
+-                    UWORD ctl2;
+-
+-                    segacd_bios_cdd(&st, &cm, &ctl2);
+-                    DLOG(" st %08lX cm %08lX x %04X\r\n",
+-                            st, cm, ctl2);
+-                }
+-            }
+-            DLOG("\r\n");
+-
+-            /* Then put the round somewhere that survives a power cut.
+-             * The return code goes on screen only: it changes every
+-             * round and would double the size of the file. */
+-            if (!cdlog_full) {
+-                LONG lrc = cdlog_save();
+-                cprintf(" log %ld %c bram %u\r\n", lrc,
+-                        cdlog_where ? cdlog_where : '-',
+-                        segacd_bram_state());
+-            } else {
+-                cprintf(" LOG FULL -- safe to power off\r\n");
+-            }
+-
+-            /* Long enough to read a round before the next scrolls it
+-             * away, and long enough that the drive is not being flogged
+-             * by the diagnostic meant to observe it. */
+-            {
+-                LONG t = hz_200 + 1000L;        /* five seconds */
+-                while (hz_200 < t)
+-                    ;
+-            }
+-        }
++        LONG prc = Pexec(PE_LOADGO, "A:\\CDTEST.PRG", "", NULL);
++        cprintf("\r\nCDTEST.PRG = %ld\r\n", prc);
++        for (;;)
++            ;
+     }
+ #endif
++#endif
+ 
+ #if defined(MACHINE_SEGACD) && defined(CONF_SEGACD_CONSOLE_SOAK)
+     /*
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+new file mode 100644
+index 0000000..a45fa53
+--- /dev/null
++++ b/bios/scdapi.h
+@@ -0,0 +1,104 @@
++/*
++ * scdapi.h - what the Sega CD driver tells a program about itself
++ *
++ * Compiled by two things that do not share a build: the driver, in
++ * bios/segacd.c, and ordinary TOS programs on the A: ramdisk. So it
++ * uses plain short/long rather than EmuTOS's own types, which are not
++ * the same width on both sides -- EmuTOS builds -mshort and a .PRG
++ * does not, so `int` means two different things and neither side may
++ * use it.
++ *
++ * The driver publishes a pointer to a struct scd_api in the cookie
++ * jar under 'SgCD'. That is how TOS has always let a program find a
++ * driver, and it is why the disc diagnostic can be a program the
++ * desktop launches rather than 222 lines wired into biosmain: the
++ * counters it needs are the driver's, and this is the only thing that
++ * was stopping them being reachable from outside.
++ *
++ * Both structs carry their own size and a version. A program that
++ * finds a size it was not compiled against must refuse to read the
++ * fields, because the alternative is a confident readout of the wrong
++ * offsets -- which this project has already done to itself once.
++ *
++ * This file is distributed under the GPL, version 2 or at your
++ * option any later version.  See doc/license.txt for details.
++ */
++
++#ifndef SCDAPI_H
++#define SCDAPI_H
++
++#define SCD_COOKIE   0x53674344L        /* 'SgCD' */
++#define SCD_VERSION  2
++
++/* Everything the disc diagnostic prints, in one go. Taken in a single
++ * call rather than twenty accessors so that the numbers in one report
++ * describe one moment. */
++struct scd_snap {
++    unsigned short size;                /* sizeof(struct scd_snap) */
++    unsigned short version;
++
++    /* the block layer's account of itself */
++    unsigned short seeks, hits, errs;
++    unsigned char  state;               /* the drive's own status nibble */
++    unsigned short why;                 /* one nibble per attempt */
++    unsigned short bad, wrong, torn, flag;
++    short          wdelta;
++    unsigned short fix, flba, fsame;
++    unsigned short ts, tsf, tsrc;       /* the timeshare */
++    unsigned short lints;
++    short          lshort;
++    unsigned short badmode;             /* rejected by the mode gate */
++    unsigned char  lasth3, h3first;     /* ...the last and first byte */
++    unsigned short h3same;              /* ...and how many matched the first */
++
++    /* the ring, the transfer, and the last block handed to GEMDOS */
++    unsigned short ringok;
++    unsigned long  newest;
++    unsigned short dsr, edt, nz;
++    unsigned char  hdr[4], st4[4];
++    unsigned long  blba;
++    unsigned short boff;
++    unsigned char  bsrc;
++    unsigned short bnz;
++    unsigned short slotbad;
++    unsigned long  swant, sgot, sbase;
++    unsigned char  shave, ssrc;
++    unsigned short v[4];                /* STAT0 bit 7 against the mode gate */
++
++    /* the parked firmware, if there is any */
++    unsigned long  i4, own, vec4;
++    unsigned short ctrl, lost;
++    unsigned long  st, cm;
++    unsigned short ctl2;
++
++    unsigned char  bram;                /* 0 none 1 ours 2 Sega saves */
++    unsigned short bootflags;           /* the raw button word */
++};
++
++/* Ops for scd_api.control(). Arguments that are not used are ignored;
++ * the return value is meaningful only where noted. */
++#define SCD_TUNE      0                 /* a=lead b=hold c=late */
++#define SCD_TS_TUNE   1                 /* a=wake the firmware with DRV_INIT */
++#define SCD_TS_ARM    2                 /* a=hand the disc to the firmware */
++#define SCD_TS_REARM  3
++#define SCD_BIOS_PROBE    4             /* -> CDBCHK, or 0xFFFF for none */
++#define SCD_BIOS_READTEST 5             /* -> 0 if the firmware read a sector */
++#define SCD_BIOS_NEARREAD 6             /* -> ...one it read at boot */
++#define SCD_BIOS_SWAPS    7             /* -> how many exchanges have run */
++#define SCD_REVIVE        8             /* the drive gets another chance */
++
++struct scd_api {
++    unsigned short size;                /* sizeof(struct scd_api) */
++    unsigned short version;
++    void (*snapshot)(struct scd_snap *s);
++    /* long, not short, and that is not fussiness. EmuTOS is built
++     * -mshort and a .PRG is not, so a `short` argument is pushed as two
++     * bytes by one and promoted to four by the other: every call came
++     * through with op read from the wrong half of the first argument,
++     * which made every op look like op 0. It even passed the size and
++     * version check, because the struct is the same size either way.
++     * long is four bytes to both. */
++    unsigned long (*control)(long op, long a, long b, long c);
++};
++
++#endif /* SCDAPI_H */
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 33d97e9..5f78be2 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -25,6 +25,8 @@
+ #ifdef MACHINE_SEGACD
+ 
+ #include "segacd.h"
++#include "scdapi.h"
++#include "cookie.h"
+ #include "lineavars.h"
+ #include "screen.h"
+ #include "vectors.h"
+@@ -3169,6 +3171,102 @@ void segacd_cd_probe(UWORD *ringok, ULONG *newest, UWORD *dsr, UWORD *edt,
+  * experimental lever on a button, and the button's detection could not
+  * be seen -- so now the diagnostic drives the levers itself and prints
+  * what it set. Nothing about a normal boot goes through here. */
++/******************************************************************************/
++/* What a program can ask the driver                                          */
++/******************************************************************************/
++
++/* The disc diagnostic used to live in biosmain: 222 lines of it, run
++ * by holding a direction at power-on. It is a program on the A:
++ * ramdisk now, which is better in every direction -- it is launched
++ * when it is wanted rather than gambled on at power-on, it cannot take
++ * the boot down with it, and the EmuTOS image gets 222 lines shorter
++ * at a moment when it had four bytes of headroom.
++ *
++ * The only thing that was stopping it being a program is that the
++ * numbers it reports are this driver's private counters. So they are
++ * published: one call that fills a struct, one that pulls the levers,
++ * and a pointer to the pair in the cookie jar under 'SgCD', which is
++ * how a TOS program has always found a driver.
++ *
++ * One snapshot call rather than twenty accessors, so that every number
++ * in a printed round describes the same moment. */
++static void scd_snapshot(struct scd_snap *s)
++{
++    UWORD seeks, hits, errs, why, bad, wrong, torn, flag, fix;
++    UWORD flba, fsame, ts, tsf, tsrc, lints, badmode, h3same;
++    WORD wdelta, lshort;
++    UBYTE state, lasth3, h3first;
++    UWORD ringok, dsr, edt, nz, boff, bnz, slotbad, v[4];
++    ULONG newest, blba, swant, sgot, sbase;
++    UBYTE shave, ssrc, bsrc, hdr[4], st4[4];
++    int i;
++
++    memset(s, 0, sizeof(*s));
++    s->size = sizeof(*s);
++    s->version = SCD_VERSION;
++
++    segacd_cd_stats(&seeks, &hits, &errs, &state, &why, &bad, &wrong,
++                    &torn, &flag, &wdelta, &fix, &flba, &fsame, &ts, &tsf,
++                    &tsrc, &lints, &lshort, &badmode, &lasth3,
++                    &h3first, &h3same);
++    s->seeks = seeks; s->hits = hits; s->errs = errs; s->state = state;
++    s->why = why; s->bad = bad; s->wrong = wrong; s->torn = torn;
++    s->flag = flag; s->wdelta = wdelta; s->fix = fix; s->flba = flba;
++    s->fsame = fsame; s->ts = ts; s->tsf = tsf; s->tsrc = tsrc;
++    s->lints = lints; s->lshort = lshort; s->badmode = badmode;
++    s->lasth3 = lasth3; s->h3first = h3first; s->h3same = h3same;
++
++    segacd_cd_probe(&ringok, &newest, &dsr, &edt, &nz, hdr, st4,
++                    &blba, &boff, &bsrc, &bnz, &slotbad, &swant, &sgot,
++                    &sbase, &shave, &ssrc, v);
++    s->ringok = ringok; s->newest = newest; s->dsr = dsr; s->edt = edt;
++    s->nz = nz; s->blba = blba; s->boff = boff; s->bsrc = bsrc;
++    s->bnz = bnz; s->slotbad = slotbad; s->swant = swant; s->sgot = sgot;
++    s->sbase = sbase; s->shave = shave; s->ssrc = ssrc;
++    for (i = 0; i < 4; i++) {
++        s->hdr[i] = hdr[i]; s->st4[i] = st4[i]; s->v[i] = v[i];
++    }
++
++    {
++        ULONG i4, own, vec4, st, cm;
++        UWORD ctrl, lost, ctl2;
++
++        segacd_bios_ipath(&i4, &own, &vec4, &ctrl, &lost);
++        segacd_bios_cdd(&st, &cm, &ctl2);
++        s->i4 = i4; s->own = own; s->vec4 = vec4;
++        s->ctrl = ctrl; s->lost = lost;
++        s->st = st; s->cm = cm; s->ctl2 = ctl2;
++    }
++
++    s->bram = segacd_bram_state();
++    s->bootflags = segacd_bootflags;
++}
++
++static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
++{
++    switch (op) {
++    case SCD_TUNE:      segacd_cd_tune((UWORD)a, (UWORD)b, (UWORD)c); break;
++    case SCD_TS_TUNE:   segacd_ts_tune((WORD)a); break;
++    case SCD_TS_ARM:    segacd_ts_arm((WORD)a); break;
++    case SCD_TS_REARM:  segacd_ts_rearm(); break;
++    case SCD_REVIVE:    segacd_cd_revive(); break;
++    case SCD_BIOS_PROBE:    return segacd_bios_probe();
++    case SCD_BIOS_READTEST: return segacd_bios_readtest();
++    case SCD_BIOS_NEARREAD: return segacd_bios_nearread();
++    case SCD_BIOS_SWAPS:    return segacd_bios_swaps();
++    }
++    return 0;
++}
++
++static const struct scd_api scd_api = {
++    sizeof(struct scd_api), SCD_VERSION, scd_snapshot, scd_control
++};
++
++void segacd_publish_api(void)
++{
++    cookie_add(SCD_COOKIE, (ULONG)&scd_api);
++}
++
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late)
+ {
+     /* The diagnostic is not a boot, and only the diagnostic calls this.
+diff --git a/bios/segacd.h b/bios/segacd.h
+index bacd968..3d4f3ec 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -72,6 +72,7 @@ void segacd_ts_arm(WORD on);   /* hand D: to the firmware, or take it back */
+ void segacd_bios_cdd(ULONG *st, ULONG *cm, UWORD *ctl2);
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);
++void segacd_publish_api(void);  /* the 'SgCD' cookie, for programs */
+ 
+ /* Clock */
+ ULONG segacd_getdt(void);

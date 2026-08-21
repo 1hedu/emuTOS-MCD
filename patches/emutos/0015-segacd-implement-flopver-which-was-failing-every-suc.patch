@@ -1,0 +1,197 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 09:19:34 +0000
+Subject: [PATCH 015/184] segacd: implement flopver(), which was failing every
+ successful write
+
+fverify defaults on, so EmuTOS follows every floppy write with
+flopver(). That function has a per-machine body and the fallback arm
+returns EUNDEV; there was no Sega CD arm. So every write ran:
+
+    flopio()  -> 0     the write really happened
+    flopver() -> -15   EUNDEV, "unknown device"
+
+GEMDOS reported a failure on a device that had just serviced the
+request. -15 is outside EmuDesk's error table, so it surfaced as "Your
+output device is not receiving data" instead of anything legible. On
+hardware this looked like folders that survived a power cycle after the
+desktop said the copy failed, a copied file with a directory entry and
+no contents, "cannot delete directory", and Save Desktop never sticking
+(A: had the same bug).
+
+Implemented the way the XBIOS contract asks: read each written sector
+back and list the ones that will not read.
+
+Also:
+- CONF_SEGACD_BTEST: a boot-time diagnostic running the same GEMDOS
+  sequence EmuDesk uses to copy a file, printing every return code.
+  Dragging between desktop windows cannot be scripted reliably; this
+  needs no input. Both drives now report a byte-exact 400-byte round
+  trip.
+- move the getbpb verdict off comm word $FF8026, which it shared with
+  the cart request register, to $FF8028, and seed it with 0xB0FF. An
+  unseeded gate-array register read back as a plausible cluster count
+  and sent us hunting a geometry bug that did not exist.
+---
+ bios/bios.c   | 54 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ bios/blkdev.c |  2 +-
+ bios/floppy.c | 23 ++++++++++++++++++++--
+ bios/segacd.c | 16 +++++++++------
+ 4 files changed, 86 insertions(+), 9 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 316623b..b527c37 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -873,6 +873,60 @@ void biosmain(void)
+     }
+ #endif
+ 
++#if defined(MACHINE_SEGACD) && defined(CONF_SEGACD_BTEST)
++    /*
++     * Diagnostic build only: exercise the exact GEMDOS path EmuDesk uses
++     * to copy a file onto B:, and report every return code. Dragging a
++     * file between two desktop windows cannot be scripted reliably, but
++     * this is the same Fcreate/Fwrite/Fread sequence underneath.
++     */
++    {
++        static char buf[512];
++        static char path[16] = "?:\\BTEST.TXT";
++        static char dpath[8] = "?:\\BDIR";
++        static const char drive[2] = { 'A', 'B' };
++        LONG h, rc;
++        int i, d;
++
++        cprintf("\033E");
++        for (d = 0; d < 2; d++) {
++        path[0] = dpath[0] = drive[d];
++        for (i = 0; i < 400; i++)
++            buf[i] = (char)('A' + (i % 26));
++
++        cprintf("%c: write test\r\n", drive[d]);
++        h = Fcreate(path, 0);
++        cprintf("Fcreate  = %ld\r\n", h);
++        if (h >= 0L) {
++            rc = Fwrite((WORD)h, 400L, buf);
++            cprintf("Fwrite   = %ld\r\n", rc);
++            rc = Fclose((WORD)h);
++            cprintf("Fclose   = %ld\r\n", rc);
++
++            h = Fopen(path, 0);
++            cprintf("Fopen    = %ld\r\n", h);
++            if (h >= 0L) {
++                for (i = 0; i < 400; i++) buf[i] = 0;
++                rc = Fread((WORD)h, 400L, buf);
++                cprintf("Fread    = %ld\r\n", rc);
++                Fclose((WORD)h);
++                for (i = 0; i < 400; i++)
++                    if (buf[i] != (char)('A' + (i % 26)))
++                        break;
++                cprintf("verified = %d of 400\r\n", i);
++            }
++        }
++        rc = Dcreate(dpath);
++        cprintf("Dcreate  = %ld\r\n", rc);
++        rc = Dfree(buf, d + 1);           /* 1 = A:, 2 = B: */
++        cprintf("Dfree    = %ld  free %ld of %ld\r\n",
++                rc, *(LONG *)buf, *((LONG *)buf + 1));
++        }
++        for (;;)
++            ;
++    }
++#endif
++
+ #if defined(MACHINE_SEGACD) && defined(CONF_SEGACD_CONSOLE_SOAK)
+     /*
+      * Diagnostic build only: hammer the VT52 console the way EmuDesk's
+diff --git a/bios/blkdev.c b/bios/blkdev.c
+index e1fe4e4..d180a42 100644
+--- a/bios/blkdev.c
++++ b/bios/blkdev.c
+@@ -571,7 +571,7 @@ WORD get_shift(ULONG blocksize)
+  * so the servant can show it. GEM refuses the drive before any sector
+  * I/O reaches our driver, so the verdict has to come from in here. */
+ #define SCD_BPB(v) do { if (dev == 1) \
+-        *(volatile UWORD *)0xFF8026 = (UWORD)(v); } while (0)
++        *(volatile UWORD *)0xFF8028 = (UWORD)(v); } while (0)
+ #else
+ #define SCD_BPB(v)
+ #endif
+diff --git a/bios/floppy.c b/bios/floppy.c
+index 43d8a7c..8be7f5e 100644
+--- a/bios/floppy.c
++++ b/bios/floppy.c
+@@ -812,7 +812,7 @@ LONG flopver(WORD *buf, LONG filler, WORD dev,
+ {
+     LONG rc = 0L;
+     WORD *bad = buf;
+-#if defined(MACHINE_AMIGA) || CONF_WITH_FDC
++#if defined(MACHINE_AMIGA) || defined(MACHINE_SEGACD) || CONF_WITH_FDC
+     WORD i, err;
+     UBYTE *diskbuf = (UBYTE *)buf + SECTOR_SIZE;
+ #endif
+@@ -824,7 +824,26 @@ LONG flopver(WORD *buf, LONG filler, WORD dev,
+     if (!IS_VALID_FLOPPY_DEVICE(dev))
+         return EUNDEV;  /* unknown disk */
+ 
+-#ifdef MACHINE_AMIGA
++#ifdef MACHINE_SEGACD
++    /*
++     * Without this, every write to A: or B: succeeds and is then failed
++     * by the verify pass: fverify defaults on, and the fallback arm of
++     * this function returns EUNDEV. GEMDOS reports "unknown device" for
++     * a write that actually landed, which is why folders survived a
++     * power cycle while the desktop insisted the copy had failed.
++     * Verify the same way the XBIOS contract does: read the sectors
++     * back and list the ones that will not read.
++     */
++    for (i = 0; i < count; i++, sect++) {
++        err = segacd_floprw(diskbuf, RW_READ, dev, sect, track, side, 1);
++        if (err) {
++            *bad++ = sect ? sect : -1;
++            if ((err != EREADF) && (err != ESECNF))
++                rc = err;
++        }
++    }
++
++#elif defined(MACHINE_AMIGA)
+     for (i = 0; i < count; i++, sect++) {
+         err = amiga_floprw(diskbuf, RW_READ, dev, sect, track, side, 1);
+         if (err) {
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 4b3f5cc..d2ec7a3 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -127,15 +127,13 @@ void segacd_int_2_c(void)
+                 call_ikbdraw(sc);
+                 call_ikbdraw((UBYTE)(sc | 0x80));
+             }
+-            /* echo to the servant: proves the key made the full trip */
+-            *(volatile UWORD *)0xFF8028 = (UWORD)((oldseq << 8) | sc);
+         }
+     }
+ 
+-    /* Tell the servant where the screen really is. It used to assume the
+-     * boot-time address, which breaks the moment anything moves the
+-     * framebuffer (the file viewer does) — the servant then converts
+-     * whatever now lives there, filling the display with garbage. */
++    /* Tell the servant where the screen really is, rather than letting
++     * it assume the boot-time address: anything that moves the
++     * framebuffer would otherwise leave it converting whatever now
++     * lives there. */
+     *(volatile UWORD *)0xFF8020 = (UWORD)(((ULONG)v_bas_ad) >> 8);
+ 
+     int_vbl();
+@@ -318,6 +316,12 @@ void segacd_floppy_init(void)
+         bram_wr(BRAM_BYTES - 1, keep);
+     }
+ 
++    /* getbpb's verdict on B:, seeded so that an untouched comm register
++     * cannot be mistaken for one. The gate array does not clear these on
++     * reset, and the value it powers up with reads exactly like a
++     * plausible cluster count. */
++    *(volatile UWORD *)0xFF8028 = 0xB0FF;
++
+     /* low nibble: state; bit 4: writes verified */
+     *(volatile UWORD *)0xFF802A =
+         (UWORD)(bram_state | (bram_wtest ? 0x10 : 0));

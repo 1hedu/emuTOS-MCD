@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 10:09:06 +0000
+Subject: [PATCH 116/184] segacd: bracket the framebuffer corruption, which is
+ after the AES
+
+Two sticky bits, one at the end of bios_init and one at the Pexec
+that launches the desktop. Both false: the framebuffer is clean at
+the moment the AES is handed control, so nothing during boot writes
+it and the garbage is produced by the desktop itself.
+
+Also a guard band below the screen, kept as a probe rather than a
+fix -- it moved the corruption with the screen, which is what said
+the writer works from v_bas_ad rather than a fixed address.
+---
+ bios/bios.c   | 11 +++++++++++
+ bios/screen.c | 11 +++++++++++
+ bios/segacd.c |  7 ++++++-
+ 3 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 7df956c..24b5a5b 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1347,6 +1347,13 @@ void biosmain(void)
+     }
+ #endif
+ 
++#ifdef MACHINE_SEGACD
++    /* Is the framebuffer already dirty here? Bracketing the writer
++     * between the end of bios_init and the AES, since everything
++     * either side of that has been eliminated. */
++    if (*(volatile ULONG *)v_bas_ad)
++        segacd_event(6);
++#endif
+     SCTRACE(0x50); autoexec();                 /* autoexec PRGs from AUTO folder */
+ 
+     /* clear commandline */
+@@ -1367,6 +1374,10 @@ void biosmain(void)
+         pd = (PD *) Pexec(PE_BASEPAGEFLAGS, (char *)PF_STANDARD, "", default_env);
+         pd->p_tbase = (UBYTE *) exec_os;
+         pd->p_tlen = pd->p_dlen = pd->p_blen = 0;
++#ifdef MACHINE_SEGACD
++        if (*(volatile ULONG *)v_bas_ad)
++            segacd_event(7);
++#endif
+         SCTRACE(0x52);
+         Pexec(PE_GO, "", (char *)pd, default_env);
+     }
+diff --git a/bios/screen.c b/bios/screen.c
+index 1d1aba3..8e3e9eb 100644
+--- a/bios/screen.c
++++ b/bios/screen.c
+@@ -650,7 +650,18 @@ void screen_init_address(void)
+ #else
+     vram_size = calc_vram_size();
+     /* videoram is placed just below the phystop */
++#ifdef MACHINE_SEGACD
++    /* A probe, not a fix. Something writes 68000 code over the top of
++     * the framebuffer on a Mode 1 boot -- once, during boot -- while
++     * memtop reads 058000 on both boot paths, which is exactly where
++     * the screen starts. So whatever it is, it is writing past its own
++     * ceiling. Reserving eight kilobytes of slack below the screen
++     * says whether the overrun is bounded: if the picture comes clean,
++     * it is, and the real fix is to find the writer. */
++    screen_start = balloc_stram(vram_size + 8192UL, TRUE) + 8192;
++#else
+     screen_start = balloc_stram(vram_size, TRUE);
++#endif
+ #endif /* CONF_VRAM_ADDRESS */
+ 
+ #if CONF_WITH_VIDEL
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 285ba30..15b140e 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -845,7 +845,12 @@ void segacd_int_4_c(void)
+      * 68000 code -- so the question is whether the memory the allocator
+      * thinks is free reaches into it. The drive state that used to sit
+      * here has been read; this has not. */
+-    *(volatile UWORD *)0xFF802C = (UWORD)(((((ULONG)phystop) >> 12) << 8)
++    /* memtop's page in the high byte now: phystop reads 060000 on both
++     * boots, so the question has moved to where the allocator thinks
++     * its pool ends. The screen is reserved 32 KB below phystop, so a
++     * memtop of 058000 means the pool stops exactly at the screen and
++     * something is writing past its own ceiling. */
++    *(volatile UWORD *)0xFF802C = (UWORD)(((((ULONG)memtop) >> 12) << 8)
+                                         | cd_events);
+ 
+     /* Wait for DRS to go *low*. It reads as "a status packet is on its

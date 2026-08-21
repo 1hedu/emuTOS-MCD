@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 18 Aug 2026 03:13:10 +0000
+Subject: [PATCH 170/184] Sega CD: a media change must be latched, not
+ read-and-cleared
+
+The cartridge swap reached the hardware and died in this driver. The
+servant swapped the cart, SWAP.PRG's Getbpb read the new boot sector,
+and S: reported mounted -- then the desktop would not open the drive,
+silently.
+
+cart_refresh() was a read-and-clear: whoever called it first took the
+event. And the sector path called it on every access, so SWAP.PRG's
+own Getbpb -- which reads sector 0 through that path -- cleared the
+latch before the block layer ever asked GET_MEDIACHANGE. No
+MEDIACHANGE meant no rescan, no E_CHNG, and GEMDOS kept serving its
+cached picture of the previous volume: a 63-sector filesystem laid
+over a cartridge that no longer holds one.
+
+Noticing and consuming are two different acts now. cart_poll() updates
+the geometry and latches a generation change; the latch survives any
+number of sector accesses and is taken only by GET_MEDIACHANGE, whose
+caller is the machinery built to spread the news -- blkdev turns it
+into a disk_rescan plus E_CHNG, GEMDOS drops its buffers and calls
+Getbpb, and blkdev_getbpb resets its own flag. The disc's eject and
+remount have ridden exactly that chain on hardware; the cartridge now
+rides it too.
+
+On the CD branch the generation bits never move after boot, so this
+changes nothing there.
+---
+ bios/segacd.c | 38 ++++++++++++++++++++++++++++++--------
+ 1 file changed, 30 insertions(+), 8 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index bbc20f6..25fcf05 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -4718,14 +4718,14 @@ LONG segacd_bram_ioctl(WORD op, void *arg)
+  * ahead of the disc, so on a Mode 1 boot the storage that is certainly
+  * present gets the first letter and the disc gets D:.
+  */
+-static WORD cart_refresh(void);         /* defined with the ioctl below */
++static void cart_poll(void);            /* defined with the ioctl below */
+ 
+ LONG segacd_cart_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+ {
+     /* A cartridge used not to be changeable with the power on. On the
+      * Mode 1 branch it is: the boot cartridge comes out and a backup RAM
+      * cart goes in, and the geometry with it. */
+-    (void)cart_refresh();
++    cart_poll();
+ 
+     WORD err;
+ 
+@@ -4764,26 +4764,48 @@ LONG segacd_cart_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+  * as an opaque generation keeps one driver honest about two servants.
+  */
+ static UWORD cart_gen = 0xFFFF;
++static WORD cart_changed;       /* latched until GET_MEDIACHANGE reads it */
+ 
+-static WORD cart_refresh(void)
++/* Notice a swap; never absorb one.
++ *
++ * The first version of this was a read-and-clear in one function,
++ * called from the sector path and the ioctl alike -- so whichever ran
++ * first ate the event for everyone else. And the sector path always
++ * ran first: SWAP.PRG's own Getbpb reads the boot sector, and that
++ * read cleared the latch before the block layer ever asked. GEMDOS
++ * kept its cached picture of the old volume, and the drive "mounted"
++ * but would not open -- silently, because nothing anywhere failed.
++ *
++ * So noticing and consuming are two different acts now. Anyone may
++ * poll; the change stays latched until GET_MEDIACHANGE takes it, and
++ * GET_MEDIACHANGE is the one caller whose job is to pass it on --
++ * blkdev turns it into a rescan and an E_CHNG, GEMDOS drops its
++ * buffers and calls Getbpb, and Getbpb resets blkdev's own flag
++ * (blkdev.c line "reset now"). The disc's eject has ridden exactly
++ * that chain on this hardware; the cartridge now rides it too. */
++static void cart_poll(void)
+ {
+     UWORD now = (UWORD)(CART_CNT >> 11);
+-    WORD changed = (cart_gen != 0xFFFF) && (now != cart_gen);
+ 
++    if (cart_gen != 0xFFFF && now != cart_gen)
++        cart_changed = 1;
+     cart_gen = now;
+     cart_sectors = CART_CNT_SECTORS;
+-    return changed;
+ }
+ 
+ LONG segacd_cart_ioctl(WORD op, void *arg)
+ {
+     ULONG *info = (ULONG *)arg;
+-    WORD changed = cart_refresh();
++
++    cart_poll();
+ 
+     /* The change has to be reported even when the slot has gone empty,
+-     * so the refresh comes before the refusal. */
+-    if (op == GET_MEDIACHANGE)
++     * so the poll comes before the refusal. */
++    if (op == GET_MEDIACHANGE) {
++        WORD changed = cart_changed;
++        cart_changed = 0;
+         return changed ? MEDIACHANGE : MEDIANOCHANGE;
++    }
+ 
+     if (!cart_sectors)
+         return EUNDEV;

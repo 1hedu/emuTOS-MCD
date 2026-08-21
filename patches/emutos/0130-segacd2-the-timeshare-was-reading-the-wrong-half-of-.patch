@@ -1,0 +1,109 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 05:35:06 +0000
+Subject: [PATCH 130/184] segacd2: the timeshare was reading the wrong half of
+ the status word
+
+CDCSTAT does no work. It is five instructions comparing the sector
+ring's head and tail (US 0x1D10) and never touches hardware, so polling
+it drives nothing -- the ring is filled by the firmware's interrupts.
+That settles the shape: a swap-in/call/swap-out cannot work, and the
+firmware has to be resident with its vectors live for a whole read.
+Which is what _segacd_bios_read already does.
+
+And then it waited for the drive like this:
+
+    move.w (a0),d0
+    andi.w #0x00FF,d0        <- the low byte
+    cmpi.w #0x0004,d0
+    cmpi.w #0x0001,d0
+
+The drive state is in the high byte. Doom CD32X Fusion's sub program
+(ROM 0xC7E) reads `move.w (a0),d0 / lsr.w #8,d0 / cmpi.b #$40 /
+cmpi.b #$10`, and our own wake, written from it this afternoon, gets
+state 2 out of hardware doing the same. This masked the half the state
+does not live in, so it never matched, brd_wait_init spun to its
+200-frame timeout on every visit, and the read went ahead against a
+drive nothing had confirmed.
+
+That is exactly the failure this timeshare has reported since it was
+written: "no sector was ever announced", with the drive at state 0.
+
+Fixed to the nibble rather than the whole byte, because hardware
+reports 0x2n and a byte compare against 0x20 would miss it, and 2 is
+accepted alongside 4 and 1 -- this project's own note says a CD boot
+reads 1, 2 or 4.
+
+DRV_INIT goes back on by default with it. It was switched off on the
+grounds that "no Sega code that reads a sector calls DRV_INIT to do
+it"; Doom's sub program calls it every frame its CDBSTAT comes back
+wrong, along with FDRSET and CDCSTOP, and refuses every command until
+the drive answers. That is a shipping Mode 1 CD reader contradicting
+the grounds directly. It also never mattered which way the flag was
+set, because the wait behind it could not succeed either way.
+---
+ bios/segacd2.S | 43 +++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 37 insertions(+), 6 deletions(-)
+
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 73caf8c..fb077b0 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -247,7 +247,19 @@ _segacd_bios_ctrl:                      // $FF8037 and $FF8033 on entry
+ _segacd_bios_lost:                      // mask bits seen switched off
+         .word   0                       //    at any point during a visit
+ _segacd_bios_drvinit:                   // whether to wake with DRV_INIT
+-        .byte   0
++        // On, and that reverses a correction.
++        //
++        // It was turned off on the grounds that "no Sega code that
++        // reads a sector calls DRV_INIT to do it". Doom CD32X Fusion's
++        // sub program does, every frame its CDBSTAT comes back wrong,
++        // together with FDRSET and CDCSTOP, and it will not accept a
++        // command until the drive answers 4 or 1. That is a shipping
++        // Mode 1 CD reader and it contradicts the grounds directly.
++        //
++        // It also stopped mattering what the setting was, because the
++        // wait behind it tested the wrong half of the status word and
++        // could never succeed either way.
++        .byte   1
+         .even
+ _segacd_bios_st:                        // CDD status, first four nibbles
+         .long   0                       //    pairs, as the visit ended
+@@ -540,12 +552,31 @@ brd_wait_init:
+         move.w  #0x0081,d0              // CDB_STAT
+         move.w  d0,50(a5)
+         jsr     0x5F22
+-        move.w  (a0),d0                 // status: low byte is drive state
+-        andi.w  #0x00FF,d0
+-        move.w  d0,34(a5)
+-        cmpi.w  #0x0004,d0              // paused, ready to be read from
++        // The drive state is in the HIGH byte, not the low one.
++        //
++        // This masked 0x00FF and compared against 4 and 1, so it was
++        // testing a half of the status word the state does not live in.
++        // It therefore never matched, brd_wait_init spun to its
++        // 200-frame timeout on every visit, and the read went ahead
++        // against a drive nothing had confirmed -- which is precisely
++        // the failure this timeshare has always reported: "no sector
++        // was ever announced", with the drive at state 0.
++        //
++        // Doom CD32X Fusion's sub program (ROM 0xC7E) is the reference:
++        // `move.w (a0),d0 / lsr.w #8,d0 / cmpi.b #$40 / cmpi.b #$10`.
++        // The nibble is compared rather than the whole byte because the
++        // low nibble carries other things -- our own wake reported
++        // state 2 on hardware as 0x2n, and a whole-byte compare against
++        // 0x20 would have missed it.
++        move.w  (a0),d0
++        move.w  d0,34(a5)               // the whole word, for the report
++        lsr.w   #8,d0
++        andi.w  #0x00F0,d0              // the drive's own state nibble
++        cmpi.w  #0x0040,d0              // paused, ready to be read from
++        beq     brd_init_done
++        cmpi.w  #0x0020,d0              // and 2, which a CD boot shows
+         beq     brd_init_done
+-        cmpi.w  #0x0001,d0              // playing, also fine
++        cmpi.w  #0x0010,d0              // playing, also fine
+         bne     brd_wait_init
+ brd_init_done:
+         move.b  #1,_bios_woken

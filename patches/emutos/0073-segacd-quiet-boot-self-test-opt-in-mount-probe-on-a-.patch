@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 05:34:13 +0000
+Subject: [PATCH 073/184] segacd: quiet boot -- self-test opt-in, mount probe
+ on a short leash
+
+The access storm that began the instant the HUD appeared was partly
+ours on every boot: the stage-3 self-test, two far-apart sector reads
+plus retries, running on a point proven weeks ago. It now runs only
+when Up is held at power-on; the emulator harness holds Up and keeps
+its PASS gate at full strength.
+
+The C: mount probe, which runs before anything is on screen, no
+longer gets Sega's full leash twice over: first block read gets one
+fill of two seconds. It either works quickly -- boot is the quietest
+this machine ever is -- or the user gets a desktop without the icon in
+seconds instead of with a dead icon in half a minute, and the next
+touch retries at full patience.
+
+Publishing the report block is no longer tied to the self-test having
+started, which would have silently cost the whole second HUD row.
+
+A clean plain boot now works the drive exactly twice.
+---
+ bios/segacd.c | 39 +++++++++++++++++++++++++++++++++++----
+ 1 file changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 5dc40f3..916fdbb 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -145,6 +145,7 @@ static UBYTE cdd_count, cdd_good;
+ static UBYTE cdd_tick;
+ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
+ UBYTE segacd_diag;              /* holding Down runs the D: diagnostic */
++static UBYTE cd_selftest;       /* holding Up runs the boot sector test */
+ UWORD segacd_bootflags;         /* the raw button word the servant sent.
+                                  * Printed by the diagnostic, because a
+                                  * boot switch nothing displays is a
+@@ -217,6 +218,9 @@ static UBYTE cd_quiet;          /* the read command has been withdrawn */
+                                  * thirty retries. A 1992 lens gets a
+                                  * long leash from its own maker. */
+ #define CD_XCHG_AHEAD   120     /* stop reading ahead with this much left */
++static UWORD cd_leash = CD_XCHG_BUDGET; /* the budget in force; the mount
++                                         * probe shortens it, once */
++static UBYTE cd_first = 1;      /* no block has been read yet */
+ #define CD_SPIN_BACKSTOP 130000L
+ 
+ static UWORD cd_epoch;          /* cdd_ticks when this block read began */
+@@ -415,6 +419,7 @@ void segacd_cdd_init(void)
+          * can now answer that instead of me choosing. */
+         segacd_diag = (UBYTE)((f & 4) ? 1 : 0);
+         cd_lead = (f & 8) ? 2UL : 20UL;
++        cd_selftest = (UBYTE)((f & 16) ? 1 : 0);
+         segacd_bootflags = (UWORD)(f & 0xFF);
+     }
+ 
+@@ -1590,7 +1595,7 @@ static void cdr_step(void)
+  * much the main side steals the bus. */
+ static BOOL cd_time_left(void)
+ {
+-    return (UWORD)(cdd_ticks - cd_epoch) < CD_XCHG_BUDGET;
++    return (UWORD)(cdd_ticks - cd_epoch) < cd_leash;
+ }
+ 
+ static UBYTE cd_prepare(void)
+@@ -1941,7 +1946,7 @@ static BOOL cd_fill(ULONG lba)
+             break;
+         /* Only while the budget is comfortable. Read-ahead exists to
+          * make the next read free, not to make this one late. */
+-        if ((UWORD)(cdd_ticks - cd_epoch) > CD_XCHG_BUDGET - CD_XCHG_AHEAD)
++        if ((UWORD)(cdd_ticks - cd_epoch) > cd_leash - CD_XCHG_AHEAD)
+             break;
+         if (!cd_fetch(lba + i))
+             break;
+@@ -1975,6 +1980,27 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+     if (lba < cd_cache_base || lba >= cd_cache_base + cd_cache_have) {
+         UBYTE go;
+ 
++        /* The very first read is the mount probe, and it runs before
++         * anything is on screen. It either works quickly -- the boot
++         * environment is the quietest this machine ever is -- or the
++         * user is better served by a desktop without a C: icon in two
++         * seconds than by one with a dead icon in half a minute; the
++         * next touch of the drive retries with the full leash anyway.
++         * Sega's patience stays where it belongs, on real file I/O. */
++        if (cd_first) {
++            cd_first = 0;
++            cd_epoch = cdd_ticks;
++            cd_budget = CD_SPIN_BACKSTOP;
++            cd_leash = 150;                     /* two seconds */
++            go = (UBYTE)(cd_fill(lba) ? 1 : 0);
++            cd_leash = CD_XCHG_BUDGET;
++            if (!go)
++                return FALSE;
++            memcpy(buf, cd_cache[lba - cd_cache_base] + off, SECTOR_SIZE);
++            cd_dtest |= 2;
++            return TRUE;
++        }
++
+         /* Twice, because the evidence says so: a fill that has just
+          * failed three times over succeeds immediately when started
+          * again from scratch. The first read after the drive has been
+@@ -2295,7 +2321,7 @@ void segacd_int_2_c(void)
+      * count is a fallback for the case where the round-trip test never
+      * concludes -- ten seconds in, try anyway and let the result say
+      * what happened. */
+-    if (cdd_cmd_on && !cdr_tried && cdr_state == CDR_IDLE
++    if (cd_selftest && cdd_cmd_on && !cdr_tried && cdr_state == CDR_IDLE
+             && (cdd_ok || ++cdr_boot > 600)) {
+         cdr_tried = 1;
+         cdr_slot = 0;
+@@ -2372,7 +2398,12 @@ void segacd_int_2_c(void)
+         | ((UWORD)cdd_want_ck << 8)
+         | ((UWORD)cdd_got_ck << 4)
+         |  (UWORD)(cdd_ok ? 1 : 0)
+-        |  (UWORD)((cdr_state != CDR_IDLE) ? 2 : 0));
++        /* "There is a report to fetch" used to mean "the self-test has
++         * started", and the self-test no longer runs on ordinary
++         * boots -- which silently took the whole second HUD row with
++         * it, D: counters and all. The report is published every VBL
++         * regardless, so say so unconditionally. */
++        |  2);
+ 
+     /* Sound telemetry, packed into the spare bits of the drive status
+      * word: no comm register is free, and this answers the only

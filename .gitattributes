@@ -1,0 +1,4 @@
+# Everything in this tree is byte-exact: the patch series in patches/emutos/
+# must apply as written, and the 68000 sources, linker scripts and disc images
+# are read by tools that do not forgive a CR. No EOL conversion, anywhere.
+* -text

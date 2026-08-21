@@ -1,0 +1,487 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 02:43:50 +0000
+Subject: [PATCH 001/184] Add Sega CD (Mega CD) sub-CPU machine target
+
+EmuTOS runs on the Sega CD's sub 68000, whose address 0 is PRG-RAM, so
+the ST low-memory ABI holds byte-authentic. The OS image links at
+0x080000 (Word RAM). No Atari hardware; a servant firmware on the
+Genesis-side main 68000 converts the ST-low planar screen to VDP tiles
+and will deliver input. Machine layer modeled on the Apple Lisa port:
+
+- bios/segacd.c/h/segacd2.S: screen hooks (ST-low, stock top-of-RAM
+  buffer), gate-array timer as the 200 Hz system tick (INT3), VBL from
+  the main CPU (INT2), keyboard/clock stubs
+- config: CONF_ATARI_HARDWARE 0, CONF_STRAM_SIZE 384K, no floppy
+- Makefile: 'segacd' target -> emutos-segacd.img (make clean first,
+  as between any two targets)
+---
+ Makefile         |  11 +++++
+ bios/clock.c     |   7 +++
+ bios/ikbd.c      |   5 +++
+ bios/machine.c   |   2 +
+ bios/mfp.c       |   3 ++
+ bios/screen.c    |  15 +++++++
+ bios/segacd.c    | 114 +++++++++++++++++++++++++++++++++++++++++++++++
+ bios/segacd.h    |  37 +++++++++++++++
+ bios/segacd2.S   |  49 ++++++++++++++++++++
+ emutos.ld        |   4 +-
+ include/config.h |  37 +++++++++++++++
+ 11 files changed, 283 insertions(+), 1 deletion(-)
+ create mode 100644 bios/segacd.c
+ create mode 100644 bios/segacd.h
+ create mode 100644 bios/segacd2.S
+
+diff --git a/Makefile b/Makefile
+index 2e74adc..8454c89 100644
+--- a/Makefile
++++ b/Makefile
+@@ -307,6 +307,7 @@ bios_src +=  memory.S processor.S vectors.S aciavecs.S bios.c xbios.c acsi.c \
+              pmmu030.c 68040_pmmu.S \
+              amiga.c amiga2.S spi_vamp.c \
+              lisa.c lisa2.S \
++             segacd.c segacd2.S \
+              delay.c delayasm.S sd.c memory2.c bootparams.c scsi.c nova.c \
+              dsp.c dsp2.S \
+              scsidriv.c
+@@ -894,6 +895,16 @@ TOCLEAN += *.dc42
+ EMUTOS_DC42 = emutos.dc42
+ LISA_DEFS =
+ 
++.PHONY: segacd
++NODEP += segacd
++segacd: UNIQUE = us
++segacd: OPTFLAGS = $(SMALL_OPTFLAGS)
++segacd: override DEF += -DTARGET_SEGACD
++segacd:
++	@echo "# Building Sega CD EmuTOS into emutos-segacd.img"
++	$(MAKE) CPUFLAGS='-m68000' DEF='$(DEF)' OPTFLAGS='$(OPTFLAGS)' UNIQUE=$(UNIQUE) WITH_CLI=1 emutos.img
++	cp emutos.img emutos-segacd.img
++
+ .PHONY: lisaflop
+ NODEP += lisaflop
+ lisaflop: UNIQUE = $(COUNTRY)
+diff --git a/bios/clock.c b/bios/clock.c
+index d34f35f..2a5acc9 100644
+--- a/bios/clock.c
++++ b/bios/clock.c
+@@ -33,6 +33,7 @@
+ #include "../bdos/bdosstub.h"
+ #include "amiga.h"
+ #include "lisa.h"
++#include "segacd.h"
+ #include "disk.h"
+ #include "acsi.h"
+ 
+@@ -1281,6 +1282,12 @@ LONG gettime(void)
+         return lisa_getdt();
+     }
+ #endif /* MACHINE_LISA */
++#ifdef MACHINE_SEGACD
++    else if (TRUE)
++    {
++        return segacd_getdt();
++    }
++#endif /* MACHINE_SEGACD */
+ #if CONF_WITH_NVRAM
+     else if (has_nvram)
+     {
+diff --git a/bios/ikbd.c b/bios/ikbd.c
+index cd58060..aed5901 100644
+--- a/bios/ikbd.c
++++ b/bios/ikbd.c
+@@ -39,6 +39,7 @@
+ #include "coldfire.h"
+ #include "amiga.h"
+ #include "lisa.h"
++#include "segacd.h"
+ 
+ 
+ /* forward declarations */
+@@ -1084,6 +1085,10 @@ void kbd_init(void)
+     lisa_kbd_init();
+ #endif
+ 
++#ifdef MACHINE_SEGACD
++    segacd_kbd_init();
++#endif
++
+     /* initialize the IKBD */
+     ikbd_reset();
+ 
+diff --git a/bios/machine.c b/bios/machine.c
+index 41dc03f..c484c16 100644
+--- a/bios/machine.c
++++ b/bios/machine.c
+@@ -832,6 +832,8 @@ const char * machine_name(void)
+     return amiga_machine_name();
+ #elif defined(MACHINE_LISA)
+     return "Apple Lisa";
++#elif defined(MACHINE_SEGACD)
++    return "Sega CD";
+ #elif defined(MACHINE_M548X)
+     return m548x_machine_name();
+ #else
+diff --git a/bios/mfp.c b/bios/mfp.c
+index 1dbd6cf..f5ff70f 100644
+--- a/bios/mfp.c
++++ b/bios/mfp.c
+@@ -19,6 +19,7 @@
+ #include "vectors.h"
+ #include "coldfire.h"
+ #include "lisa.h"
++#include "segacd.h"
+ 
+ #if CONF_WITH_MFP || CONF_WITH_TT_MFP
+ 
+@@ -203,6 +204,8 @@ void init_system_timer(void)
+     coldfire_init_system_timer();
+ #elif defined(MACHINE_LISA)
+     lisa_init_system_timer();
++#elif defined(MACHINE_SEGACD)
++    segacd_init_system_timer();
+ #elif CONF_WITH_MFP
+     /* Timer C: ctrl = divide 64, data = 192 */
+     xbtimer(2, 0x50, 192, (LONG)int_timerc);
+diff --git a/bios/screen.c b/bios/screen.c
+index 4f9daa7..fa19119 100644
+--- a/bios/screen.c
++++ b/bios/screen.c
+@@ -36,6 +36,7 @@
+ #include "bdosbind.h"
+ #include "amiga.h"
+ #include "lisa.h"
++#include "segacd.h"
+ #include "nova.h"
+ 
+ void detect_monitor_change(void);
+@@ -629,6 +630,10 @@ void screen_init_mode(void)
+     lisa_screen_init();
+ #endif
+ 
++#ifdef MACHINE_SEGACD
++    segacd_screen_init();
++#endif
++
+     rez_was_hacked = FALSE; /* initial assumption */
+ }
+ 
+@@ -747,6 +752,8 @@ static ULONG calc_vram_size(void)
+     return amiga_initial_vram_size();
+ #elif defined(MACHINE_LISA)
+     return 32*1024UL;
++#elif defined(MACHINE_SEGACD)
++    return 32*1024UL;
+ #else
+     ULONG vram_size;
+ 
+@@ -818,6 +825,10 @@ void screen_get_current_mode_info(UWORD *planes, UWORD *hz_rez, UWORD *vt_rez)
+     *planes = 1;
+     *hz_rez = 720;
+     *vt_rez = 364;
++#elif defined(MACHINE_SEGACD)
++    *planes = 4;
++    *hz_rez = 320;
++    *vt_rez = 200;
+ #else
+     atari_get_current_mode_info(planes, hz_rez, vt_rez);
+ #endif
+@@ -1045,6 +1056,8 @@ const UBYTE *physbase(void)
+     return amiga_physbase();
+ #elif defined(MACHINE_LISA)
+     return lisa_physbase();
++#elif defined(MACHINE_SEGACD)
++    return segacd_physbase();
+ #elif CONF_WITH_ATARI_VIDEO
+     return atari_physbase();
+ #else
+@@ -1063,6 +1076,8 @@ static void setphys(const UBYTE *addr)
+     amiga_setphys(addr);
+ #elif defined(MACHINE_LISA)
+     lisa_setphys(addr);
++#elif defined(MACHINE_SEGACD)
++    segacd_setphys(addr);
+ #elif CONF_WITH_ATARI_VIDEO
+     atari_setphys(addr);
+ #endif
+diff --git a/bios/segacd.c b/bios/segacd.c
+new file mode 100644
+index 0000000..50b8285
+--- /dev/null
++++ b/bios/segacd.c
+@@ -0,0 +1,114 @@
++/*
++ * segacd.c - Sega CD (Mega CD) sub-CPU specific functions
++ *
++ * Copyright (C) 2026 The EmuTOS development team
++ *
++ * This file is distributed under the GPL, version 2 or at your
++ * option any later version.  See doc/license.txt for details.
++ *
++ * EmuTOS runs on the Sega CD's sub 68000 (12.5 MHz), whose address 0 is
++ * PRG-RAM — the ST low-memory ABI holds byte-authentic. The Genesis-side
++ * main 68000 runs a servant firmware that converts the ST-low planar
++ * screen to VDP tiles, samples controllers, and proxies the backup-RAM
++ * cartridge. The Sega CDBIOS is used only by the boot loader and is gone
++ * before EmuTOS starts (it owned the same low RAM the ST ABI needs).
++ *
++ * Sub-CPU hardware used here (gate array at 0xFF8000):
++ *   0xFF8031  timer: counts down every 30.72 us, 0 disables, IRQ3 on zero
++ *   0xFF8033  interrupt mask: bit n enables level-n interrupt
++ * Level 2 is raised by the main CPU once per vblank (our VBL).
++ */
++
++#include "emutos.h"
++
++#ifdef MACHINE_SEGACD
++
++#include "segacd.h"
++#include "screen.h"
++#include "vectors.h"
++#include "tosvars.h"
++#include "biosext.h"
++
++#define GA_TIMER    (*(volatile UBYTE *)0xFF8031)
++#define GA_INTMASK  (*(volatile UBYTE *)0xFF8033)
++
++/* 200 Hz: 5000 us / 30.72 us = 162.76; 163 gives 199.7 Hz */
++#define TIMER_200HZ 163
++
++/******************************************************************************/
++/* Screen                                                                     */
++/******************************************************************************/
++
++/* The screen is an authentic ST-low buffer (320x200, 4 interleaved
++ * bitplanes). EmuTOS's standard top-of-RAM allocation puts it at
++ * phystop - 32K = 0x58000, inside main-window PRG bank 2, where the
++ * servant reads it. No video hardware exists on this side; the address
++ * is only bookkeeping. */
++
++static const UBYTE *segacd_screenbase;
++
++void segacd_screen_init(void)
++{
++    sshiftmod = ST_LOW;
++
++    /* VBL arrives from the main CPU as level 2 */
++    VEC_LEVEL2 = segacd_int_2;
++
++    /* enable level 2 (VBL) + level 3 (timer) in the gate array */
++    GA_INTMASK |= 0x0C;
++}
++
++void segacd_setphys(const UBYTE *addr)
++{
++    segacd_screenbase = addr;
++}
++
++const UBYTE *segacd_physbase(void)
++{
++    if (segacd_screenbase)
++        return segacd_screenbase;
++    return logbase();
++}
++
++/******************************************************************************/
++/* System timer                                                               */
++/******************************************************************************/
++
++void segacd_init_system_timer(void)
++{
++    VEC_LEVEL3 = segacd_int_3;
++    GA_TIMER = TIMER_200HZ;     /* starts the countdown */
++}
++
++/******************************************************************************/
++/* Interrupts                                                                 */
++/******************************************************************************/
++
++/* INT2 C handler: VBL from the main CPU. */
++void segacd_int_2_c(void)
++{
++    int_vbl();
++}
++
++/******************************************************************************/
++/* Keyboard                                                                   */
++/******************************************************************************/
++
++void segacd_kbd_init(void)
++{
++    /* Input events will be injected from the main-CPU servant's comm
++     * registers (pad + Sega Mouse); nothing to initialize yet. */
++}
++
++/******************************************************************************/
++/* Clock                                                                      */
++/******************************************************************************/
++
++ULONG segacd_getdt(void)
++{
++    /* No RTC: fixed date until BRAM-backed clock storage arrives.
++     * Format: date word (DOS format) in the high word, time in the low. */
++    return MAKE_ULONG(((2026 - 1980) << 9) | (8 << 5) | 9, 0);
++}
++
++#endif /* MACHINE_SEGACD */
+diff --git a/bios/segacd.h b/bios/segacd.h
+new file mode 100644
+index 0000000..ddc280e
+--- /dev/null
++++ b/bios/segacd.h
+@@ -0,0 +1,37 @@
++/*
++ * segacd.h - Sega CD (Mega CD) sub-CPU specific functions
++ *
++ * Copyright (C) 2026 The EmuTOS development team
++ *
++ * This file is distributed under the GPL, version 2 or at your
++ * option any later version.  See doc/license.txt for details.
++ */
++
++#ifndef SEGACD_H
++#define SEGACD_H
++
++#ifdef MACHINE_SEGACD
++
++/* Screen */
++void segacd_screen_init(void);
++void segacd_setphys(const UBYTE *addr);
++const UBYTE *segacd_physbase(void);
++
++/* System timer (gate array INT3) */
++void segacd_init_system_timer(void);
++
++/* Keyboard/mouse (events arrive from the main-CPU servant; stub for now) */
++void segacd_kbd_init(void);
++
++/* Clock */
++ULONG segacd_getdt(void);
++
++/* Interrupt handlers (assembler entry points in segacd2.S) */
++void segacd_int_2(void);        /* INT2: VBL, raised by the main CPU */
++void segacd_int_3(void);        /* INT3: gate array timer, 200 Hz */
++void segacd_int_2_c(void);
++void segacd_call_5ms(void);
++
++#endif /* MACHINE_SEGACD */
++
++#endif /* SEGACD_H */
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+new file mode 100644
+index 0000000..1406fce
+--- /dev/null
++++ b/bios/segacd2.S
+@@ -0,0 +1,49 @@
++/*
++ * segacd2.S - Sega CD (Mega CD) specific assembler functions
++ *
++ * Copyright (C) 2026 The EmuTOS development team
++ *
++ * This file is distributed under the GPL, version 2 or at your
++ * option any later version.  See doc/license.txt for details.
++ */
++
++#include "asmdefs.h"
++
++#ifdef MACHINE_SEGACD
++
++        .extern _segacd_int_2_c
++        .extern _vector_5ms
++
++/******************************************************************************/
++/* Interrupts                                                                 */
++/******************************************************************************/
++
++// Level 2: VBL, raised by the main CPU each vblank
++        .globl  _segacd_int_2
++_segacd_int_2:
++        move.w  #0x2700,sr              // Forbid higher level interrupts
++        movem.l d0-d1/a0-a1,-(sp)
++        jbsr    _segacd_int_2_c         // Delegate to C implementation
++        movem.l (sp)+,d0-d1/a0-a1
++        rte
++
++// Level 3: gate array timer, 200 Hz system tick
++        .globl  _segacd_int_3
++_segacd_int_3:
++        move.w  #0x2700,sr              // Forbid higher level interrupts
++        movem.l d0-d1/a0-a1,-(sp)
++        jbsr    _segacd_call_5ms
++        movem.l (sp)+,d0-d1/a0-a1
++        rte
++
++// Call vector_5ms (200 Hz system timer callback) from the handler above.
++// As it will return with RTE, we must set up a proper stack frame.
++        .globl  _segacd_call_5ms
++_segacd_call_5ms:
++        // The return address is already on the stack.
++        // The sub CPU is always a 68000, so _longframe is false.
++        move.w  sr,-(sp)                // Push SR
++        move.l  _vector_5ms,a0
++        jmp     (a0)                    // Call the 200 Hz system callback
++
++#endif /* MACHINE_SEGACD */
+diff --git a/emutos.ld b/emutos.ld
+index 6c221a3..e297953 100644
+--- a/emutos.ld
++++ b/emutos.ld
+@@ -20,7 +20,9 @@ OUTPUT_FORMAT(binary)
+ #if !EMUTOS_LIVES_IN_RAM
+ 
+ /* The ROM address depends on the target */
+-#if defined(MACHINE_AMIGA)
++#if defined(MACHINE_SEGACD)
++# define ROM_ORIGIN 0x00080000
++#elif defined(MACHINE_AMIGA)
+ # define ROM_ORIGIN 0x00fc0000
+ #elif defined(TARGET_CART)
+ # define ROM_ORIGIN 0x00fa0000
+diff --git a/include/config.h b/include/config.h
+index 41e4311..b639761 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -591,6 +591,43 @@
+ # endif
+ #endif
+ 
++/*
++ * Defaults for the Sega CD (Mega CD) target
++ */
++#ifdef TARGET_SEGACD
++# define MACHINE_SEGACD
++#endif
++
++/*
++ * Defaults for the Sega CD machine.
++ * EmuTOS runs on the sub 68000: RAM at address 0 (PRG-RAM), the OS image
++ * in Word RAM at 0x080000, no Atari hardware at all. Display and input
++ * are serviced by a firmware on the Genesis-side main 68000.
++ */
++#ifdef MACHINE_SEGACD
++# ifndef CONF_ATARI_HARDWARE
++#  define CONF_ATARI_HARDWARE 0
++# endif
++# ifndef CONF_WITH_READ_INF
++#  define CONF_WITH_READ_INF 0
++# endif
++# ifndef CONF_STRAM_SIZE
++#  define CONF_STRAM_SIZE (384UL*1024)
++# endif
++# ifndef CONF_WITH_FLOPPY
++#  define CONF_WITH_FLOPPY 0
++# endif
++# ifndef CONF_WITH_ADVANCED_CPU
++#  define CONF_WITH_ADVANCED_CPU 0
++# endif
++# ifndef CONF_WITH_APOLLO_68080
++#  define CONF_WITH_APOLLO_68080 0
++# endif
++# ifndef CONF_WITH_CACHE_CONTROL
++#  define CONF_WITH_CACHE_CONTROL 0
++# endif
++#endif
++
+ /*
+  * Defaults for the Apple Lisa floppy target
+  */

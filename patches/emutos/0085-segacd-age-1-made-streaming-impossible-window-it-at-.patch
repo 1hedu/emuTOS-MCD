@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 21:25:08 +0000
+Subject: [PATCH 085/184] segacd: age 1 made streaming impossible; window it at
+ 3 and cache twelve
+
+Tightening ring entries to age one, two builds ago, cost far more than
+the mispairs it stopped. A transfer takes a sector time or two, so the
+next consecutive sector -- already decoded, sitting in the buffer --
+was always already too old to use: refused, and a fresh seek issued
+for data the chip was holding. Walking a FAT is eight consecutive
+sectors; it became eight seeks instead of one streaming pass, and a
+seek is the only part of a read that can really fail. That is why
+tightening did not help and the failures kept scattering across the
+same region.
+
+The bound is a window, not a point. The buffer holds about seven
+blocks, hardware measured the recycler arriving at five, a transfer
+costs one or two -- three is the largest age still certainly valid.
+
+And the cache goes four to twelve, so one seek serves a whole FAT walk
+or a whole directory scan. Sectors arriving behind the one asked for
+are thirteen milliseconds apart and free; Lunar drains everything
+available before yielding, for exactly this reason. Cost is 17 KB of
+buffer.
+
+Both cores verify (gpgx wants 4500 frames now rather than 3000 -- the
+opt-in self-test finishes later when read-ahead holds the drive
+longer).
+---
+ bios/segacd.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 8466cac..036e3e0 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -318,7 +318,7 @@ static BOOL cd_ring_find(ULONG lba, UWORD *pt)
+              * seven deep -- at age four plus two in flight the slot is
+              * being rewritten mid-grab. The BIOS consumes its entries
+              * at age zero or one; two is already generous. */
+-            if (age <= 1 && age < best) {
++            if (age <= 3 && age < best) {
+                 best = age;
+                 *pt = cd_ring_pt[i];
+                 cd_found_stamp = cd_ring_age[i];
+@@ -2097,7 +2097,16 @@ static void cd_park(void)
+  * GEMDOS block and the next the head moves on and the stream is lost.
+  * Eight seeks is eight seconds when it works, and eight chances to
+  * fail when it does not: the window stayed shut. */
+-#define CD_CACHE_SECTORS 4
++/* Twelve, not four: one seek should serve a whole structure.
++ *
++ * Walking a FAT is eight consecutive CD sectors and a directory scan
++ * is eight more; at four per fill each of those needed several seeks,
++ * and a seek is the only part of a read that can really fail. Sectors
++ * that arrive on the stream behind the one asked for are thirteen
++ * milliseconds apart and free -- Lunar drains everything available
++ * before it yields, for this reason -- so the only cost of taking
++ * twelve is the buffer. */
++#define CD_CACHE_SECTORS 12
+ 
+ static UBYTE cd_cache[CD_CACHE_SECTORS][CDC_DATA_BYTES];
+ 

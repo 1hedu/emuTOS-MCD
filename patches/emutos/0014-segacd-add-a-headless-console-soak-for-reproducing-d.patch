@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 08:45:31 +0000
+Subject: [PATCH 014/184] segacd: add a headless console soak for reproducing
+ display bugs
+
+Heavy console output is the one screen the desktop never exercises: an
+all-background page with text on it. Driving EmuDesk's "Show file" from
+a script means steering the mouse pointer through two double-clicks,
+which is fragile; this prints a text page from biosmain instead, before
+the desktop starts, so the case reproduces under the emulators with no
+input at all.
+
+Off unless CONF_SEGACD_CONSOLE_SOAK is defined as the number of lines:
+
+  make segacd ELF=1 DEF='-DCONF_SEGACD_CONSOLE_SOAK=12'
+
+This is what found the plane-B transparency bug the servant had.
+---
+ bios/bios.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 48dfc0a..316623b 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -873,6 +873,23 @@ void biosmain(void)
+     }
+ #endif
+ 
++#if defined(MACHINE_SEGACD) && defined(CONF_SEGACD_CONSOLE_SOAK)
++    /*
++     * Diagnostic build only: hammer the VT52 console the way EmuDesk's
++     * "Show file" and EmuCON do, with no input needed, so the hardware
++     * text-smear bug can be reproduced headlessly under the emulators.
++     */
++    {
++        int i;
++        cprintf("\033E");               /* clear screen, like show_file() */
++        for (i = 0; i < CONF_SEGACD_CONSOLE_SOAK; i++)
++            cprintf("EmuTOS console soak %02d ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n",
++                    i & 0xff);
++        for (;;)                        /* freeze with the text on screen */
++            ;
++    }
++#endif
++
+     autoexec();                 /* autoexec PRGs from AUTO folder */
+ 
+     /* clear commandline */

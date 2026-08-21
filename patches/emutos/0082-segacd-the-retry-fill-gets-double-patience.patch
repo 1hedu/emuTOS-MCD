@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 20:34:42 +0000
+Subject: [PATCH 082/184] segacd: the retry fill gets double patience
+
+Reads now land most of the time -- three errors a round, mispairs
+corrected -- but a FAT walk needs eight consecutive clean blocks, and
+the survivors are pure timeouts: a few genuinely hard spots on the
+burn that a 1992 lens needs more tries at than the leash allows.
+Sega's sample code answers exactly this with thirty reissues. The
+second fill now runs at twice the leash; the first stays short, so a
+healthy read never feels it.
+---
+ bios/segacd.c | 29 ++++++++++++++++++++++-------
+ 1 file changed, 22 insertions(+), 7 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 9ad8236..73a2a2c 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2165,13 +2165,28 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+          * meaningless -- the first try would spend the lot and the
+          * second would find nothing left and return without asking the
+          * drive anything, which is not a retry. */
+-        for (go = 0; go < 2; go++) {
+-            cd_epoch = cdd_ticks;
+-            cd_budget = CD_SPIN_BACKSTOP;
+-            if (cd_fill(lba))
+-                break;
+-            if (go)
+-                return FALSE;
++        {
++            UWORD leash = cd_leash;
++
++            for (go = 0; go < 2; go++) {
++                cd_epoch = cdd_ticks;
++                cd_budget = CD_SPIN_BACKSTOP;
++                /* The second fill is the one that faces a genuinely
++                 * hard sector -- the first already spent a full leash
++                 * on it -- and Sega's sample code answers that case
++                 * with patience, thirty reissues, not cleverness.
++                 * Doubling the retry's leash is the same posture at
++                 * half the ceiling; the first fill stays short so a
++                 * healthy read never feels any of this. */
++                cd_leash = go ? (UWORD)(leash * 2) : leash;
++                if (cd_fill(lba))
++                    break;
++                if (go) {
++                    cd_leash = leash;
++                    return FALSE;
++                }
++            }
++            cd_leash = leash;
+         }
+     }
+     memcpy(buf, cd_cache[lba - cd_cache_base] + off, SECTOR_SIZE);

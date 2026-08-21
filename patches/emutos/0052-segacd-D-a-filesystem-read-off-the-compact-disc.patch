@@ -1,0 +1,492 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 12:07:31 +0000
+Subject: [PATCH 052/184] segacd: D: -- a filesystem read off the compact disc
+
+A blocking reader on stage 3's machinery, a CD bus in the disk layer,
+and 512-byte GEMDOS blocks mapped onto 2048-byte CD sectors with one
+sector cached. Four consecutive blocks come out of one read, and a
+sector already on its way is waited for rather than seeked to: a seek
+is most of a second and a streamed sector is thirteen milliseconds, so
+re-seeking per block would be four seconds for every two kilobytes.
+
+Three things were wrong in the first cut, and the console said all
+three:
+
+- It kept commanding. The read command stayed queued after the drive
+  started reading, so 'begin at this position' went out seventy-five
+  times a second for as long as D: was mounted. Stage 2's lesson
+  upside down: the conversation needs a turn every exchange, and it
+  needs the right one.
+- The self-test ran in the VBL, at interrupt level 3, blocking the 200
+  Hz tick and tripping the CDD storm guard, which counts drive
+  interrupts between VBLs. It runs in foreground now.
+- The sector cache outlived the drive moving. cdc_setup() invalidates
+  it, because whoever re-initialises the decoder is also moving the
+  head.
+---
+ bios/disk.c      |  30 +++++-
+ bios/disk.h      |   1 +
+ bios/machine.h   |   5 +-
+ bios/segacd.c    | 245 ++++++++++++++++++++++++++++++++++++++++++++++-
+ bios/segacd.h    |   4 +
+ include/config.h |  15 +++
+ 6 files changed, 293 insertions(+), 7 deletions(-)
+
+diff --git a/bios/disk.c b/bios/disk.c
+index c98425a..f3d710e 100644
+--- a/bios/disk.c
++++ b/bios/disk.c
+@@ -15,6 +15,7 @@
+ #include "emutos.h"
+ #include "gemerror.h"
+ #include "disk.h"
++#include "segacd.h"
+ #include "asm.h"
+ #include "blkdev.h"
+ #include "xhdi.h"
+@@ -115,7 +116,10 @@ static const int majors[] =
+     0, 1, 2, 3, 4, 5, 6, 7,             /* ACSI */
+ #endif
+ #if CONF_WITH_SDMMC
+-    24, 25, 26, 27, 28, 29, 30, 31      /* SD/MMC */
++    24, 25, 26, 27, 28, 29, 30, 31,     /* SD/MMC */
++#endif
++#if CONF_WITH_SEGACD_CD
++    32,                                 /* the Mega CD drive: one unit */
+ #endif
+ };
+ 
+@@ -416,6 +420,11 @@ LONG disk_mediach(UWORD unit)
+         ret = sd_ioctl(reldev,GET_MEDIACHANGE,NULL);
+         break;
+ #endif /* CONF_WITH_SDMMC */
++#if CONF_WITH_SEGACD_CD
++    case CDROM_BUS:
++        ret = segacd_cd_ioctl(GET_MEDIACHANGE,NULL);
++        break;
++#endif /* CONF_WITH_SEGACD_CD */
+     default:
+         ret = EUNDEV;
+     }
+@@ -1061,6 +1070,12 @@ static LONG internal_inquire(UWORD unit, ULONG *blocksize, ULONG *deviceflags, c
+         flags = XH_TARGET_REMOVABLE;    /* medium is removable */
+         break;
+ #endif /* CONF_WITH_SDMMC */
++#if CONF_WITH_SEGACD_CD
++    case CDROM_BUS:
++        ret = segacd_cd_ioctl(GET_DISKNAME,name);
++        flags = XH_TARGET_REMOVABLE;    /* it is a disc in a tray */
++        break;
++#endif /* CONF_WITH_SEGACD_CD */
+     default:
+         ret = EUNDEV;
+     }
+@@ -1161,6 +1176,13 @@ LONG disk_get_capacity(UWORD unit, ULONG *blocks, ULONG *blocksize)
+             return ret;
+         break;
+ #endif /* CONF_WITH_SDMMC */
++#if CONF_WITH_SEGACD_CD
++    case CDROM_BUS:
++        ret = segacd_cd_ioctl(GET_DISKINFO,info);
++        if (ret < 0)
++            return ret;
++        break;
++#endif /* CONF_WITH_SEGACD_CD */
+     default:
+         return EUNDEV;
+     }
+@@ -1229,6 +1251,12 @@ LONG disk_rw(UWORD unit, UWORD rw, ULONG sector, UWORD count, UBYTE *buf)
+         KDEBUG(("sd_rw() returned %ld\n", ret));
+         break;
+ #endif /* CONF_WITH_SDMMC */
++#if CONF_WITH_SEGACD_CD
++    case CDROM_BUS:
++        ret = segacd_cd_rw(rw, sector, count, buf);
++        KDEBUG(("segacd_cd_rw() returned %ld\n", ret));
++        break;
++#endif /* CONF_WITH_SEGACD_CD */
+     default:
+         ret = EUNDEV;
+     }
+diff --git a/bios/disk.h b/bios/disk.h
+index 0b98e7b..ea9337b 100644
+--- a/bios/disk.h
++++ b/bios/disk.h
+@@ -26,6 +26,7 @@
+ #define IS_SCSI_DEVICE(major)   (GET_BUS(major) == SCSI_BUS)
+ #define IS_IDE_DEVICE(major)    (GET_BUS(major) == IDE_BUS)
+ #define IS_SDMMC_DEVICE(major)  (GET_BUS(major) == SDMMC_BUS)
++#define IS_CDROM_DEVICE(major)  (GET_BUS(major) == CDROM_BUS)
+ 
+ #define GET_UNITNUM(bus,dev)    (NUMFLOPPIES+(DEVICES_PER_BUS*(bus))+dev)
+ 
+diff --git a/bios/machine.h b/bios/machine.h
+index 94ec740..be7326c 100644
+--- a/bios/machine.h
++++ b/bios/machine.h
+@@ -40,8 +40,11 @@
+ #define SCSI_BUS            1
+ #define IDE_BUS             2
+ #define SDMMC_BUS           3
++#define CDROM_BUS           4       /* the Mega CD's own drive */
+ 
+-#if CONF_WITH_SDMMC
++#if CONF_WITH_SEGACD_CD
++# define MAX_BUS            CDROM_BUS
++#elif CONF_WITH_SDMMC
+ # define MAX_BUS            SDMMC_BUS
+ #elif CONF_WITH_IDE
+ # define MAX_BUS            IDE_BUS
+diff --git a/bios/segacd.c b/bios/segacd.c
+index c93c4ac..8b404cd 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -140,6 +140,17 @@ static UBYTE cdd_score;         /* valid packets in the last 16, latched */
+ static UBYTE cdd_count, cdd_good;
+ static UBYTE cdd_tick;
+ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
++/* D: telemetry. Declared up here because the report that publishes it
++ * is written before the code that keeps it, and a forward declaration
++ * for four counters is less to get wrong than moving either. */
++static ULONG cd_cached = 0xFFFFFFFFUL;  /* which CD sector is in CDSECT */
++static ULONG cd_next;           /* the one the drive will deliver next */
++static UBYTE cd_streaming;
++static UWORD cd_errors;         /* reads that gave up */
++static UWORD cd_seeks, cd_hits; /* seeks against sectors simply waited for */
++static UBYTE cd_dtest;          /* the filesystem check: bit 0 ran, bit 1 passed */
++static void cd_selftest(void);
++
+ static UBYTE cdc_altctrl;       /* holding B picks the other CDC control pair;
+                                  * declared here because the init that reads
+                                  * the pad runs long before the CDC code */
+@@ -546,16 +557,19 @@ void segacd_int_4_c(void)
+  * ends at 0x60000, so none of this is in anyone's way. */
+ #define CDSECT      ((UBYTE *)0x7F800)
+ 
+-static UBYTE cdc_ints;          /* sectors the decoder has reported */
++static volatile UBYTE cdc_ints; /* sectors the decoder has reported */
+ static UBYTE cdc_head[4];       /* header of the one it reported last */
+ static UBYTE cdc_stat4[4];      /* STAT0-3 with it */
+ static UBYTE cdc_want[3];       /* the header we are waiting for, BCD */
+-static UWORD cdc_pt;            /* where in buffer RAM ours landed */
+-static UWORD cdc_pt_last;       /* ...and where the newest one is, matched
++static volatile UWORD cdc_pt;   /* where in buffer RAM ours landed */
++static volatile UWORD cdc_pt_last;      /* ...and where the newest one is, matched
+                                  * or not, so a read that never finds its
+                                  * sector can still take one and say what
+                                  * it was */
+-static UBYTE cdc_hit;           /* it went by, and cdc_pt says where */
++/* Written by level 5, read by a foreground spin loop. Volatile is not
++ * decoration here: without it the compiler reads the flag once, before
++ * the loop, and spins for ever on the stale copy. */
++static volatile UBYTE cdc_hit;  /* it went by, and cdc_pt says where */
+ static UBYTE cdc_hdr[4];        /* header that arrived with the data */
+ static UBYTE cdc_fail;          /* why the read did not finish */
+ static UWORD cdc_spill;         /* words drained while waiting for the end
+@@ -571,6 +585,14 @@ static UWORD cdc_spill;         /* words drained while waiting for the end
+  * control-register writes is not obviously free. */
+ static void cdc_setup(void)
+ {
++    /* Whoever re-initialises the decoder is also moving the drive, so
++     * what D: thinks it has cached and where it thinks the head is are
++     * both now fiction. Invalidating here rather than at each call site
++     * means the sector self-test and the filesystem cannot mislead each
++     * other -- and they share one buffer, so they would. */
++    cd_cached = 0xFFFFFFFFUL;
++    cd_streaming = 0;
++
+     *CDC_AR = 0x0F; *CDC_DATA = 0x00;                   /* RESET */
+     *CDC_AR = 0x01; *CDC_DATA = 0x3A;                   /* IFCTRL */
+     *CDC_AR = 0x08; *CDC_DATA = 0x00; *CDC_DATA = 0x00; /* WA = 0 */
+@@ -921,7 +943,7 @@ static void cdr_start(ULONG lba)
+  *
+  * The sequence number is not decoration either: it is the difference
+  * between a report that is stale and a report that has stopped. */
+-#define CDREPORT    ((volatile UWORD *)0x7F7C0)
++#define CDREPORT    ((volatile UWORD *)0x7F780)
+ #define CDREPORT_MAGIC 0xCDC0
+ 
+ static UWORD cdr_seq;
+@@ -962,6 +984,15 @@ static void cdr_report(void)
+     CDREPORT[22] = (UWORD)(((UWORD)cdr_forced << 8)
+                          | ((UWORD)(cdr_reseeks & 0x0F) << 4) | cdc_altctrl);
+     CDREPORT[23] = (UWORD)(((UWORD)cdc_stat4[0] << 8) | cdc_stat4[3]);
++    /* D:, the filesystem on the disc: how the block layer is getting on
++     * and whether its own check passed. Seeks against waits is the
++     * number that says whether this is a disk or a punishment -- a seek
++     * is most of a second and a streamed sector is thirteen
++     * milliseconds. */
++    CDREPORT[24] = cd_seeks;
++    CDREPORT[25] = cd_hits;
++    CDREPORT[26] = cd_errors;
++    CDREPORT[27] = cd_dtest;
+     CDREPORT[0] = CDREPORT_MAGIC;
+ }
+ 
+@@ -1100,6 +1131,199 @@ static void cdr_step(void)
+     }
+ }
+ 
++/******************************************************************************/
++/* D: -- the filesystem that stays on the disc                                */
++/******************************************************************************/
++
++/* Stage 3 read one sector and stopped. A mounted drive asks for
++ * arbitrary ones, on demand, from GEMDOS context -- so the same
++ * machinery has to be usable as a plain blocking call, and it has to be
++ * fast enough to be worth having.
++ *
++ * Two things make it fast enough. A CD sector is 2048 bytes and a
++ * GEMDOS block is 512, so four consecutive blocks come out of one
++ * cached sector. And the drive, once reading, delivers the next sector
++ * every 1/75 s all by itself -- so as long as the next thing asked for
++ * is ahead of the head and not far ahead, waiting beats seeking. A seek
++ * is the better part of a second; a sector is thirteen milliseconds.
++ * Re-seeking per block would be about four seconds for every two
++ * kilobytes, which is not a disk, it is a punishment. */
++
++#define CD_DDISK_LBA    1600UL          /* where the image sits on the disc */
++#define CD_DDISK_BLOCKS 8192UL          /* 4 MB in 512-byte blocks */
++#define CD_BPS_SHIFT    2               /* 2048 / 512 */
++
++/* How far ahead we are willing to wait rather than seek. Twenty sectors
++ * is a quarter of a second of streaming, against most of a second for a
++ * seek -- and reading forward is what the drive is already doing. */
++#define CD_STREAM_AHEAD 20UL
++
++
++/* Wait, with interrupts running, for the sector whose header we have
++ * already asked for. Returns false on timeout.
++ *
++ * This spins in foreground code and that is deliberate: level 5 is what
++ * notices the sector and level 5 cannot run inside itself. A GEMDOS
++ * read blocking for a few frames is what a floppy does too. */
++static BOOL cd_wait_hit(void)
++{
++    ULONG spin;
++
++    /* Bounded by a count rather than by the 200 Hz tick, because a
++     * mount can happen before that tick exists. Long enough for a seek
++     * and a spin-up -- a couple of seconds -- and irrelevant to the
++     * common case, where the sector is already on its way and arrives
++     * within thirteen milliseconds. */
++    for (spin = 0; spin < 6000000UL; spin++) {
++        if (cdc_hit)
++            return TRUE;
++    }
++    return FALSE;
++}
++
++/* Put the drive at a sector and take it. Everything here is stage 3's,
++ * only called from the foreground instead of from the VBL. */
++static BOOL cd_fetch(ULONG lba)
++{
++    UBYTE start[3];
++    int attempt;
++
++    lba_to_msf(lba, cdc_want);
++
++    for (attempt = 0; attempt < 3; attempt++) {
++        if (!cd_streaming || lba < cd_next || lba > cd_next + CD_STREAM_AHEAD) {
++            /* Out of reach of the stream: seek. */
++            cdc_hit = 0;
++            cdc_ints = 0;
++            cdc_setup();
++            lba_to_msf(lba >= CDR_LEADIN ? lba - CDR_LEADIN : 0, start);
++            cdd_ask_read(start);
++            cd_streaming = 1;
++            cd_seeks++;
++        } else {
++            cdc_hit = 0;                /* it is coming; just wait for it */
++            cd_hits++;
++        }
++
++        if (cd_wait_hit()) {
++            /* The drive is reading. Stop telling it to start, or the
++             * same "begin at this position" command goes out seventy-five
++             * times a second for as long as D: is mounted -- which is
++             * the stage 2 lesson upside down: the conversation needs a
++             * turn every exchange, but it needs the *right* turn, and
++             * repeating a seek for ever is not it. */
++            cdd_ask_idle();
++            if (cdc_grab()) {
++                cd_cached = lba;
++                cd_next = lba + 1;
++                return TRUE;
++            }
++        }
++
++        /* Whatever went wrong, the stream is no longer trustworthy. */
++        cd_streaming = 0;
++    }
++
++    cd_errors++;
++    cd_cached = 0xFFFFFFFFUL;
++    return FALSE;
++}
++
++/* One 512-byte block of D:, from the CD sector that contains it. */
++static BOOL cd_read_block(ULONG block, UBYTE *buf)
++{
++    ULONG lba = CD_DDISK_LBA + (block >> CD_BPS_SHIFT);
++    UWORD off = (UWORD)((block & ((1U << CD_BPS_SHIFT) - 1)) * SECTOR_SIZE);
++
++    if (cd_cached != lba && !cd_fetch(lba))
++        return FALSE;
++    memcpy(buf, CDSECT + off, SECTOR_SIZE);
++    return TRUE;
++}
++
++/* The block-layer entry point. Read only: it is a compact disc. */
++LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
++{
++    if (rw & RW_WRITE)
++        return EWRPRO;
++    if (sector < 0 || (ULONG)sector + count > CD_DDISK_BLOCKS)
++        return ESECNF;
++
++    while (count--) {
++        if (!cd_read_block((ULONG)sector, buf))
++            return EREADF;
++        sector++;
++        buf += SECTOR_SIZE;
++    }
++    return E_OK;
++}
++
++/* Does the mounted filesystem actually read?
++ *
++ * The icon appearing on the desktop proves block 0 came off the disc,
++ * and no more than that. This reads the two ends of the image and a
++ * block in the middle, through the same path GEMDOS uses -- so it
++ * exercises the sector cache, the four-blocks-per-sector arithmetic and
++ * the seek-versus-wait decision, none of which block 0 alone touches.
++ *
++ * What it checks is what the builder guarantees: block 0 is a FAT16
++ * boot sector with our OEM name and the 0x55AA signature, and the
++ * blocks past the end of the FAT are the zeroes mkfat.py left there.
++ * Weak evidence on its own; strong beside a pattern sector that already
++ * matched byte for byte. */
++static void cd_selftest(void)
++{
++    static UBYTE buf[SECTOR_SIZE];
++    ULONG probe[3];
++    UBYTE ok = 1;
++    int i;
++
++    probe[0] = 0;
++    probe[1] = CD_DDISK_BLOCKS / 2;
++    probe[2] = CD_DDISK_BLOCKS - 1;
++
++    cd_dtest = 1;
++    for (i = 0; i < 3; i++) {
++        if (!cd_read_block(probe[i], buf)) {
++            ok = 0;
++            break;
++        }
++        if (i == 0) {
++            /* the boot sector the disc builder wrote */
++            if (buf[510] != 0x55 || buf[511] != 0xAA
++                    || buf[2] != 'E' || buf[3] != 'm' || buf[4] != 'u')
++                ok = 0;
++        } else {
++            UWORD k;
++            for (k = 0; k < SECTOR_SIZE; k++)
++                if (buf[k])
++                    ok = 0;
++        }
++    }
++    if (ok)
++        cd_dtest |= 2;
++}
++
++LONG segacd_cd_ioctl(WORD op, void *arg)
++{
++    ULONG *info = (ULONG *)arg;
++
++    switch (op) {
++    case GET_DISKINFO:
++        info[0] = CD_DDISK_BLOCKS;
++        info[1] = SECTOR_SIZE;
++        return E_OK;
++    case GET_DISKNAME:
++        strcpy((char *)arg, "Mega CD disc");
++        return E_OK;
++    case GET_MEDIACHANGE:
++        /* The tray cannot be opened without cutting power to the sub,
++         * which ends EmuTOS along with the question. */
++        return MEDIANOCHANGE;
++    }
++    return ERR;
++}
++
+ /******************************************************************************/
+ /* Sound: RF5C164 PCM                                                         */
+ /******************************************************************************/
+@@ -1586,6 +1810,17 @@ void segacd_floppy_init(void)
+ {
+     segacd_cdd_init();
+ 
++    /* Check the filesystem on the disc, here, in foreground.
++     *
++     * It was in the VBL to begin with and that was wrong twice over.
++     * The VBL runs at interrupt level 3, so blocking in it for the
++     * seconds a seek takes locks out the 200 Hz tick as well; and the
++     * CDD's storm guard counts drive interrupts between VBLs and
++     * switches level 4 off when it sees too many -- so a VBL that
++     * blocks for thirteen seconds trips a guard designed to catch
++     * runaway re-entry. The console said so: the link score read 'S'. */
++    cd_selftest();
++
+     /* the builder stamps "EmuTOSMD" as the OEM field at offset 2 */
+     adisk_present = (ADISK_BASE[2] == 'E' && ADISK_BASE[3] == 'm'
+                   && ADISK_BASE[4] == 'u' && ADISK_BASE[5] == 'T');
+diff --git a/bios/segacd.h b/bios/segacd.h
+index f549cad..3c72012 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -31,6 +31,10 @@ void segacd_sound_init(void);
+ void segacd_bell(void);
+ void segacd_keyclick(void);
+ 
++/* D: -- a filesystem read off the disc itself, through the CDC */
++LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
++LONG segacd_cd_ioctl(WORD op, void *arg);
++
+ /* Clock */
+ ULONG segacd_getdt(void);
+ 
+diff --git a/include/config.h b/include/config.h
+index 593bd68..9079d46 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -608,6 +608,12 @@
+ # ifndef CONF_ATARI_HARDWARE
+ #  define CONF_ATARI_HARDWARE 0
+ # endif
++# ifndef CONF_WITH_SEGACD_CD
++   /* D: -- a filesystem on the compact disc itself, read through the CDC
++    * with the Sega CDBIOS evicted. It hangs off the block layer as its
++    * own bus, alongside ACSI, SCSI, IDE and SD. */
++#  define CONF_WITH_SEGACD_CD 1
++# endif
+ # ifndef CONF_WITH_READ_INF
+ #  define CONF_WITH_READ_INF 0
+ # endif
+@@ -1105,6 +1111,15 @@
+ # define CONF_WITH_SDMMC 0
+ #endif
+ 
++/*
++ * Set CONF_WITH_SEGACD_CD to 1 to activate the Mega CD's own drive as a
++ * block device: a filesystem read off the compact disc through the CDC,
++ * with no CDBIOS involved.
++ */
++#ifndef CONF_WITH_SEGACD_CD
++# define CONF_WITH_SEGACD_CD 0
++#endif
++
+ /*
+  * Set CONF_WITH_VAMPIRE_SPI to 1 to activate SPI on the Vampire,
+  * required for SD/MMC support on these boards

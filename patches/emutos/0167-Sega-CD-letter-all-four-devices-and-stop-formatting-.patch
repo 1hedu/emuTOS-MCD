@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Mon, 17 Aug 2026 23:29:50 +0000
+Subject: [PATCH 167/184] Sega CD: letter all four devices, and stop formatting
+ the backup RAM
+
+A drive with no filesystem on it got no drive letter, so there was no
+way to reach it from the desktop and no way to hand it to FORMATI.PRG --
+which is why the internal backup RAM was formatted during boot: that was
+the only moment it could ever be done. The disc and the cartridge
+escaped only because internal_inquire() calls them removable and
+disk_init_one() force-adds a partition to a removable unit whatever the
+root sector says.
+
+disk_init_one() now force-adds one for any SEGACD_BUS device that got
+nothing from atari_partition(). The four devices always exist; whether
+there is a filesystem on them is the owner's business. An unformatted
+drive still fails to open, which is honest.
+
+So bram_probe() no longer formats. Once both drives worked, formatting
+whatever did not look like ours on every boot was a standing offer to
+delete somebody's game saves. Holding C at power-on still reformats,
+which is the recovery path for a damaged volume of ours, and the
+signature repair on a volume that is already ours is unchanged.
+---
+ bios/disk.c   | 19 +++++++++++++++++++
+ bios/segacd.c | 23 ++++++++++-------------
+ 2 files changed, 29 insertions(+), 13 deletions(-)
+
+diff --git a/bios/disk.c b/bios/disk.c
+index b3e6049..05005b2 100644
+--- a/bios/disk.c
++++ b/bios/disk.c
+@@ -266,6 +266,25 @@ static void disk_init_one(UWORD unit,LONG *devices_available)
+     atari_partition(unit,devices_available);
+     devs ^= *devices_available; /* which ones were allocated this time */
+ 
++#ifdef MACHINE_SEGACD
++    /* The Mega CD's four devices always exist, formatted or not.
++     *
++     * Without this a drive with no filesystem on it gets no letter, so
++     * there is no way to reach it from the desktop and no way to format
++     * it -- which is how the internal backup RAM came to be formatted
++     * during boot instead: it was the only moment it could be done. The
++     * disc and the cartridge escaped that only because
++     * internal_inquire() calls them removable and the block below
++     * force-adds a partition to a removable unit whatever the root
++     * sector says. That is the right behaviour and it should not depend
++     * on lying about whether a chip is soldered down.
++     *
++     * An unformatted drive still fails to open. That is honest, and
++     * FORMATS.PRG and FORMATI.PRG are there for it. */
++    if (GET_BUS(unit - NUMFLOPPIES) == SEGACD_BUS && !devs)
++        add_partition(unit,devices_available,"GEM",0L,0L);
++#endif
++
+     /*
+      * now ensure that we have a minimum number of logical devices
+      * for a removable physical unit
+diff --git a/bios/segacd.c b/bios/segacd.c
+index e9f17ac..5586142 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -4413,21 +4413,18 @@ static void bram_probe(void)
+         return;
+     }
+ 
+-    /* Anything else gets formatted.
++    /* Nothing else happens. It is not formatted, it is not touched.
+      *
+-     * There was a guard here: find Sega's "SEGA_CD_ROM" footer, assume
+-     * game saves, refuse to touch it. It fired on every console ever
+-     * made -- the machine's own BIOS formats this memory before the
+-     * owner sees it -- so I: never worked anywhere, while the desktop
+-     * carried an icon for it that errored when clicked. Narrowing it to
+-     * "formatted and not empty" would have been a better guard and
+-     * still the wrong idea: this is eight kilobytes on a console that
+-     * somebody has deliberately booted a 1985 desktop operating system
+-     * on, from a disc they burned to do it. They know what it is for.
++     * It used to be formatted right here, because a drive with no
++     * filesystem got no drive letter and boot was the only moment it
++     * could ever be done. disk.c now gives the Mega CD's four devices a
++     * letter whether or not there is a filesystem on them, so an
++     * unformatted volume can be reached from the desktop and handed to
++     * FORMATI.PRG -- and formatting on every boot, once both drives
++     * worked, was a standing offer to delete somebody's files.
+      *
+-     * If those saves matter, SRAMTOOL.PRG copies the memory off before
+-     * this ever runs. */
+-    bram_format();
++     * Holding C at power-on still reformats, which is the recovery path
++     * for a volume of ours that has been damaged. */
+     bram_state = BRAM_OURS;
+ }
+ 

@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 01:36:10 +0000
+Subject: [PATCH 124/184] segacd: publish the report block, and stop hijacking
+ the boot
+
+scd_snap gains rep[32]: the CD report block verbatim, the same block
+IOFW renders the hardware status line from. The question of whether
+that line duplicated the snapshot had an answer -- mostly, but not
+entirely. cdc_head[], "header of the one it reported last", was only
+ever in CDREPORT[2]/[3] and never in the snapshot, and the field the
+diagnostic did carry was cdc_hdr[], which segacd_cdc_read() writes on a
+completed transfer and which is therefore zero on a drive that never
+completes one. Three sessions of logs read "the decoder is not
+decoding" off a field that only ever meant "no sector arrived".
+
+Copied whole rather than picked over, so a field added to cdr_report()
+arrives without anyone remembering to plumb it, and so nothing can
+drift out of step with what the screen shows. SCD_VERSION 3.
+
+bios.c: the Down hook is gone entirely. It ran CDTEST.PRG instead of
+the desktop, which existed only because an AES that is not running
+cannot put a modal "the disk in drive D may be damaged" in front of the
+four errors a round the diagnostic provokes. CDTEST takes etv_critic
+for its own duration now, so the reason is gone and the coupling was
+just in the way -- it meant every test of the loader's drive wake also
+cost a boot with no desktop at the end of it.
+
+Down still matters, but only in the cartridge loader, and only because
+waking the drive needs the sub CPU running Sega's firmware rather than
+this. Hold it at power-on, get a woken drive and an ordinary desktop,
+and run the diagnostic like any other program.
+---
+ bios/bios.c   | 35 ++++++++++++++++++-----------------
+ bios/scdapi.h | 18 +++++++++++++++++-
+ bios/segacd.c |  3 +++
+ 3 files changed, 38 insertions(+), 18 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index a8d06a5..ccd8d23 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1065,24 +1065,25 @@ void biosmain(void)
+      * is worth much less than one that can be asked again.
+      */
+ #ifdef MACHINE_SEGACD
+-    /* The disc diagnostic was 222 lines here. It is CDTEST.PRG on the
+-     * A: ramdisk now, reading the same counters through the 'SgCD'
+-     * cookie that segacd_publish_api() puts in the jar -- so what is
+-     * left in the operating system is one Pexec.
++    /* The disc diagnostic was 222 lines here, then one Pexec here, and
++     * now nothing here at all. It is CDTEST.PRG on the A: ramdisk,
++     * reading the same counters through the 'SgCD' cookie that
++     * segacd_publish_api() puts in the jar, and the desktop launches it
++     * like any other program.
+      *
+-     * Down still runs it, because holding a button is the quickest way
+-     * to start a test on a console with no keyboard, and because a
+-     * program that only the desktop can launch is no use when the fault
+-     * being chased is one that stops the desktop appearing. The
+-     * difference is that it is now a program either way: it can be run
+-     * from the desktop whenever it is wanted, it cannot take the boot
+-     * down with it, and it is 222 lines the image no longer carries. */
+-    if (segacd_diag) {
+-        LONG prc = Pexec(PE_LOADGO, "A:\\CDTEST.PRG", "", NULL);
+-        cprintf("\r\nCDTEST.PRG = %ld\r\n", prc);
+-        for (;;)
+-            ;
+-    }
++     * Down used to run it instead of the desktop. That existed for one
++     * reason -- with no AES up there was no AES alert, and the drive
++     * being tested is one whose every answer is an error, so the desktop
++     * put a modal "the disk in drive D may be damaged" in front of four
++     * of them per round. CDTEST takes etv_critic for its own duration
++     * now, so the alerts are gone and so is the reason.
++     *
++     * What is left is that Down means one thing: wake the drive with the
++     * console's own firmware, which only the cartridge loader can do
++     * because it needs the sub CPU running Sega's BIOS rather than this.
++     * Hold it at power-on, get an ordinary desktop with a woken drive,
++     * and run the test whenever you like -- or not at all. Coupling
++     * those two was mine and it only ever got in the way. */
+ #endif
+ #endif
+ 
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index a45fa53..468c8d6 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  2
++#define SCD_VERSION  3
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -73,6 +73,22 @@ struct scd_snap {
+ 
+     unsigned char  bram;                /* 0 none 1 ours 2 Sega saves */
+     unsigned short bootflags;           /* the raw button word */
++
++    /* The whole CD report block, verbatim.
++     *
++     * This is what the hardware status line renders, and the question
++     * of whether it duplicated the fields above had an answer: mostly,
++     * but not entirely. The one that matters is the header the decoder
++     * was *waiting for* -- CDREPORT[16] and [17] -- against the header
++     * it actually saw. Equal means the matching is at fault, different
++     * means the drive is elsewhere, both zero means the decoder is not
++     * decoding, and none of the scalars above can tell those apart.
++     *
++     * Copied whole rather than picked over, so a field added to
++     * cdr_report() in segacd.c arrives here without anyone remembering
++     * to plumb it, and so nothing here can drift out of step with what
++     * the status line shows. */
++    unsigned short rep[32];
+ };
+ 
+ /* Ops for scd_api.control(). Arguments that are not used are ignored;
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 5f78be2..030fd62 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3240,6 +3240,9 @@ static void scd_snapshot(struct scd_snap *s)
+ 
+     s->bram = segacd_bram_state();
+     s->bootflags = segacd_bootflags;
++
++    for (i = 0; i < 32; i++)            /* the status line's own source */
++        s->rep[i] = CDREPORT[i];
+ }
+ 
+ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)

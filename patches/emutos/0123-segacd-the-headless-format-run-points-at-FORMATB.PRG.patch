@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 23:28:07 +0000
+Subject: [PATCH 123/184] segacd: the headless format run points at FORMATB.PRG
+
+FORMAT.PRG is built twice now, once per drive, so the name changed.
+---
+ bios/bios.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 75b35e3..a8d06a5 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -919,7 +919,7 @@ void biosmain(void)
+         call_ikbdraw(0x39);             /* space, for "press any key" */
+         call_ikbdraw(0xB9);
+ 
+-        rc = Pexec(PE_LOADGO, "A:\\FORMAT.PRG", "", NULL);
++        rc = Pexec(PE_LOADGO, "A:\\FORMATB.PRG", "", NULL);
+         cprintf("\r\nPexec    = %ld\r\n", rc);
+         rc = Dfree(buf, 2);
+         cprintf("B: free  = %ld of %ld\r\n",

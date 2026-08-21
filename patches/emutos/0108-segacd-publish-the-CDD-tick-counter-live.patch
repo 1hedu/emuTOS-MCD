@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 09:09:10 +0000
+Subject: [PATCH 108/184] segacd: publish the CDD tick counter, live
+
+Every timeout in the read path is counted in cdd_ticks, and cdd_ticks
+only advances in the level 4 handler. If those 75 Hz status reports
+never start then cd_time_left() is permanently true and a loop that
+looks bounded is not -- which is the difference between a disk probe
+that fails and one that hangs, and a Mode 1 boot hangs.
+
+One word store in the handler, mirrored by IOFW into its report block.
+---
+ bios/segacd.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 69d1785..ab8631f 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -773,6 +773,17 @@ void segacd_int_4_c(void)
+ 
+     cdd_irqs++;
+     cdd_ticks++;
++    /* Is this interrupt firing at all?
++     *
++     * Every bound in the read path is counted in cdd_ticks, and
++     * cdd_ticks only advances here. On a CD boot Sega's firmware has
++     * started the 75 Hz status reports long before EmuTOS sees the
++     * hardware; on a Mode 1 boot nothing has, and if they never start
++     * then cd_time_left() is permanently true and a loop that looks
++     * bounded is not. That is the difference between the disk probe
++     * failing and the disk probe hanging, and it is one word to tell
++     * them apart. IOFW mirrors this into its report block. */
++    *(volatile UWORD *)0xFF8026 = cdd_ticks;
+ 
+     /* Wait for DRS to go *low*. It reads as "a status packet is on its
+      * way in", so the BIOS spins until the incoming transfer is over

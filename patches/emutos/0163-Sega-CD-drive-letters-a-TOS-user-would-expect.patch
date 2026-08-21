@@ -1,0 +1,554 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sat, 15 Aug 2026 05:11:48 +0000
+Subject: [PATCH 163/184] Sega CD: drive letters a TOS user would expect
+
+A: and B: are the floppy slots. On a TOS machine that means removable
+media, and C: onward means storage that cannot leave the machine. This
+port had it exactly inverted: the two things a person can physically
+remove -- the cartridge and the disc -- were on C: and D:, and the two
+that cannot -- a ramdisk in cartridge ROM and eight kilobytes soldered
+inside the console -- were the floppies.
+
+So they swap. The cartridge takes A: and the disc B:; the ramdisk takes
+C: and the console's backup RAM D:. Nothing about the devices changes,
+only which layer of the block system each is reached through.
+
+The cartridge is on A: rather than the disc because A: is the drive the
+desktop asks about first, and cartridge save RAM answers instantly
+where a disc has to spin up.
+
+The floppy path addresses through segacd_floprw()'s sixteen-sectors-to-
+a-track geometry, which was already what flop_detect_drive() set. A WORD
+of track at sixteen sectors reaches 268 MB, comfortably past either
+device. The bodies that used to be inline there are now segacd_ramdisk_*
+and segacd_bram_* on the two buses, which are renamed to say what they
+carry: BRAM_BUS and RAMDISK_BUS. The ramdisk is listed first in
+majors[], and first is C:.
+
+And that is the point of the whole rearrangement: DEFAULT_BOOTDEV is C:,
+unmodified upstream EmuTOS, and it is now correct. The override added
+for this machine is gone. C: is the ramdisk, which is the system drive
+-- always present, in ROM, holding EMUDESK.INF and EMUICON.RSC and the
+programs -- which is what C: means on a TOS machine.
+
+flop_mediach() stops being a constant, because B: is a disc and a disc
+can be swapped. The FMTTEST diagnostic targets D: through
+GET_UNITNUM(BRAM_BUS,0) rather than B: through unit 1, since B: cannot
+be written at all now.
+
+Verified in the emulator: all four drives mount with the new letters,
+the desktop finds its icon files on C: with no override, and CDTEST on
+B: reaches Fopen and reads back the opening bytes of the file that is
+on the disc.
+---
+ bios/bios.c      |  24 ++++---
+ bios/disk.c      |  76 +++++++++-----------
+ bios/disk.h      |   4 +-
+ bios/machine.h   |  18 +++--
+ bios/segacd.c    | 184 +++++++++++++++++++++++++++++++++++------------
+ bios/segacd.h    |   6 ++
+ include/config.h |  17 -----
+ 7 files changed, 205 insertions(+), 124 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index c259e7f..9781b3f 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -753,7 +753,7 @@ static void autoexec(void)
+      * harness persists as cart.brm, so a full eight-round hardware-
+      * shaped log can now come out of a headless emulator run. */
+     if (segacd_diag)
+-        Pexec(PE_LOADGO, "A:\\CDTEST.PRG", "", NULL);
++        Pexec(PE_LOADGO, "C:\\CDTEST.PRG", "", NULL);
+ #endif
+ 
+     /* check if the user does not want to run AUTO programs */
+@@ -914,16 +914,22 @@ void biosmain(void)
+         static char buf[64];
+         LONG rc;
+ 
+-        {   /* Wreck B: first. The tool's whole job is to recover a
++        {   /* Wreck D: first. The tool's whole job is to recover a
+              * volume that cannot be mounted, so testing it on a healthy
+              * one tests the wrong thing -- which is exactly how the
+-             * first version shipped broken. */
++             * first version shipped broken.
++             *
++             * D:, not B:. The drive letters were rearranged so A: and B:
++             * are the removable media; B: is the disc now, which cannot
++             * be written at all, and the console's own backup RAM -- the
++             * volume this test was written for -- is D:. Unit 34 rather
++             * than 1: it is device 0 of BRAM_BUS, not a floppy. */
+             static char junk[512];
+             int j;
+             for (j = 0; j < 512; j++)
+                 junk[j] = (char)(j ^ 0x3C);
+-            Rwabs(1 | 8 | 2, (LONG)junk, 1, 0, 1, 0L);
+-            cprintf("\033Ecorrupted B: boot sector\r\n");
++            Rwabs(1 | 8 | 2, (LONG)junk, 1, 0, GET_UNITNUM(BRAM_BUS,0), 0L);
++            cprintf("\033Ecorrupted D: boot sector\r\n");
+         }
+ 
+         call_ikbdraw(0x15);             /* 'Y' press */
+@@ -931,10 +937,10 @@ void biosmain(void)
+         call_ikbdraw(0x39);             /* space, for "press any key" */
+         call_ikbdraw(0xB9);
+ 
+-        rc = Pexec(PE_LOADGO, "A:\\FORMATB.PRG", "", NULL);
++        rc = Pexec(PE_LOADGO, "C:\\FORMATD.PRG", "", NULL);
+         cprintf("\r\nPexec    = %ld\r\n", rc);
+-        rc = Dfree(buf, 2);
+-        cprintf("B: free  = %ld of %ld\r\n",
++        rc = Dfree(buf, 4);             /* D: */
++        cprintf("D: free  = %ld of %ld\r\n",
+                 *(LONG *)buf, *((LONG *)buf + 1));
+         for (;;)
+             ;
+@@ -1078,7 +1084,7 @@ void biosmain(void)
+      */
+ #ifdef MACHINE_SEGACD
+     /* The disc diagnostic was 222 lines here, then one Pexec here, and
+-     * now nothing here at all. It is CDTEST.PRG on the A: ramdisk,
++     * now nothing here at all. It is CDTEST.PRG on the C: ramdisk,
+      * reading the same counters through the 'SgCD' cookie that
+      * segacd_publish_api() puts in the jar, and the desktop launches it
+      * like any other program.
+diff --git a/bios/disk.c b/bios/disk.c
+index c920814..074fb19 100644
+--- a/bios/disk.c
++++ b/bios/disk.c
+@@ -118,11 +118,11 @@ static const int majors[] =
+ #if CONF_WITH_SDMMC
+     24, 25, 26, 27, 28, 29, 30, 31,     /* SD/MMC */
+ #endif
+-#if CONF_WITH_SEGACD_CART
+-    40,                                 /* the cartridge's save RAM */
+-#endif
+-#if CONF_WITH_SEGACD_CD
+-    32,                                 /* the Mega CD drive: one unit */
++#ifdef MACHINE_SEGACD
++    40,                                 /* the ramdisk: C:, listed first
++                                         * because first is C: and the
++                                         * ramdisk is the system drive */
++    32,                                 /* the console's internal 8K: D: */
+ #endif
+ };
+ 
+@@ -430,16 +430,14 @@ LONG disk_mediach(UWORD unit)
+         ret = sd_ioctl(reldev,GET_MEDIACHANGE,NULL);
+         break;
+ #endif /* CONF_WITH_SDMMC */
+-#if CONF_WITH_SEGACD_CD
+-    case CDROM_BUS:
+-        ret = segacd_cd_ioctl(GET_MEDIACHANGE,NULL);
++#ifdef MACHINE_SEGACD
++    case BRAM_BUS:
++        ret = segacd_bram_ioctl(GET_MEDIACHANGE,NULL);
+         break;
+-#endif /* CONF_WITH_SEGACD_CD */
+-#if CONF_WITH_SEGACD_CART
+-    case CART_BUS:
+-        ret = segacd_cart_ioctl(GET_MEDIACHANGE,NULL);
++    case RAMDISK_BUS:
++        ret = segacd_ramdisk_ioctl(GET_MEDIACHANGE,NULL);
+         break;
+-#endif /* CONF_WITH_SEGACD_CART */
++#endif /* MACHINE_SEGACD */
+     default:
+         ret = EUNDEV;
+     }
+@@ -1085,18 +1083,14 @@ static LONG internal_inquire(UWORD unit, ULONG *blocksize, ULONG *deviceflags, c
+         flags = XH_TARGET_REMOVABLE;    /* medium is removable */
+         break;
+ #endif /* CONF_WITH_SDMMC */
+-#if CONF_WITH_SEGACD_CD
+-    case CDROM_BUS:
+-        ret = segacd_cd_ioctl(GET_DISKNAME,name);
+-        flags = XH_TARGET_REMOVABLE;    /* it is a disc in a tray */
+-        break;
+-#endif /* CONF_WITH_SEGACD_CD */
+-#if CONF_WITH_SEGACD_CART
+-    case CART_BUS:
+-        ret = segacd_cart_ioctl(GET_DISKNAME,name);
+-        flags = XH_TARGET_REMOVABLE;    /* it is a cartridge in a slot */
+-        break;
+-#endif /* CONF_WITH_SEGACD_CART */
++#ifdef MACHINE_SEGACD
++    case BRAM_BUS:
++        ret = segacd_bram_ioctl(GET_DISKNAME,name);
++        break;                          /* soldered in: not removable */
++    case RAMDISK_BUS:
++        ret = segacd_ramdisk_ioctl(GET_DISKNAME,name);
++        break;                          /* in ROM: not removable either */
++#endif /* MACHINE_SEGACD */
+     default:
+         ret = EUNDEV;
+     }
+@@ -1197,20 +1191,18 @@ LONG disk_get_capacity(UWORD unit, ULONG *blocks, ULONG *blocksize)
+             return ret;
+         break;
+ #endif /* CONF_WITH_SDMMC */
+-#if CONF_WITH_SEGACD_CD
+-    case CDROM_BUS:
+-        ret = segacd_cd_ioctl(GET_DISKINFO,info);
++#ifdef MACHINE_SEGACD
++    case BRAM_BUS:
++        ret = segacd_bram_ioctl(GET_DISKINFO,info);
+         if (ret < 0)
+             return ret;
+         break;
+-#endif /* CONF_WITH_SEGACD_CD */
+-#if CONF_WITH_SEGACD_CART
+-    case CART_BUS:
+-        ret = segacd_cart_ioctl(GET_DISKINFO,info);
++    case RAMDISK_BUS:
++        ret = segacd_ramdisk_ioctl(GET_DISKINFO,info);
+         if (ret < 0)
+             return ret;
+         break;
+-#endif /* CONF_WITH_SEGACD_CART */
++#endif /* MACHINE_SEGACD */
+     default:
+         return EUNDEV;
+     }
+@@ -1279,18 +1271,16 @@ LONG disk_rw(UWORD unit, UWORD rw, ULONG sector, UWORD count, UBYTE *buf)
+         KDEBUG(("sd_rw() returned %ld\n", ret));
+         break;
+ #endif /* CONF_WITH_SDMMC */
+-#if CONF_WITH_SEGACD_CD
+-    case CDROM_BUS:
+-        ret = segacd_cd_rw(rw, sector, count, buf);
+-        KDEBUG(("segacd_cd_rw() returned %ld\n", ret));
++#ifdef MACHINE_SEGACD
++    case BRAM_BUS:
++        ret = segacd_bram_rw(rw, sector, count, buf);
++        KDEBUG(("segacd_bram_rw() returned %ld\n", ret));
+         break;
+-#endif /* CONF_WITH_SEGACD_CD */
+-#if CONF_WITH_SEGACD_CART
+-    case CART_BUS:
+-        ret = segacd_cart_rw(rw, sector, count, buf);
+-        KDEBUG(("segacd_cart_rw() returned %ld\n", ret));
++    case RAMDISK_BUS:
++        ret = segacd_ramdisk_rw(rw, sector, count, buf);
++        KDEBUG(("segacd_ramdisk_rw() returned %ld\n", ret));
+         break;
+-#endif /* CONF_WITH_SEGACD_CART */
++#endif /* MACHINE_SEGACD */
+     default:
+         ret = EUNDEV;
+     }
+diff --git a/bios/disk.h b/bios/disk.h
+index fa5b204..6e599ab 100644
+--- a/bios/disk.h
++++ b/bios/disk.h
+@@ -26,8 +26,8 @@
+ #define IS_SCSI_DEVICE(major)   (GET_BUS(major) == SCSI_BUS)
+ #define IS_IDE_DEVICE(major)    (GET_BUS(major) == IDE_BUS)
+ #define IS_SDMMC_DEVICE(major)  (GET_BUS(major) == SDMMC_BUS)
+-#define IS_CDROM_DEVICE(major)  (GET_BUS(major) == CDROM_BUS)
+-#define IS_CART_DEVICE(major)   (GET_BUS(major) == CART_BUS)
++#define IS_BRAM_DEVICE(major)    (GET_BUS(major) == BRAM_BUS)
++#define IS_RAMDISK_DEVICE(major) (GET_BUS(major) == RAMDISK_BUS)
+ 
+ #define GET_UNITNUM(bus,dev)    (NUMFLOPPIES+(DEVICES_PER_BUS*(bus))+dev)
+ 
+diff --git a/bios/machine.h b/bios/machine.h
+index 99e679b..9db5cbd 100644
+--- a/bios/machine.h
++++ b/bios/machine.h
+@@ -40,13 +40,17 @@
+ #define SCSI_BUS            1
+ #define IDE_BUS             2
+ #define SDMMC_BUS           3
+-#define CDROM_BUS           4       /* the Mega CD's own drive */
+-#define CART_BUS            5       /* save RAM on the cartridge */
+-
+-#if CONF_WITH_SEGACD_CART
+-# define MAX_BUS            CART_BUS
+-#elif CONF_WITH_SEGACD_CD
+-# define MAX_BUS            CDROM_BUS
++/* The two fixed stores inside this machine. The removable ones -- the
++ * cartridge and the disc -- are on the floppy slots, where a TOS user
++ * expects removable media to be, so what is left for C: and D: is the
++ * ramdisk and the console's own backup RAM. RAMDISK_BUS is the higher
++ * number only because majors[] lists it first, and first is C:. */
++#define BRAM_BUS            4       /* the console's internal 8K */
++#define RAMDISK_BUS         5       /* the ramdisk in cartridge ROM */
++
++#ifdef MACHINE_SEGACD
++# define MAX_BUS            RAMDISK_BUS
++#elif CONF_WITH_SDMMC
+ #elif CONF_WITH_SDMMC
+ # define MAX_BUS            SDMMC_BUS
+ #elif CONF_WITH_IDE
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 4799e34..4399eba 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -4467,18 +4467,30 @@ void segacd_floppy_init(void)
+         (bram_state == BRAM_NONE) ? 0 : bram_fs_signature();
+ }
+ 
++/* The floppy slots carry the removable media.
++ *
++ * A: and B: are where a TOS user expects to find something they can
++ * take out and put back, so they are the cartridge and the disc. The
++ * cartridge takes A: rather than the disc because A: is the drive the
++ * desktop asks about first, and cartridge save RAM answers instantly
++ * where the drive has to spin up.
++ *
++ * A drive is reported present when the hardware is, not when a
++ * filesystem we recognise is: somebody's Sega-format game saves are
++ * still 8 KB of readable sectors, and a tool that exists to rescue them
++ * cannot reach a drive the BIOS says is absent. GEMDOS declines to
++ * mount the volume, which is the honest outcome -- the drive is there,
++ * the filesystem is not ours. */
+ BOOL segacd_flop_detect_drive(WORD dev)
+ {
++#if CONF_WITH_SEGACD_CART
+     if (dev == 0)
+-        return adisk_present;
+-    /* Present whenever the memory is, and not only when we put a
+-     * filesystem on it. Somebody's Sega-format game saves are still 8 KB
+-     * of readable sectors, and a tool that exists to rescue them cannot
+-     * reach a drive the BIOS says is absent. GEMDOS will decline to
+-     * mount the volume, which is the honest outcome: the drive is
+-     * there, the filesystem is not ours. */
++        return cart_sectors != 0;
++#endif
++#if CONF_WITH_SEGACD_CD
+     if (dev == 1)
+-        return bram_state != BRAM_NONE;
++        return TRUE;            /* the drive exists; the disc is media */
++#endif
+     return FALSE;
+ }
+ 
+@@ -4500,8 +4512,16 @@ static WORD cart_xfer(UWORD op, UWORD lba)
+     return EREADF;
+ }
+ 
++/* B: is a disc now, and a disc can be swapped -- so this stops being
++ * the constant it could be when both floppy slots were memory. The
++ * cartridge on A: still cannot change with the power on, and the power
++ * going off ends EmuTOS along with the question. */
+ LONG segacd_flop_mediach(WORD dev)
+ {
++#if CONF_WITH_SEGACD_CD
++    if (dev == 1)
++        return segacd_cd_ioctl(GET_MEDIACHANGE, NULL);
++#endif
+     MAYBE_UNUSED(dev);
+     return MEDIANOCHANGE;
+ }
+@@ -4525,53 +4545,125 @@ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+         return ESECNF;
+     }
+ 
++    /* The geometry is sixteen sectors to a track and one side, set in
++     * flop_detect_drive(), so the track number carries the whole
++     * address. A WORD of track at sixteen sectors reaches 268 MB, which
++     * is comfortably past anything either of these devices holds. */
++#if CONF_WITH_SEGACD_CART
+     if (dev == 0) {
+-        UBYTE *p;
+-        if (!adisk_present) {
+-            *(volatile UWORD *)0xFF802E = 0xEE04;   /* A: not present */
+-            return EUNDEV;
+-        }
+-        if (lba + count > ADISK_SECTORS) {
+-            *(volatile UWORD *)0xFF802E = 0xEE06;   /* A: out of range */
+-            return ESECNF;
+-        }
+-        *(volatile UWORD *)0xFF802E = 0;
+-        p = ADISK_BASE + lba * SECTOR_SIZE;
+-        if (rw & 1)
+-            memcpy(p, buf, (LONG)count * SECTOR_SIZE);
+-        else
+-            memcpy(buf, p, (LONG)count * SECTOR_SIZE);
+-        return E_OK;
++        LONG ret = segacd_cart_rw(rw, lba, count, buf);
++        *(volatile UWORD *)0xFF802E = (UWORD)(ret ? 0xEE06 : 0);
++        return (WORD)ret;
++    }
++#endif
++#if CONF_WITH_SEGACD_CD
++    if (dev == 1) {
++        LONG ret = segacd_cd_rw(rw, lba, count, buf);
++        *(volatile UWORD *)0xFF802E = (UWORD)(ret ? 0xEE07 : 0);
++        return (WORD)ret;
+     }
++#endif
++    *(volatile UWORD *)0xFF802E = 0xEE03;       /* device is not 0 or 1 */
++    return EUNDEV;
++}
++
++/******************************************************************************/
++/* C: -- the ramdisk, and D: -- the console's own backup RAM                  */
++/******************************************************************************/
++
++/* The two stores that cannot be taken out of the machine, so the two
++ * that get letters from C: on. Block devices rather than floppies for
++ * exactly that reason: what is on A: and B: is what a person can remove
++ * and replace, and neither of these can be.
++ *
++ * The ramdisk is listed first in disk.c's majors[], so it is C: -- the
++ * drive EmuTOS makes current, scans for AUTO, and reads EMUDESK.INF and
++ * EMUICON.RSC from. That is what C: means on a TOS machine and it is
++ * true here without an override: the system disk is in cartridge ROM,
++ * always present, and nothing the user does can change it. */
++
++LONG segacd_ramdisk_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
++{
++    UBYTE *p;
+ 
+-    if (dev != 1) {
+-        *(volatile UWORD *)0xFF802E = 0xEE03;   /* device is not 0 or 1 */
++    if (!adisk_present)
+         return EUNDEV;
++    if (sector < 0 || sector + count > ADISK_SECTORS)
++        return ESECNF;
++
++    p = ADISK_BASE + sector * SECTOR_SIZE;
++    if (rw & RW_WRITE)
++        memcpy(p, buf, (LONG)count * SECTOR_SIZE);
++    else
++        memcpy(buf, p, (LONG)count * SECTOR_SIZE);
++    return E_OK;
++}
++
++LONG segacd_ramdisk_ioctl(WORD op, void *arg)
++{
++    ULONG *info = (ULONG *)arg;
++
++    if (!adisk_present)
++        return EUNDEV;
++
++    switch (op) {
++    case GET_DISKINFO:
++        info[0] = ADISK_SECTORS;
++        info[1] = SECTOR_SIZE;
++        return E_OK;
++    case GET_DISKNAME:
++        strcpy((char *)arg, "RamDisk");
++        return E_OK;
++    case GET_MEDIACHANGE:
++        /* It is in ROM. It was there at power-on and it will be there
++         * at power-off, and nothing in between can alter it. */
++        return MEDIANOCHANGE;
+     }
++    return ERR;
++}
+ 
+-    {                               /* internal BRAM, sub-side, direct */
+-        ULONG off;
+-        if (bram_state == BRAM_NONE) {
+-            *(volatile UWORD *)0xFF802E = 0xEE01;
+-            return EUNDEV;
+-        }
+-        if (lba + count > BRAM_SECTORS) {
+-            *(volatile UWORD *)0xFF802E = 0xEE02;   /* out of range */
+-            return ESECNF;
+-        }
+-        *(volatile UWORD *)0xFF802E = 0;
+-        off = (ULONG)lba * SECTOR_SIZE;
+-        while (count--) {
+-            WORD i;
+-            for (i = 0; i < SECTOR_SIZE; i++) {
+-                if (rw & 1) bram_wr(off + i, buf[i]);
+-                else        buf[i] = bram_rd(off + i);
+-            }
+-            buf += SECTOR_SIZE;
+-            off += SECTOR_SIZE;
++LONG segacd_bram_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
++{
++    ULONG off;
++
++    if (bram_state == BRAM_NONE)
++        return EUNDEV;
++    if (sector < 0 || sector + count > BRAM_SECTORS)
++        return ESECNF;
++
++    off = (ULONG)sector * SECTOR_SIZE;
++    while (count--) {
++        WORD i;
++        for (i = 0; i < SECTOR_SIZE; i++) {
++            if (rw & RW_WRITE) bram_wr(off + i, buf[i]);
++            else               buf[i] = bram_rd(off + i);
+         }
++        buf += SECTOR_SIZE;
++        off += SECTOR_SIZE;
++    }
++    return E_OK;
++}
++
++LONG segacd_bram_ioctl(WORD op, void *arg)
++{
++    ULONG *info = (ULONG *)arg;
++
++    if (bram_state == BRAM_NONE)
++        return EUNDEV;
++
++    switch (op) {
++    case GET_DISKINFO:
++        info[0] = BRAM_SECTORS;
++        info[1] = SECTOR_SIZE;
++        return E_OK;
++    case GET_DISKNAME:
++        strcpy((char *)arg, "Backup");
+         return E_OK;
++    case GET_MEDIACHANGE:
++        /* Soldered to the board with a battery behind it. */
++        return MEDIANOCHANGE;
+     }
++    return ERR;
+ }
+ 
+ /******************************************************************************/
+diff --git a/bios/segacd.h b/bios/segacd.h
+index cabc400..acbce40 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -35,6 +35,12 @@ void segacd_keyclick(void);
+ LONG segacd_cart_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
+ LONG segacd_cart_ioctl(WORD op, void *arg);
+ 
++/* C: and D: -- the two stores that cannot leave the machine */
++LONG segacd_ramdisk_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
++LONG segacd_ramdisk_ioctl(WORD op, void *arg);
++LONG segacd_bram_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
++LONG segacd_bram_ioctl(WORD op, void *arg);
++
+ /* D: -- a filesystem read off the disc itself, through the CDC */
+ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
+ void segacd_cd_revive(void);   /* the drive gets another chance */
+diff --git a/include/config.h b/include/config.h
+index e8f7fa1..aa8bcf6 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -629,23 +629,6 @@
+     * own bus, alongside ACSI, SCSI, IDE and SD. */
+ #  define CONF_WITH_SEGACD_CD 1
+ # endif
+-# ifndef DEFAULT_BOOTDEV
+-   /* A:, and not C:.
+-    *
+-    * DEFAULT_BOOTDEV is C: because on an ST the hard disk is where a
+-    * system lives. Here C: is a save chip on whatever cartridge is in
+-    * the slot -- it may be absent, it may hold somebody else's game
+-    * saves, and FORMATC.PRG exists precisely so it can be wiped. A: is
+-    * the ROM-resident system disk: always there, always ours, never
+-    * changed by anything the user does.
+-    *
+-    * It is not only tidiness. The boot drive is where the desktop looks
+-    * for EMUDESK.INF and EMUICON.RSC -- app_rdicon() and
+-    * read_inf_file() both adjust their filename by G.g_stdrv -- so with
+-    * C: as the boot drive the icons this machine ships were being
+-    * looked for on the cartridge and quietly not found. */
+-#  define DEFAULT_BOOTDEV 0
+-# endif
+ # ifndef CONF_WITH_READ_INF
+ #  define CONF_WITH_READ_INF 0
+ # endif

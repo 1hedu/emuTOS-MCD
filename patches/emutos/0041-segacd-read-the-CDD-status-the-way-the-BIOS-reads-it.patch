@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 08:57:26 +0000
+Subject: [PATCH 041/184] segacd: read the CDD status the way the BIOS reads it
+
+Every packet failing its checksum, sixteen out of sixteen, while the
+drive was visibly answering. Systematic, so not a torn read.
+
+The BIOS takes the ten status bytes as move.l / move.l / move.w -- five
+bus cycles, back to back -- and so does the standalone test that went
+green on hardware. This driver took them as ten separate byte reads in
+a C loop, which is ten bus cycles plus loop overhead and takes many
+times longer. The gate array updates those registers on its own clock,
+so a read spread that wide straddles an update every single time.
+
+The shape was already written down in docs/cdd-bios-notes.md and
+already implemented for the command write. The read was never looked
+at.
+---
+ bios/segacd.c | 26 +++++++++++++++++++++++++-
+ 1 file changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index aa62611..fc97f91 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -127,6 +127,8 @@ const UBYTE *segacd_physbase(void)
+ #define CDD_CMD_INFO    0x02
+ 
+ static UBYTE cdd_stat[10];
++static ULONG cdd_rawbuf[3];     /* aligned: the read below is long-wide */
++#define cdd_raw ((UBYTE *)cdd_rawbuf)
+ static UBYTE cdd_valid;         /* last packet checksummed */
+ static UBYTE cdd_score;         /* valid packets in the last 16, latched */
+ static UBYTE cdd_count, cdd_good;
+@@ -307,8 +309,30 @@ static void cdd_poll(void)
+     UBYTE sum = 0;
+     int i;
+ 
++    /* Two longs and a word, exactly as the BIOS does it -- five bus
++     * cycles, back to back.
++     *
++     * This was ten separate byte reads in a C loop, which is ten bus
++     * cycles plus loop overhead and takes many times longer. The gate
++     * array updates these registers on its own clock, so a read spread
++     * over that much longer a window straddles an update *every* time,
++     * not occasionally: sixteen packets out of sixteen failing their
++     * checksum, which is precisely what the console reported while the
++     * drive was visibly answering. The standalone test read them as
++     * long/long/word and passed; this one did not and failed. I wrote
++     * "long, long, word" in the notes, implemented it for the command
++     * write, and never looked at the read. */
++    {
++        volatile ULONG *src = (volatile ULONG *)CDD_STATUS;
++        ULONG *dst = (ULONG *)cdd_raw;
++
++        dst[0] = src[0];
++        dst[1] = src[1];
++        *(UWORD *)(cdd_raw + 8) = *(volatile UWORD *)(CDD_STATUS + 8);
++    }
++
+     for (i = 0; i < 10; i++)
+-        cdd_stat[i] = (UBYTE)(CDD_STATUS[i] & 0x0F);
++        cdd_stat[i] = (UBYTE)(cdd_raw[i] & 0x0F);
+     for (i = 0; i < 9; i++)
+         sum = (UBYTE)(sum + cdd_stat[i]);
+     cdd_valid = (UBYTE)((((~sum) & 0x0F) == cdd_stat[9]) ? 1 : 0);

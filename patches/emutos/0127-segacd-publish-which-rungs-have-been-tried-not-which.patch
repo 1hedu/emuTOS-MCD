@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 02:22:18 +0000
+Subject: [PATCH 127/184] segacd: publish which rungs have been tried, not
+ which is current
+
+First hardware log with the ladder in it read rung 0 in all three
+rounds, which looks like a ladder that never moved and almost certainly
+is not. Every round of the diagnostic runs the same four GEMDOS calls
+against the same dead drive, so the number of cdc_setup() calls per
+round is the same every time -- and if that number is a multiple of
+three, the rung is back where it started before anything looks at it.
+An instantaneous sample of a fast cycle is worth nothing.
+
+So CDREPORT[22] carries a mask of every rung written since boot, which
+cannot alias, alongside the current one. reseeks gives up two bits to
+make room; it is on the status line as Rn already, and "did the ladder
+run at all" is the question this word exists to answer.
+---
+ bios/segacd.c | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 44f2962..75fe947 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1157,6 +1157,16 @@ const UBYTE cdc_ladder[3][2] = {
+  * behaves exactly as it did before, and only a failed one escalates. */
+ UBYTE cdc_rung = 2;
+ static UBYTE cdc_rung_ok;       /* this rung put a sector in the ring */
++/* Which rungs have been written since boot, one bit each.
++ *
++ * The instantaneous rung is close to useless and the first hardware log
++ * proved it: three rounds, rung 0 every time. Not a stuck ladder -- a
++ * sampling artefact. Every round of the diagnostic runs the same four
++ * GEMDOS calls, so the number of cdc_setup() calls per round is the
++ * same, and if that number is a multiple of three the rung is back
++ * where it started by the time anything looks at it. A mask cannot
++ * alias. */
++static UBYTE cdc_rungs;
+ 
+ static void cdc_setup(void)
+ {
+@@ -1188,6 +1198,7 @@ static void cdc_setup(void)
+         if (!cdc_rung_ok)
+             cdc_rung = (UBYTE)((cdc_rung + 1) % 3);
+         cdc_rung_ok = 0;
++        cdc_rungs |= (UBYTE)(1 << cdc_rung);
+ 
+         *CDC_AR = 0x0A; *CDC_DATA = 0xA0; *CDC_DATA = 0xF8; /* CTRL0, CTRL1 */
+         if (!cdc_altctrl && !cd_late) {
+@@ -1787,9 +1798,14 @@ static void cdr_report(void)
+     CDREPORT[19] = (UWORD)(((UWORD)cdc_hdr[2] << 8) | cdc_hdr[3]);
+     CDREPORT[20] = (UWORD)(((UWORD)cdr_fails[0] << 8) | cdr_fails[1]);
+     CDREPORT[21] = (UWORD)(((UWORD)cdr_ints[0] << 8) | cdr_ints[1]);
++    /* b0 altctrl, b1-3 rungs ever written, b4-5 reseeks, b6-7 rung now.
++     * reseeks lost two bits to make room; it is on the status line as
++     * Rn anyway, and "did the ladder run at all" is the question this
++     * word exists to answer. */
+     CDREPORT[22] = (UWORD)(((UWORD)cdr_forced << 8)
+-                         | ((UWORD)(cdr_reseeks & 0x0F) << 4)
+-                         | ((UWORD)(cdc_rung & 3) << 2) | cdc_altctrl);
++                         | ((UWORD)(cdc_rung & 3) << 6)
++                         | ((UWORD)(cdr_reseeks & 0x03) << 4)
++                         | ((UWORD)(cdc_rungs & 7) << 1) | cdc_altctrl);
+     CDREPORT[23] = (UWORD)(((UWORD)cdc_stat4[0] << 8) | cdc_stat4[3]);
+     /* D:, the filesystem on the disc: how the block layer is getting on
+      * and whether its own check passed. Seeks against waits is the

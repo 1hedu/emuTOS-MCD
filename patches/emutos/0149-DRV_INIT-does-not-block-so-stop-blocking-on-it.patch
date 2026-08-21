@@ -1,0 +1,122 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 10:19:10 +0000
+Subject: [PATCH 149/184] DRV_INIT does not block, so stop blocking on it
+
+Twenty seconds was indefensible and the dispatcher says why:
+
+  2e26: bclr #7,d0
+  2e2a: beq  $2F10      bit 7 clear -> the command queue
+  2e2c: bsr  $2E3A      bit 7 set   -> the synchronous jump table
+
+$10 has bit 7 clear. DRV_INIT is queued: $2F10 writes the function
+number and one longword of argument into the block at a5+$5AF2, sets
+the pending bit, and returns. The body at $313E issues CDCSTOP and then
+yields through $2F54 -- it saves its own return address and gets out of
+the way. It finishes over the following drive exchanges, on the drive's
+schedule, whether or not anybody is watching.
+
+So it does not take twenty seconds. It does not take any time at all,
+and neither figure in this file was ever measuring the call. What was
+taking twenty seconds was this driver blocking on CDB_STAT inside a
+firmware visit -- EmuTOS swapped out, its vectors borrowed, a watchdog
+running -- waiting for an asynchronous command to complete. Doom posts
+DRV_INIT, posts CDCSETMODE with the next instruction, and goes straight
+to a read; it tests CDBSTAT in its frame loop like everything else.
+
+Bring-up now does the same. Post DRV_INIT, post CDCSETMODE 0, return.
+EmuTOS has an entire boot left to run and the drive can use it, and the
+mount retry added alongside means Getbpb is re-attempted until the disc
+answers. No wait, no watchdog exposure, and an empty tray costs nothing.
+
+CDCSETMODE is also new here. Doom calls it two instructions after
+DRV_INIT and this driver never has; it is the byte CDCSTART reads to
+choose $A7/$F0.
+---
+ bios/scdapi.h  |  2 +-
+ bios/segacd2.S | 45 ++++++++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 43 insertions(+), 4 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 6916684..3edf26b 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  17
++#define SCD_VERSION  18
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 1d27ab5..2b6aadb 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -557,6 +557,43 @@ brd_own_done:
+         move.w  #0x0010,d0              // DRV_INIT
+         move.w  d0,50(a5)
+         jsr     0x5F22
++
++        // CDCSETMODE 0, which is what Doom does with the very next
++        // instruction after DRV_INIT and what nothing here has ever
++        // done. It is synchronous and it only stores a mode byte, but
++        // it is the byte CDCSTART reads to choose $A7/$F0.
++        move.w  #0,d1
++        move.w  #0x0096,d0              // CDCSETMODE
++        move.w  d0,50(a5)
++        jsr     0x5F22
++
++        // A count of zero posts the wake and leaves. No wait.
++        //
++        // DRV_INIT is function $10, and the dispatcher splits on bit 7
++        // of the function number:
++        //
++        //   2e26: bclr #7,d0
++        //   2e2a: beq  $2E30      bit 7 clear -> $2F10, the queue
++        //   2e2c: bsr  $2E3A      bit 7 set   -> the sync jump table
++        //
++        // Bit 7 of $10 is clear, so DRV_INIT is queued and the call
++        // returns at once. It does not take twenty seconds; it does not
++        // take any time at all. The drive gets on with spinning up and
++        // reading its table of contents over the following seconds, on
++        // its own schedule, and Doom does exactly that -- posts
++        // DRV_INIT, posts CDCSETMODE, carries straight on, and tests
++        // CDBSTAT in its frame loop.
++        //
++        // What this file was doing instead was blocking on CDB_STAT
++        // inside the visit, with EmuTOS swapped out, its vectors
++        // borrowed and a watchdog running, waiting for an asynchronous
++        // command to finish. That is where the twenty-second budget
++        // came from, and it was twenty seconds of answering the wrong
++        // question. Post it and get out; EmuTOS has a whole boot left
++        // to run and the drive can use it.
++        tst.l   4(a5)
++        beq     brd_posted
++
+ brd_wait_init:
+         move.l  _segacd_bios_frames,d2
+         // How long DRV_INIT gets, and why it is now a variable.
+@@ -608,6 +645,11 @@ brd_wait_init:
+         beq     brd_init_done
+         cmpi.w  #0x0010,d0              // playing, also fine
+         bne     brd_wait_init
++brd_posted:
++        move.b  #1,_bios_woken          // asked once; that is enough
++        clr.w   32(a5)                  // stage 0: posted, nothing failed
++        bra     brd_done
++
+ brd_init_done:
+         // The read gets its own clock. Every stage below tests the same
+         // counter against a threshold measured from the start of the
+@@ -631,9 +673,6 @@ brd_awake:
+         // Nothing on a normal boot ran it, which is why D: has been
+         // unusable until the diagnostic was launched by hand. Splitting
+         // the wake out of the read is what lets bring-up call it.
+-        tst.l   4(a5)
+-        beq     brd_done                // stage stays zero: woken, no read
+-
+         movea.l a5,a0
+         move.w  #0x0089,d0              // CDCSTOP
+         move.w  d0,50(a5)

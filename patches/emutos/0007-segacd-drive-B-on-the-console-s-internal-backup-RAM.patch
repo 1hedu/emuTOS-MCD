@@ -1,0 +1,193 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 05:03:49 +0000
+Subject: [PATCH 007/184] segacd: drive B: on the console's internal backup RAM
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A cartridge cannot be present during a CD boot (the console would boot
+the cart), so a stock Mega CD has no backup RAM cart available — but it
+always has 8 KB of battery-backed RAM on the sub CPU's own bus at
+0xFE0000, odd bytes. That now backs B: when no cart is found: sub-side
+direct access, no servant proxy.
+
+It usually holds Sega-format game saves, so the default is hands-off:
+a "SEGA_..." marker in the last 64 bytes means the drive stays
+unmounted and the data is untouched. Holding C on pad 1 at power-on
+sets a claim flag in the comm registers, which authorises reformatting
+it as a tiny FAT12 volume (16 sectors). State is published for the
+servant's status line: N none, S Sega saves protected, Y mounted.
+---
+ bios/segacd.c | 133 +++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 131 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index cb9b5ee..1f953a0 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -156,9 +156,110 @@ void segacd_int_2_c(void)
+ #define CART_ACK    (*(volatile UWORD *)0xFF8018)   /* echoed seq */
+ #define CART_CNT    (*(volatile UWORD *)0xFF801A)   /* sectors, 0 = absent */
+ 
++/* Every Mega CD has 8 KB of internal backup RAM on the sub CPU's own
++ * bus at 0xFE0000, odd bytes only — no cartridge, no servant proxy. It
++ * is the fallback for B: when no backup RAM cart is present, and the
++ * only persistent store available on a stock console (a cartridge in
++ * the slot would make the machine boot the cart instead of the CD).
++ *
++ * It may already hold Sega-format game saves, so we only format it when
++ * it is blank: a Sega-formatted BRAM is left strictly alone. */
++#define BRAM_BASE    0xFE0000UL
++#define BRAM_BYTES   8192UL
++#define BRAM_SECTORS (BRAM_BYTES / SECTOR_SIZE)     /* 16 */
++
++#define BRAM_NONE  0
++#define BRAM_OURS  1
++#define BRAM_SEGA  2        /* holds game saves: hands off */
++
+ static BOOL adisk_present;
+ static UWORD cart_sectors;
+ static UBYTE cart_seq;
++static UBYTE bram_state;
++
++static UBYTE bram_rd(ULONG i)
++{
++    return *(volatile UBYTE *)(BRAM_BASE + i * 2 + 1);
++}
++
++static void bram_wr(ULONG i, UBYTE v)
++{
++    *(volatile UBYTE *)(BRAM_BASE + i * 2 + 1) = v;
++}
++
++/* Lay down a minimal FAT12 volume: 16 sectors, 1 sector per cluster,
++ * one reserved + two 1-sector FATs + two root sectors + 11 data. */
++static void bram_format(void)
++{
++    ULONG i;
++
++    for (i = 0; i < SECTOR_SIZE * 5UL; i++)
++        bram_wr(i, 0);
++
++    bram_wr(0, 0x60); bram_wr(1, 0x38);            /* bra.s, Atari style */
++    bram_wr(2, 'E'); bram_wr(3, 'm'); bram_wr(4, 'u');
++    bram_wr(5, 'T'); bram_wr(6, 'O'); bram_wr(7, 'S');
++    bram_wr(8, 0x24); bram_wr(9, 0x08); bram_wr(10, 0x27);
++    bram_wr(11, 0x00); bram_wr(12, 0x02);          /* 512 bytes/sector */
++    bram_wr(13, 1);                                /* sectors/cluster */
++    bram_wr(14, 1); bram_wr(15, 0);                /* reserved sectors */
++    bram_wr(16, 2);                                /* FAT count */
++    bram_wr(17, 32); bram_wr(18, 0);               /* root entries */
++    bram_wr(19, (UBYTE)BRAM_SECTORS); bram_wr(20, 0);
++    bram_wr(21, 0xF8);                             /* media descriptor */
++    bram_wr(22, 1); bram_wr(23, 0);                /* sectors per FAT */
++    bram_wr(24, 16); bram_wr(25, 0);               /* sectors per track */
++    bram_wr(26, 1); bram_wr(27, 0);                /* sides */
++
++    bram_wr(512, 0xF8); bram_wr(513, 0xFF); bram_wr(514, 0xFF);
++    bram_wr(1024, 0xF8); bram_wr(1025, 0xFF); bram_wr(1026, 0xFF);
++
++    {   /* volume label in the first root entry */
++        static const char lbl[11] = {'M','E','G','A','C','D',' ',
++                                     ' ',' ',' ',' '};
++        for (i = 0; i < 11; i++)
++            bram_wr(1536 + i, (UBYTE)lbl[i]);
++        bram_wr(1536 + 11, 0x08);
++    }
++}
++
++static void bram_probe(void)
++{
++    UBYTE save;
++    ULONG i;
++
++    /* is there memory there at all? */
++    save = bram_rd(0);
++    bram_wr(0, 0x5A);
++    if (bram_rd(0) != 0x5A) { bram_state = BRAM_NONE; return; }
++    bram_wr(0, 0xA5);
++    if (bram_rd(0) != 0xA5) { bram_state = BRAM_NONE; return; }
++    bram_wr(0, save);
++
++    /* already ours? */
++    if (bram_rd(2) == 'E' && bram_rd(3) == 'm'
++     && bram_rd(4) == 'u' && bram_rd(5) == 'T') {
++        bram_state = BRAM_OURS;
++        return;
++    }
++
++    /* Sega's own format ends with a "SEGA_CD_ROM" marker; if the user's
++     * game saves live here, leave them be — unless they explicitly asked
++     * for the space by holding C at power-on. */
++    if (*(volatile UWORD *)0xFF801E != 0x0C1A) {
++        for (i = BRAM_BYTES - 64; i < BRAM_BYTES - 10; i++) {
++            if (bram_rd(i) == 'S' && bram_rd(i + 1) == 'E'
++             && bram_rd(i + 2) == 'G' && bram_rd(i + 3) == 'A'
++             && bram_rd(i + 4) == '_') {
++                bram_state = BRAM_SEGA;
++                return;
++            }
++        }
++    }
++
++    bram_format();
++    bram_state = BRAM_OURS;
++}
+ 
+ void segacd_floppy_init(void)
+ {
+@@ -166,6 +267,14 @@ void segacd_floppy_init(void)
+     adisk_present = (ADISK_BASE[2] == 'E' && ADISK_BASE[3] == 'm'
+                   && ADISK_BASE[4] == 'u' && ADISK_BASE[5] == 'T');
+     cart_sectors = CART_CNT;    /* published by the servant at startup */
++
++    /* A backup RAM cart wins when present (bigger, and the console can
++     * only have one of the two anyway); otherwise fall back to the
++     * always-present internal BRAM. */
++    bram_state = BRAM_NONE;
++    if (!cart_sectors)
++        bram_probe();
++    *(volatile UWORD *)0xFF802A = bram_state;   /* for the status line */
+ }
+ 
+ BOOL segacd_flop_detect_drive(WORD dev)
+@@ -173,7 +282,7 @@ BOOL segacd_flop_detect_drive(WORD dev)
+     if (dev == 0)
+         return adisk_present;
+     if (dev == 1)
+-        return cart_sectors != 0;
++        return cart_sectors != 0 || bram_state == BRAM_OURS;
+     return FALSE;
+ }
+ 
+@@ -225,8 +334,28 @@ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+         return E_OK;
+     }
+ 
+-    if (dev != 1 || !cart_sectors)
++    if (dev != 1)
+         return EUNDEV;
++
++    if (!cart_sectors) {            /* internal BRAM, sub-side, direct */
++        ULONG off;
++        if (bram_state != BRAM_OURS)
++            return EUNDEV;
++        if (lba + count > BRAM_SECTORS)
++            return ESECNF;
++        off = (ULONG)lba * SECTOR_SIZE;
++        while (count--) {
++            WORD i;
++            for (i = 0; i < SECTOR_SIZE; i++) {
++                if (rw & 1) bram_wr(off + i, buf[i]);
++                else        buf[i] = bram_rd(off + i);
++            }
++            buf += SECTOR_SIZE;
++            off += SECTOR_SIZE;
++        }
++        return E_OK;
++    }
++
+     if (lba + count > cart_sectors)
+         return ESECNF;
+ 

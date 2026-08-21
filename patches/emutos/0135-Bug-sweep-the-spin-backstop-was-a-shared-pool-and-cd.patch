@@ -1,0 +1,172 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 07:15:32 +0000
+Subject: [PATCH 135/184] Bug sweep: the spin backstop was a shared pool, and
+ cdc_hit had no reader
+
+Two defects on the D: read path, found by reading rather than running.
+
+cd_budget is assigned once per fill, in cd_read_block(), and decremented
+by cd_fetch()'s wait loop -- which runs up to eight times per fetch and
+up to six fetches per fill. The first wait loop drained it. Attempts two
+through eight fell straight out without waiting, then seeked again,
+counted a timeout, and reported to the CTRL ladder that their rung had
+produced no sector. cd_read_block()'s retry had this exact bug in its
+clock and it was fixed there -- "Each try gets its own clock. Sharing
+one made the retry meaningless" -- but the fix reached cd_epoch and
+cd_leash and stopped above the spin backstop, which is the tighter bound
+by a wide margin. Every console log has said so on the line added to
+catch it: "timeout: int 0", no decode interrupts on the attempt that
+gave up, every round of every run. Each attempt now takes an equal slice
+and cd_budget stays the fill-wide hard stop, so the frozen-clock worst
+case is unchanged.
+
+cdc_hit is the direct route to a sector: segacd_int_5_c() latches the
+pointer the moment a header equals cdc_want, no ring involved. Its only
+reader was cdr_step(), the boot self-test, which runs only when Up is
+held. cd_fetch() cleared the flag on entry and never looked at it again,
+so the ring was the only way in -- and a ring entry needs a mode byte of
+1 or 2, which this console has not produced in six thousand sectors,
+while the direct compare looks at the MSF alone. Wired into the wait
+loop, with the interrupt stamping cdc_ints so the same staleness test
+that guards a ring entry guards this one, and cleared alongside the ring
+after the read command goes out so a hover match cannot answer for it.
+
+Also: publish cdd_valid and cdd_score, so "drive 7" is reported next to
+whether the packet carrying that nibble checksummed.
+---
+ bios/scdapi.h | 10 ++++++++-
+ bios/segacd.c | 56 ++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 64 insertions(+), 2 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 7924e7f..cb505ca 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  4
++#define SCD_VERSION  5
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -89,6 +89,14 @@ struct scd_snap {
+     unsigned char  stormed;             /* level 4 was masked off */
+     unsigned short ticks;               /* cdd_ticks: 75 Hz, or frozen */
+ 
++    /* Is 'state' above worth anything? It is nibble 0 of the drive's
++     * status packet, and a packet that failed its checksum carries a
++     * nibble like any other. Reporting the state without the validity
++     * beside it invites exactly the mistake this project keeps making:
++     * quoting a field's name instead of asking what wrote it. */
++    unsigned char  cddok;               /* the last packet checksummed */
++    unsigned char  cddscore;            /* how many of the last 16 did */
++
+     /* The whole CD report block, verbatim.
+      *
+      * This is what the hardware status line renders, and the question
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 0302dac..64e8340 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1157,6 +1157,9 @@ static volatile UWORD cdc_pt_last;      /* ...and where the newest one is, match
+  * decoration here: without it the compiler reads the flag once, before
+  * the loop, and spins for ever on the stale copy. */
+ static volatile UBYTE cdc_hit;  /* it went by, and cdc_pt says where */
++static volatile UBYTE cdc_hit_age;      /* cdc_ints when that happened, so
++                                         * the staleness test that guards a
++                                         * ring entry can guard this too */
+ static UBYTE cdc_hdr[4];        /* header that arrived with the data */
+ static UBYTE cdc_fail;          /* why the read did not finish */
+ static UWORD cdc_spill;         /* words drained while waiting for the end
+@@ -1392,6 +1395,7 @@ void segacd_int_5_c(void)
+     if (!cdc_hit && h0 == cdc_want[0] && h1 == cdc_want[1]
+                  && h2 == cdc_want[2]) {
+         cdc_pt = cdc_pt_last;
++        cdc_hit_age = (UBYTE)cdc_ints;
+         cdc_hit = 1;
+     }
+ 
+@@ -2177,6 +2181,7 @@ static BOOL cd_fetch(ULONG lba)
+     int attempt;
+     UBYTE settle, seen;
+     UBYTE why1, wrongs, cd_fixed;
++    LONG slice;
+     BOOL got = FALSE;
+ 
+     /* The early ring-hit path jumps straight to the transfer, past the
+@@ -2308,6 +2313,11 @@ static BOOL cd_fetch(ULONG lba)
+                 cd_budget--;
+             cd_ring_reset();
+             cdc_ints = 0;
++            /* And the direct hit, for the same reason the ring is
++             * reset here: a header that matched while the drive was
++             * still hovering names a pointer into the old spot, and
++             * the wait loop would take it as this read's answer. */
++            cdc_hit = 0;
+         } else {
+             cd_hits++;
+         }
+@@ -2320,8 +2330,50 @@ static BOOL cd_fetch(ULONG lba)
+         wrongs = 0;
+ rewait:
+         CDTRACE(8);
+-        while (cd_budget > 0 && cd_time_left()) {
++        /* An equal slice of the spin backstop, per attempt.
++         *
++         * cd_budget is set once per fill, in cd_read_block(), and was
++         * spent by whichever wait loop got to it first -- so attempt 1
++         * drained the pool and attempts 2 through 8 fell straight out
++         * of this loop without waiting at all. They still seeked, still
++         * counted a timeout, and still told the ladder their rung had
++         * produced no sector. Every console log says so on the line it
++         * was added to answer: "timeout: int 0", zero decode interrupts
++         * on the attempt that gave up, on every round of every run.
++         *
++         * cd_read_block()'s retry loop had this same bug in its clock
++         * and it was fixed there -- "Each try gets its own clock.
++         * Sharing one made the retry meaningless" -- but the fix went
++         * to cd_epoch and cd_leash and stopped there. The spin backstop
++         * underneath them stayed shared, and it is the tighter of the
++         * two by a wide margin: 130,000 turns of this loop is about a
++         * second, against a leash of two to eight.
++         *
++         * A slice rather than a fresh pool: cd_budget is still the
++         * fill-wide hard stop and still ends at the same place, so the
++         * frozen-clock worst case -- the one the backstop exists for,
++         * where cd_time_left() can never go false -- is exactly what it
++         * was. All that changes is that no single attempt can eat the
++         * lot. */
++        slice = CD_SPIN_BACKSTOP / 8;
++        while (slice > 0 && cd_budget > 0 && cd_time_left()) {
++            slice--;
+             cd_budget--;
++            /* The direct route: the decoder's interrupt latched the
++             * pointer the moment a sector's header equalled cdc_want.
++             * Checked here because the ring cannot be the only way in
++             * -- a ring entry needs a mode byte of 1 or 2 and the
++             * console has not produced one in six thousand sectors,
++             * while this compare looks at the MSF alone. cdc_hit was
++             * being set by segacd_int_5_c() and read only by the CDR
++             * state machine; this path cleared it on entry and never
++             * looked at it again. */
++            if (cdc_hit) {
++                pt = cdc_pt;
++                cd_found_stamp = cdc_hit_age;
++                cdc_hit = 0;
++                goto collect;
++            }
+             if (cd_ring_find(lba, &pt))
+                 goto collect;
+ 
+@@ -3407,6 +3459,8 @@ static void scd_snapshot(struct scd_snap *s)
+     s->booting = cd_booting;
+     s->stormed = cdd_stormed;
+     s->ticks = cdd_ticks;
++    s->cddok = cdd_valid;
++    s->cddscore = cdd_score;
+ 
+     for (i = 0; i < 32; i++)            /* the status line's own source */
+         s->rep[i] = CDREPORT[i];

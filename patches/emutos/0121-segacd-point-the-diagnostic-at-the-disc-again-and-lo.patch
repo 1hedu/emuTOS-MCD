@@ -1,0 +1,322 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 12:02:28 +0000
+Subject: [PATCH 121/184] segacd: point the diagnostic at the disc again, and
+ log to the cartridge
+
+Three things, all in service of one hardware boot answering the disc
+question instead of three.
+
+The diagnostic was testing the wrong drive. Dfree(3), Dsetpath("C:"),
+Fopen("C:\READCD.TXT") were correct for exactly as long as the disc was
+the only block device; the round after the cartridge took C: it was
+quietly interrogating cart SRAM. It said so, too -- "13 of 14 free" is
+fourteen 2 KB clusters, which is the cartridge's geometry and nothing
+like a disc. The letter is a named constant now.
+
+The log goes to C: first and falls back to B:. C: is the cartridge, and
+on a Mode 1 boot the flash cart writes it to an SD card by itself, so
+the loop closes: hold Down, read the log off the card. It used to need
+a second boot into boot/m1tool.S to copy B: across, and before that a
+CD-R per question. On a CD boot with no cartridge fitted C: is the
+disc, Fcreate fails on it because it is a compact disc, and the
+fallback does the right thing without being told which machine it is
+on. The buffer grows to what C: holds -- 28672 bytes, ninety-odd rounds
+against B:'s eighteen -- and only the first 5632 go to B:.
+
+And the mode gate records whether its rejects are all the same byte.
+14,378 sectors were dropped there on the hardware log and the only
+thing kept about any of them was that the last read 0x60, which is
+equally consistent with a decoder handing back one constant and a drive
+passing real non-data sectors. Those want opposite fixes. f and x in
+the mode line: the first rejected byte, and how many matched it.
+
+Also: segacd_cd_tune() ends the boot leash. cd_booting is cleared by
+deskmain(), which the diagnostic runs instead of -- so the whole
+diagnostic would have run at two seconds a read with no retry, on the
+one screen whose purpose is to give the drive every chance.
+
+The image is now 237564 bytes against the 237568 where the CDBIOS
+parks. Four bytes. Several literals were shortened to get there and the
+next feature cannot be paid for this way.
+---
+ bios/bios.c   | 119 ++++++++++++++++++++++++++++++++++++--------------
+ bios/segacd.c |  31 ++++++++++++-
+ bios/segacd.h |   3 +-
+ 3 files changed, 118 insertions(+), 35 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 24b5a5b..2da2954 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -826,25 +826,39 @@ BOOL can_shutdown(void)
+  * scroll-back. So every line goes to two places: the screen, and
+  * B:\CDLOG.TXT, rewritten whole after each round.
+  *
+- * B: on a stock console is the 8 KB of internal backup RAM on the sub
+- * CPU's own bus. EmuTOS will not touch it while it holds Sega-format
+- * game saves, so the log has nowhere to go until C is held at power-on
+- * once to claim it -- a deliberate act, because it erases what is
+- * there. From B: the Mode 1 tool ROM lifts it into cart SRAM and the
+- * flash cart writes it to an SD card.
++ * C: first, B: second.
++ *
++ * C: is the cartridge's save RAM, and on a Mode 1 boot the flash cart
++ * writes it to an SD card by itself. That closes the loop: hold Down,
++ * read the log off the card. It used to take a second boot into a
++ * different ROM -- boot/m1tool.S existed to copy B: across -- and
++ * before that a CD-R per question.
++ *
++ * B: is the fallback and used to be the only choice: 8 KB of internal
++ * backup RAM on the sub CPU's own bus. EmuTOS will not touch it while
++ * it holds Sega-format game saves, so the log had nowhere to go until
++ * C was held at power-on once to claim it. On a CD boot with no
++ * cartridge fitted, C: is the disc, Fcreate fails on it because it is
++ * a compact disc, and the fallback does the right thing without being
++ * told which machine it is on.
+  *
+  * When the buffer fills it stops: the file stops changing and says so,
+  * and the screen keeps running.
+  *
+- * The size is everything B: can hold. That volume is sixteen 512-byte
+- * sectors, one cluster each, of which five go to the reserved sector,
+- * two FATs and a 32-entry root -- so eleven are left and a file cannot
+- * exceed 5632 bytes however much RAM this buffer has. A round costs
+- * about 305 bytes, which is eighteen rounds. The failures being chased
+- * here are intermittent and six rounds was already the most useful
+- * sample this port has had; there is no reason to leave the other
+- * seven on the floor. */
+-#define CDLOG_MAX 5632
++ * The size is everything C: can hold. 63 sectors of 512, less one
++ * reserved, two FATs and a four-sector 64-entry root, is 56 sectors of
++ * data in fourteen 2 KB clusters: 28672 bytes. A round costs about 305,
++ * so that is ninety-odd rounds against B:'s eighteen -- and eighteen
++ * was set by B:'s eleven usable sectors, not by anything wanted. On B:
++ * only the first 5632 bytes are written, because that is still all it
++ * can hold. */
++#define CDLOG_MAX 28672
++#define CDLOG_B_MAX 5632        /* eleven usable sectors of the 8 KB */
++
++/* The disc's drive letter, and the Dfree/Dsetdrv number that goes with
++ * it (1 = A:). One place, because it has already moved once. */
++#define CDDRV     "D"
++#define CDDRV_NO  4
+ 
+ static char cdlog[CDLOG_MAX];
+ static UWORD cdlog_len;
+@@ -873,16 +887,36 @@ static void cdlog_printf(const char *fmt, ...)
+ #define DLOG(...)                                                       \
+     do { cprintf(__VA_ARGS__); cdlog_printf(__VA_ARGS__); } while (0)
+ 
++/* Which drive took it last: 'C', 'B', or '-' for neither. Printed, so
++ * a log that turns up on a card says where it came from and a log that
++ * does not can be told from one that was never written. */
++static char cdlog_where;   /* 0 until one of them takes it */
++
+ static LONG cdlog_save(void)
+ {
+-    LONG h, rc;
+-
+-    h = Fcreate("B:\\CDLOG.TXT", 0);
+-    if (h < 0L)
+-        return h;
+-    rc = Fwrite((WORD)h, (LONG)cdlog_len, cdlog);
+-    Fclose((WORD)h);
+-    return rc;
++    /* One mutable path with the drive letter poked into it, rather
++     * than two strings and a pointer table. The image is within a
++     * hundred bytes of the CDBIOS park at Word RAM 0xBA000 and every
++     * literal counts. */
++    static char path[] = "C:\\CDLOG.TXT";
++    LONG h = -1L, rc, n;
++    int i;
++
++    for (i = 0; i < 2; i++) {
++        path[0] = i ? 'B' : 'C';
++        h = Fcreate(path, 0);
++        if (h < 0L)
++            continue;
++        n = (LONG)cdlog_len;
++        if (i && n > CDLOG_B_MAX)
++            n = CDLOG_B_MAX;
++        rc = Fwrite((WORD)h, n, cdlog);
++        Fclose((WORD)h);
++        cdlog_where = path[0];
++        return rc;
++    }
++    cdlog_where = 0;
++    return h;
+ }
+ #endif
+ 
+@@ -1174,7 +1208,8 @@ void biosmain(void)
+         UWORD v[4];
+         UBYTE bsrc;
+         UBYTE hdr[4], st4[4];
+-        UBYTE state, lasth3;
++        UBYTE state, lasth3, h3first;
++        UWORD h3same;
+         int i;
+ 
+         cprintf("\033E");
+@@ -1191,17 +1226,27 @@ void biosmain(void)
+                     run + 1, arm_lead[arm], arm_hold[arm], arm_late[arm],
+                     arm_drvi[arm], arm_ts[arm], segacd_bootflags);
+ 
+-            rc = Dfree((LONG *)buf, 3);         /* 3 = C: */
+-            DLOG(" Dfree    %ld   %ld of %ld free\r\n",
++            /* The disc, which is D: since the cartridge took C:.
++             *
++             * These were C: and drive 3, and stayed correct for exactly
++             * as long as the disc was the only block device. The round
++             * after the cartridge became a drive, the diagnostic was
++             * quietly interrogating cart SRAM instead -- and said so,
++             * if anyone read it: "13 of 14 free" is fourteen 2 KB
++             * clusters, which is the cartridge's geometry and nothing
++             * like a disc. Named, so the next drive letter to appear
++             * cannot do this again. */
++            rc = Dfree((LONG *)buf, CDDRV_NO);
++            DLOG(" Dfree %ld %ld/%ld free\r\n",
+                     rc, *(LONG *)buf, *((LONG *)buf + 1));
+-            rc = Dsetpath("C:\\");
++            rc = Dsetpath(CDDRV ":\\");
+             DLOG(" Dsetpath %ld\r\n", rc);
+ 
+             Fsetdta(&dta);
+-            rc = Fsfirst("C:\\*.*", 0x17);
++            rc = Fsfirst(CDDRV ":\\*.*", 0x17);
+             DLOG(" Fsfirst  %ld   [%s]\r\n", rc, dta.d_fname);
+ 
+-            h = Fopen("C:\\READCD.TXT", 0);
++            h = Fopen(CDDRV ":\\READCD.TXT", 0);
+             DLOG(" Fopen    %ld\r\n", h);
+             if (h >= 0L) {
+                 rc = Fread((WORD)h, 32L, buf);
+@@ -1229,7 +1274,8 @@ void biosmain(void)
+             segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
+                             &bad, &wrong, &torn, &flag, &wdelta, &fix,
+                             &flba, &fsame, &ts, &tsf, &tsrc,
+-                            &lints, &lshort, &badmode, &lasth3);
++                            &lints, &lshort, &badmode, &lasth3,
++                            &h3first, &h3same);
+             DLOG(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+                     state, seeks, hits, errs, why);
+             DLOG(" torn %u bcd %u wr %u l%d fx %u fl %u\r\n",
+@@ -1249,7 +1295,14 @@ void biosmain(void)
+              * were not, h3 is the last such byte. If mode tracks the
+              * announced count then the ring is being starved by this
+              * test alone, and h3 says what to widen it to. */
+-            DLOG(" mode %u  h3 %02X\r\n", badmode, lasth3);
++            /* first says which byte the rejects started with and same
++             * how many of them matched it. same == mode means the
++             * decoder is handing back one constant, which is a header
++             * read from the wrong place; same well below mode means
++             * they are varied, and varied means real non-data sectors
++             * we are right to be dropping. */
++            DLOG(" mode %u h3 %02X f%02X x%u\r\n",
++                 badmode, lasth3, h3first, h3same);
+             segacd_cd_probe(&ringok, &newest, &dsr, &edt, &nz, hdr, st4,
+                             &blba, &boff, &bsrc, &bnz,
+                             &slotbad, &swant, &sgot,
+@@ -1313,7 +1366,9 @@ void biosmain(void)
+              * round and would double the size of the file. */
+             if (!cdlog_full) {
+                 LONG lrc = cdlog_save();
+-                cprintf(" log %ld  bram %u\r\n", lrc, segacd_bram_state());
++                cprintf(" log %ld %c bram %u\r\n", lrc,
++                        cdlog_where ? cdlog_where : '-',
++                        segacd_bram_state());
+             } else {
+                 cprintf(" LOG FULL -- safe to power off\r\n");
+             }
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 7db0cee..33d97e9 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -375,6 +375,17 @@ void segacd_wordram_sum(void)
+ }
+ static UWORD cd_badmode;        /* decoded, mode byte neither 1 nor 2 */
+ static UBYTE cd_lasth3;         /* the last such byte, verbatim */
++/* ...and whether they are all the same byte.
++ *
++ * The last one on its own cannot tell a decoder handing back one
++ * constant from a drive genuinely passing non-data sectors. On the
++ * hardware log 14,378 sectors were rejected here and the only thing
++ * recorded about any of them was that the last read 0x60 -- which is
++ * consistent with both, and the two want completely different fixes.
++ * If every reject is 0x60 then the header is being read from the wrong
++ * place; if they vary, they are real sectors we are right to drop. */
++static UBYTE cd_h3first;        /* the first rejected byte */
++static UWORD cd_h3same;         /* how many of them matched it */
+ /* Everything else a console cannot currently say out loud.
+  *
+  * Adding these one at a time costs a CD-R and an hour per question,
+@@ -1290,8 +1301,12 @@ void segacd_int_5_c(void)
+     } else if (h3 == 0x01 || h3 == 0x02) {
+         cd_badhdr++;            /* decoded, mode plausible, MSF impossible */
+     } else {
++        if (!cd_badmode)
++            cd_h3first = h3;
+         cd_badmode++;           /* not even a data sector, as far as the
+                                  * mode byte is concerned */
++        if (h3 == cd_h3first)
++            cd_h3same++;
+         cd_lasth3 = h3;
+     }
+ }
+@@ -3090,12 +3105,15 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
+                      UWORD *flba, UWORD *fsame, UWORD *ts, UWORD *tsf,
+                      UWORD *tsrc, UWORD *lints, WORD *lshort,
+-                     UWORD *badmode, UBYTE *lasth3)
++                     UWORD *badmode, UBYTE *lasth3,
++                     UBYTE *h3first, UWORD *h3same)
+ {
+     *lints = cd_lastints;
+     *lshort = cd_lastshort;
+     *badmode = cd_badmode;
+     *lasth3 = cd_lasth3;
++    *h3first = cd_h3first;
++    *h3same = cd_h3same;
+     *ts = cd_ts ? cd_ts_reads : 0xFFFF;
+     *tsf = cd_ts_fails;
+     *tsrc = cd_ts_rc;
+@@ -3153,6 +3171,15 @@ void segacd_cd_probe(UWORD *ringok, ULONG *newest, UWORD *dsr, UWORD *edt,
+  * what it set. Nothing about a normal boot goes through here. */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late)
+ {
++    /* The diagnostic is not a boot, and only the diagnostic calls this.
++     *
++     * cd_booting exists so a drive that cannot answer costs a desktop
++     * an icon instead of a minute, and it is cleared by deskmain() --
++     * which the diagnostic runs *instead of*. So without this the whole
++     * diagnostic would run on the boot leash: two seconds a read and no
++     * retry, on the one screen in this system whose entire purpose is
++     * to give the drive every chance and report what happened. */
++    cd_booting = 0;
+     cd_lead = lead;
+     cd_hold = (UBYTE)(hold ? 1 : 0);
+     cd_late = (UBYTE)(late ? 1 : 0);
+@@ -3936,7 +3963,7 @@ LONG segacd_cart_ioctl(WORD op, void *arg)
+         info[1] = SECTOR_SIZE;
+         return E_OK;
+     case GET_DISKNAME:
+-        strcpy((char *)arg, "Cartridge save RAM");
++        strcpy((char *)arg, "Cart");
+         return E_OK;
+     case GET_MEDIACHANGE:
+         /* A cartridge cannot be changed with the power on, and the
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 66f84f8..bacd968 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -47,7 +47,8 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
+                      UWORD *flba, UWORD *fsame, UWORD *ts, UWORD *tsf,
+                      UWORD *tsrc, UWORD *lints, WORD *lshort,
+-                     UWORD *badmode, UBYTE *lasth3);
++                     UWORD *badmode, UBYTE *lasth3,
++                     UBYTE *h3first, UWORD *h3same);
+ void segacd_cd_probe(UWORD *ringok, ULONG *newest, UWORD *dsr, UWORD *edt,
+                      UWORD *nz, UBYTE *hdr, UBYTE *st4,
+                      ULONG *blba, UWORD *boff, UBYTE *bsrc, UWORD *bnz,

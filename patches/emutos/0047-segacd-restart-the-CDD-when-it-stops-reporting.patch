@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 09:46:48 +0000
+Subject: [PATCH 047/184] segacd: restart the CDD when it stops reporting
+
+Established by elimination rather than guessed at. The watchdog fired,
+so the interrupt stopped -- but the storm guard did not mask it (that
+prints 'S', which is tested first and has a glyph), no other write to
+the mask is destructive (every one is an OR, and levels 2 and 3 are
+demonstrably still being taken), and HOCK is never cleared (the only
+value ever written to the control register is 4, which sets it).
+
+So the drive stopped reporting. That also explains the one thing that
+never fitted: the standalone test runs seconds after the disc was last
+read, with it still spinning, while EmuTOS reaches its desktop a long
+idle later.
+
+HOCK is documented as "starts communication with the CDD", so the
+watchdog now sets it again while stalled, and stops the moment packets
+return. The command counter shows wake attempts instead of sends while
+stalled, since a stalled link sends nothing worth counting.
+---
+ bios/segacd.c | 25 ++++++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 66b9213..a2c9173 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -130,6 +130,7 @@ static UBYTE cdd_stat[10];
+ static ULONG cdd_rawbuf[3];     /* aligned: the read below is long-wide */
+ #define cdd_raw ((UBYTE *)cdd_rawbuf)
+ static UBYTE cdd_valid;         /* last packet checksummed */
++static UBYTE cdd_wakes;         /* attempts to restart a stopped drive */
+ static UBYTE cdd_stalled;       /* the score is zero because the interrupt
+                                  * stopped, not because packets are bad --
+                                  * one character cannot mean both */
+@@ -698,6 +699,28 @@ void segacd_int_2_c(void)
+     } else if (cdd_quiet < 255 && ++cdd_quiet >= 8) {
+         cdd_score = 0;          /* eight VBLs is six missed packets */
+         cdd_stalled = 1;
++
++        /* ...and try to start it again.
++         *
++         * Nothing on our side masked the interrupt: the storm guard did
++         * not fire, every other write to the mask is an OR, and levels
++         * 2 and 3 are demonstrably still being taken, so the mask is
++         * intact. We never clear HOCK either -- the only value written
++         * to the control register is 4, which sets it. By elimination
++         * the drive itself stopped reporting, which fits the one thing
++         * that never made sense: the standalone test runs seconds after
++         * the disc was last read, and EmuTOS runs a minute later with
++         * the drive left idle.
++         *
++         * HOCK is documented as "starts communication with the CDD", so
++         * setting it again is the documented way to ask for it back.
++         * Once every eight frames while stalled, and it stops the
++         * moment packets return. */
++        if (cdd_quiet >= 8) {
++            cdd_quiet = 8;      /* stay stalled; keep prodding */
++            *CDD_CTRL_B = CDD_HOCK;
++            cdd_wakes++;
++        }
+     }
+ 
+     /* Two counters that must both be spinning, because between them
+@@ -747,7 +770,7 @@ void segacd_int_2_c(void)
+         | (cdd_cmd_on ? 0x80 : 0)
+         | ((UWORD)(cdd_stormed ? 1 : 0) << 8)
+         | ((UWORD)((cdd_ctrl | (cdd_ctrl_ever << 2)) & 0x07) << 9)
+-        | ((UWORD)(cdd_sent & 0x07) << 12)
++        | ((UWORD)((cdd_stalled ? cdd_wakes : cdd_sent) & 0x07) << 12)
+         | (cdd_stalled ? 0x8000 : 0));
+ 
+     if (pcm_countdown) {                /* silence the bell when it is due */

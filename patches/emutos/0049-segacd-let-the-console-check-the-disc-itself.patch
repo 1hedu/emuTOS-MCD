@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 10:52:11 +0000
+Subject: [PATCH 049/184] segacd: let the console check the disc itself
+
+On hardware there is no harness to diff 2048 bytes against, and reading
+them off a status line is not a test. So the far sector is now 1400,
+past the end of the filesystem, where the disc builder writes a pattern
+this code can regenerate from nothing -- and sector 16 is checked
+against the six bytes an ISO 9660 volume descriptor has to start with.
+
+The result is one character: 3 means both sectors were read and both
+were right.
+---
+ bios/segacd.c | 68 +++++++++++++++++++++++++++++++++++++++++++--------
+ 1 file changed, 58 insertions(+), 10 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 0f8fb04..11ae800 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -682,16 +682,23 @@ static BOOL cdc_grab(void)
+ 
+ #define CDR_PARKED   5          /* nothing left to read */
+ 
+-/* Stage 3 reads two sectors, and the second one is the point. Sector 16
+- * of an ISO 9660 filesystem is the primary volume descriptor: it begins
+- * 01 "CD001", so a capture can be recognised without reference to
+- * anything. But a recognisable sector at a low address is also the
+- * likeliest thing to be lying around already, and "we read the disc" is
+- * a claim that has to survive that objection. So the second is far away
+- * and arbitrary -- over a thousand sectors on, well past anything the
+- * boot loader touched, and reached by a real seek. */
++/* Stage 3 reads two sectors, and the second one is the point.
++ *
++ * Sector 16 of an ISO 9660 filesystem is the primary volume descriptor:
++ * it begins 01 "CD001", so a capture can be recognised against nothing
++ * at all. But a recognisable sector at a low address is also the
++ * likeliest thing to be lying in a buffer already, and "we read the
++ * disc" is a claim that has to survive that objection.
++ *
++ * So the second is 1400 -- past the end of the filesystem, reached by a
++ * real seek, and carrying a pattern the disc builder wrote there and
++ * this code can generate from nothing. That is what makes the test work
++ * on a console, where there is no harness to diff against: all 2048
++ * bytes are checked here and the answer is one character on the status
++ * line. Must stay in step with tools/build-iso.sh. */
+ #define CDR_SLOTS 2
+-static const ULONG cdr_lbas[CDR_SLOTS] = { 16UL, 1225UL };
++#define CDR_PATTERN_LBA 1400UL
++static const ULONG cdr_lbas[CDR_SLOTS] = { 16UL, CDR_PATTERN_LBA };
+ 
+ static UBYTE cdr_state;
+ static UBYTE cdr_tried;
+@@ -703,6 +710,39 @@ static UBYTE cdr_slot;          /* which of the two is being read */
+ static UBYTE cdr_pub = 0xFF;    /* which one is in the buffer right now */
+ static ULONG cdr_sum[CDR_SLOTS];
+ 
++/* The verdict, one bit per slot plus two for how it went wrong, because
++ * on a console this is the entire result and it has to be legible as a
++ * single character. 3 means both sectors were read and both were what
++ * the disc says they should be. */
++#define CDR_V_BAD   0x40        /* a sector arrived and was not right */
++#define CDR_V_NOREAD 0x80       /* a sector never arrived at all */
++static UBYTE cdr_verdict;
++
++/* What the disc builder wrote at CDR_PATTERN_LBA, and what an ISO 9660
++ * volume descriptor has to start with. Neither needs anything from
++ * outside this file, which is the point: the console can reach a
++ * verdict with no harness and nothing to read out. */
++static BOOL cdr_check(UBYTE slot)
++{
++    UWORD i;
++
++    if (cdr_lbas[slot] == CDR_PATTERN_LBA) {
++        for (i = 0; i < CDC_DATA_BYTES; i++)
++            if (CDSECT[i] != (UBYTE)((i * 5) ^ (i >> 4) ^ 0xA5))
++                return FALSE;
++        return TRUE;
++    }
++
++    {
++        static const UBYTE sig[6] = { 0x01, 'C', 'D', '0', '0', '1' };
++
++        for (i = 0; i < 6; i++)
++            if (CDSECT[i] != sig[i])
++                return FALSE;
++    }
++    return TRUE;
++}
++
+ static UBYTE tobcd(UWORD v)
+ {
+     return (UBYTE)(((v / 10) << 4) | (v % 10));
+@@ -809,7 +849,7 @@ static void cdr_report(void)
+     CDREPORT[4] = cdc_pt;
+     CDREPORT[5] = ++cdr_seq;
+     CDREPORT[6] = cdr_pub;      /* which sector the buffer holds */
+-    CDREPORT[7] = (UWORD)(((UWORD)cdc_want[0] << 8) | cdc_want[2]);
++    CDREPORT[7] = cdr_verdict;  /* and whether it was the right one */
+     for (k = 0; k < CDR_SLOTS; k++) {
+         CDREPORT[8 + 2 * k] = (UWORD)(cdr_sum[k] >> 16);
+         CDREPORT[9 + 2 * k] = (UWORD)cdr_sum[k];
+@@ -839,7 +879,9 @@ static void cdr_step(void)
+         } else if (++cdr_wait > CDR_TIMEOUT) {
+             cdc_stop();
+             cdc_fail = 3;               /* the drive never started */
++            cdr_verdict |= CDR_V_NOREAD;
+             cdr_state = CDR_FAILED;
++            cdr_hold = 0;
+         }
+         break;
+ 
+@@ -859,15 +901,21 @@ static void cdr_step(void)
+                 for (i = 0; i < CDC_DATA_BYTES; i++)
+                     h = (h << 5) - h + CDSECT[i];
+                 cdr_sum[cdr_slot] = h;
++                if (cdr_check(cdr_slot))
++                    cdr_verdict |= (UBYTE)(1 << cdr_slot);
++                else
++                    cdr_verdict |= CDR_V_BAD;
+                 cdr_pub = cdr_slot;
+                 cdr_state = CDR_DONE;
+             } else {
++                cdr_verdict |= CDR_V_NOREAD;
+                 cdr_state = CDR_FAILED;
+             }
+             cdr_hold = 0;
+         } else if (++cdr_wait > CDR_TIMEOUT) {
+             cdc_stop();
+             cdc_fail = 4;               /* our sector never came round */
++            cdr_verdict |= CDR_V_NOREAD;
+             cdr_state = CDR_FAILED;
+             cdr_hold = 0;
+         }

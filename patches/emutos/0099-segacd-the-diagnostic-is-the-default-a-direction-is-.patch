@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 05:50:53 +0000
+Subject: [PATCH 099/184] segacd: the diagnostic is the default; a direction is
+ the way out
+
+Which button registers at power-on has now cost two hardware runs.
+Left never fired at all. The only log this port has came off Up, which
+selected an image on a four-era disc where the diagnostic was compiled
+in unconditionally -- on this build Up is cd_selftest, a different
+lever entirely. Asking for a specific button on a disc whose only
+purpose is to run the diagnostic is a coin flip that has already
+landed wrong twice.
+
+So holding nothing runs it, and any of Left, Up or Right skips to the
+desktop. The escape no longer rests on one button working.
+
+Set at the flag decode rather than at the test in biosmain, and that
+distinction turned out to matter. The first version was an || at the
+use site, and it read the disc with a different driver: segacd_diag
+also sets cd_ts_want, so a default run went through our own CD code
+while a Down run went through the parked firmware. Under gpgx the
+difference was visible immediately -- the default run's Fread returned
+32 bytes and reported success, and every one of them was
+non-printable, where the Down run returned the file. Two runs of the
+same disc that could not be compared, which is the opposite of what
+this image is for. Setting the flag makes them one run.
+
+Both now read `Fread 32 [This file is on the comp]` under gpgx and
+differ only in the button word they print.
+---
+ bios/bios.c   | 31 ++++++++++---------------------
+ bios/segacd.c | 18 ++++++++++++++++++
+ 2 files changed, 28 insertions(+), 21 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 72276b0..c26fd5c 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -809,32 +809,21 @@ BOOL can_shutdown(void)
+  */
+ 
+ #ifdef MACHINE_SEGACD
+-/* The diagnostic outgrew the tube, and now it does not need it.
++/* The diagnostic outgrew the tube.
+  *
+  * Ten lines a round, a round every few seconds, and the answer to
+  * "which sector does it die on" scrolls off a CRT that has no
+- * scroll-back. Worse, reading it off a television means transcribing
+- * it by hand, and the last hardware run produced six rounds of numbers
+- * that no photograph was going to carry.
++ * scroll-back. So every line goes to two places: the screen, and
++ * B:\CDLOG.TXT, rewritten whole after each round.
+  *
+- * So every line goes to two places: the screen, and a buffer written
+- * to B:\CDLOG.TXT after each round. B: on a stock console is the 8 KB
+- * of internal backup RAM on the sub CPU's own bus -- the only
+- * persistent store the machine has, since a cartridge in the slot
+- * stops it booting from CD at all. EmuTOS will not touch that memory
+- * while it holds Sega-format game saves, so the log has nowhere to go
+- * until C is held at power-on once to claim it; that erases whatever
+- * is in there, which is why it is a deliberate act and not something
+- * this build does on its own.
++ * B: on a stock console is the 8 KB of internal backup RAM on the sub
++ * CPU's own bus. EmuTOS will not touch it while it holds Sega-format
++ * game saves, so the log has nowhere to go until C is held at power-on
++ * once to claim it -- a deliberate act, because it erases what is
++ * there. From B: the Mode 1 tool ROM lifts it into cart SRAM and the
++ * flash cart writes it to an SD card.
+  *
+- * From there boot/m1tool.S lifts it into cart SRAM and the flash cart
+- * writes it to an SD card, so the round trip is complete without a
+- * camera. That path is proven: the first log it carried came back with
+- * its checksum intact.
+- *
+- * The buffer is written whole each round rather than appended to, so
+- * the file is complete and closed at every moment the power might go
+- * off. When it fills, it stops: the file stops changing and says so,
++ * When the buffer fills it stops: the file stops changing and says so,
+  * and the screen keeps running. */
+ #define CDLOG_MAX 3584
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index b03f763..311e7fa 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -471,6 +471,24 @@ void segacd_cdd_init(void)
+         segacd_diag = (UBYTE)((f & 4) ? 1 : 0);
+         cd_lead = (f & 8) ? 2UL : 20UL;
+         cd_selftest = (UBYTE)((f & 16) ? 1 : 0);
++        /* ...and by default, on this image.
++         *
++         * The diagnostic is what this disc is burned to run, so a
++         * direction is the way out of it rather than the way in.
++         * Which direction registers at power-on has cost two runs
++         * already: Left never fired, and the only log this port has
++         * came off Up, which on this build is a different lever
++         * entirely. Any of Left, Up or Right skips to the desktop, so
++         * the escape does not rest on one button working.
++         *
++         * Set here rather than at the test in biosmain, so that a
++         * default run and a Down run are the same run. They were not
++         * when this was an || at the use site: segacd_diag also hands
++         * D: to the parked firmware two lines below, so "nothing held"
++         * quietly read the disc with a different driver and the two
++         * were not comparable. */
++        if (!(f & 0x3C))
++            segacd_diag = 1;
+         /* Right hands D: to the parked firmware. The diagnostic takes it
+          * as well, without being asked, because holding Right and Down
+          * together is a diagonal on a d-pad and the person holding it

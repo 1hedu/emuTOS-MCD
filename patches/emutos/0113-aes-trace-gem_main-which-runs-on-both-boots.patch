@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 09:47:54 +0000
+Subject: [PATCH 113/184] aes: trace gem_main, which runs on both boots
+---
+ aes/geminit.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/aes/geminit.c b/aes/geminit.c
+index 93b83e1..0c3b165 100644
+--- a/aes/geminit.c
++++ b/aes/geminit.c
+@@ -702,6 +702,9 @@ void run_accs_and_desktop(void)
+     /* take the tick interrupt */
+     disable_interrupts();
+     gl_ticktime = gsx_tick(&tikcod, &tiksav);
++#ifdef MACHINE_SEGACD
++    *(volatile UWORD *)0xFF802E = 0xE1A6;
++#endif
+     enable_interrupts();
+ 
+     /* set initial click rate: must do this after setting gl_ticktime */
+@@ -819,6 +822,9 @@ void gem_main(void)
+ 
+     gl_changerez = FALSE;
+ 
++#ifdef MACHINE_SEGACD
++    *(volatile UWORD *)0xFF802E = 0xE1A4;
++#endif
+     mn_init();                      /* initialise variables for menu_register() */
+ 
+     num_accs = count_accs();        /* puts ACC names in acc[].name */
+@@ -833,6 +839,9 @@ void gem_main(void)
+     totpds = num_accs + 2;
+ 
+     disable_interrupts();
++#ifdef MACHINE_SEGACD
++    *(volatile UWORD *)0xFF802E = 0xE1A5;
++#endif
+     set_aestrap();                  /* set trap#2 -> aestrap */
+ 
+     /* init event recorder  */
+@@ -905,6 +914,9 @@ void gem_main(void)
+      * run the accessories and the desktop until termination
+      * (for shutdown or resolution change)
+      */
++#ifdef MACHINE_SEGACD
++    *(volatile UWORD *)0xFF802E = 0xE1A7;
++#endif
+     aes_run_rom_program(accdesk_start);
+ 
+     /* restore previous trap#2 address */

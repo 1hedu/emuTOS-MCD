@@ -1,0 +1,248 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 19:07:44 +0000
+Subject: [PATCH 150/184] Undo two of mine: the wake posted to nobody, the
+ remount ground for ever
+
+"Cannot boot and open D:, and it takes for ever just to fail." Both
+halves are things I added.
+
+v18 posted DRV_INIT and returned, on the correct observation that the
+call is queued and returns at once. What it missed is who drains the
+queue: the firmware's own exchange, under the firmware's own level-4
+handler. Doom can post and forget because Sega's BIOS is resident and
+its exchange never stops. Ours is parked in Word RAM -- the moment the
+visit swaps EmuTOS back in, no exchange runs and the pending command
+sits in the parked copy for ever. Posting it and leaving is posting it
+to nobody. The wait is back. That the call is asynchronous is a fact
+about the BIOS; that we must block on it anyway is a fact about having
+evicted the BIOS.
+
+v17's media-change said "changed" on every call until a block had been
+read, which turned every failed access into a full disk_rescan of a
+drive that was not answering. It still could not open D: and now it
+took a very long time not to. The offer is rare now: never during the
+boot probe, where nothing has woken the drive and the answer is known;
+at most once every five seconds after that; and never once a block has
+come off the disc.
+
+And the wake moves off the boot path with it. disk_init_all runs before
+the interrupts a firmware visit needs are up, and a visit that cannot
+be serviced is exactly twenty seconds of nothing. It happens on the
+first access after the desktop instead -- the same conditions CDTEST
+runs under, which is the only place it has ever worked.
+
+Last, the lead: 2 frames, not 20. $18 seeks to LBA + 150, $20 ends a
+read at LBA + 149, ROMREAD converts its start as LBA + 148 and keeps
+the sector whose header reads 150. Two frames of run-up, stated three
+times, falling out of the arithmetic rather than chosen. Twenty was
+ours and was never supported by anything.
+
+Emulator: seeks 4 -> 3, errors 1 -> 0, and D: still mounts with the
+wake never firing.
+---
+ bios/scdapi.h  |  2 +-
+ bios/segacd.c  | 74 ++++++++++++++++++++++++++++----------------------
+ bios/segacd2.S | 44 ++++++++++--------------------
+ 3 files changed, 56 insertions(+), 64 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 3edf26b..bb5101a 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  18
++#define SCD_VERSION  19
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 911bcaa..fa82a97 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -190,7 +190,18 @@ UWORD segacd_bootflags;         /* the raw button word the servant sent.
+  * used twenty. Selectable at boot -- hold Left -- because with one
+  * CD-R left, choosing between them blind is not a decision I get to
+  * make on someone else's disc. */
+-static ULONG cd_lead = 20UL;
++/* Two frames, which is the firmware's, not twenty, which was ours.
++ *
++ * The BIOS states it three times over and the numbers only fit one
++ * reading: $18 seeks to LBA + 150, the exact target; $20 ends a read at
++ * LBA + 149, the inclusive last sector; ROMREAD converts its start as
++ * LBA + 148 and keeps the sector whose header reads 150. The run-up is
++ * two frames and it falls out of the arithmetic, in three independent
++ * places, rather than being chosen.
++ *
++ * Twenty was this project's, it was never supported by anything, and it
++ * spent seven months as the default value of a diagnostic arm. */
++static ULONG cd_lead = 2UL;
+ static UBYTE cd_hold = 1;       /* pause the drive after each fill.
+                                  * Default on: Lunar's sub program ends
+                                  * every read run, successful or not,
+@@ -578,6 +589,7 @@ static BOOL cd_ring_find(ULONG lba, UWORD *pt)
+  * disc through this exact path, and every read after that either works
+  * or shows up in the error count beside it. */
+ static UBYTE cd_dtest;
++static LONG cd_remount_at;      /* hz_200 of the last remount offer */
+ static UBYTE cd_woke;           /* 1 the firmware woke the drive for us,
+                                  * 2 it was asked and would not */
+ 
+@@ -691,7 +703,7 @@ void segacd_cdd_init(void)
+          * the decoder never locks, or it may be load-bearing; the disc
+          * can now answer that instead of me choosing. */
+         segacd_diag = (UBYTE)((f & 4) ? 1 : 0);
+-        cd_lead = (f & 8) ? 2UL : 20UL;
++        cd_lead = (f & 8) ? 20UL : 2UL;
+         cd_selftest = (UBYTE)((f & 16) ? 1 : 0);
+         /* The diagnostic is Down, and only Down.
+          *
+@@ -3022,13 +3034,13 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+      * this disc perfectly and has since 1991; the driver below it is
+      * five weeks old and does not. Our CDD traffic stops at the same
+      * moment -- one drive, one master. */
+-    if (!cd_ts_decided) {
++    if (!cd_ts_decided && !cd_booting) {
+         cd_ts_decided = 1;
+         if (cd_ts_want && segacd_bios_available()) {
+             cd_ts = 1;
+             cd_ts_cmdsave = cdd_cmd_on;
+             cdd_cmd_on = 0;     /* our VBL stops talking to the drive */
+-        } else if (segacd_bios_available()) {
++        } else if (!cd_booting && segacd_bios_available()) {
+             /* Otherwise: let the firmware wake the drive, once, and
+              * then read it ourselves.
+              *
+@@ -3785,41 +3797,37 @@ LONG segacd_cd_ioctl(WORD op, void *arg)
+         strcpy((char *)arg, "Mega CD disc");
+         return E_OK;
+     case GET_MEDIACHANGE:
+-        /* The tray cannot be opened without cutting power to the sub,
+-         * so this never reports a real disc swap. What it does report
+-         * is a volume that has never been logged, and that is not the
+-         * same question.
++        /* The tray cannot be opened with the power on, so this never
++         * reports a real disc swap. What it reports is a volume that
++         * has never been logged, because that is the only lever the
++         * block layer offers.
+          *
+          * blkdev_getbpb() runs once, during the boot probe. If the disc
+-         * is not readable at that moment -- and on this machine it is
+-         * not, because nothing has woken the drive yet -- then
+-         * bdev->bpb.recsiz stays zero, and blkdev_rwabs() answers
+-         * ESECNF on sight for every logical access afterwards:
+-         *
+-         *   if (blkdev[dev].bpb.recsiz == 0)
+-         *       return ESECNF;
++         * is not readable then, bdev->bpb.recsiz stays zero and
++         * blkdev_rwabs() answers ESECNF on sight for every logical
++         * access afterwards -- however many times the critical-error
++         * alert is answered with Retry, because the retry re-enters at
++         * the same test. Only a media change re-runs Getbpb, and CDTEST
++         * calling bios_getbpb() by hand is what "unlocked" D:.
+          *
+-         * Nothing below that line ever runs again. The drive can wake
+-         * up, the decoder can lock, the disc can be perfectly readable,
+-         * and D: still refuses -- and refuses identically however many
+-         * times the critical-error alert is answered with Retry,
+-         * because the retry re-enters at the same test. Getbpb is only
+-         * re-run when a media change is reported, and this returned
+-         * MEDIANOCHANGE unconditionally.
++         * The first version of this said "changed" on every call until
++         * a block had been read, which turned every failed access into
++         * a full disk_rescan of a drive that was not answering: it
++         * still could not open D: and now it took a very long time not
++         * to. The offer has to be rare and it has to stop.
+          *
+-         * That is the whole of "impossible to open D: on boot, and it
+-         * works after the diagnostic": CDTEST calls Getbpb directly,
+-         * which is the one thing in the system that re-attempts the
+-         * mount. The wake, the latch and the decoder were all innocent
+-         * of this particular symptom.
+-         *
+-         * So: until one block has come off this disc, say the medium
+-         * changed, and let GEMDOS try to log the volume again. Once a
+-         * block has been delivered the answer is no forever, which is
+-         * both true and self-limiting. disk_mediach() will not ask more
+-         * than twice a second. */
++         * So: not during the boot probe, where nothing has woken the
++         * drive and the answer is known; once at a time after that,
++         * with five seconds between offers; and never once a block has
++         * actually come off the disc, since then the volume is logged
++         * and the question is settled. */
+         if (cd_dtest & 2)
+             return MEDIANOCHANGE;
++        if (cd_booting)
++            return MEDIANOCHANGE;
++        if (cd_remount_at && (hz_200 - cd_remount_at) < 1000L)
++            return MEDIANOCHANGE;
++        cd_remount_at = hz_200;
+         return MEDIACHANGE;
+     }
+     return ERR;
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 2b6aadb..5396776 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -567,32 +567,21 @@ brd_own_done:
+         move.w  d0,50(a5)
+         jsr     0x5F22
+ 
+-        // A count of zero posts the wake and leaves. No wait.
++        // The wait stays, and v18 removing it was a mistake worth
++        // recording. DRV_INIT is queued and returns at once -- that
++        // part was right -- but a queued command is drained by the
++        // firmware's own exchange, running under the firmware's own
++        // level-4 handler. Doom can post and forget because Sega's
++        // BIOS is resident and its exchange never stops. Ours is
++        // parked in Word RAM: the moment the visit swaps EmuTOS back
++        // in, no exchange runs, and the pending command sits in the
++        // parked copy for ever. Posting it and leaving is posting it
++        // to nobody.
+         //
+-        // DRV_INIT is function $10, and the dispatcher splits on bit 7
+-        // of the function number:
+-        //
+-        //   2e26: bclr #7,d0
+-        //   2e2a: beq  $2E30      bit 7 clear -> $2F10, the queue
+-        //   2e2c: bsr  $2E3A      bit 7 set   -> the sync jump table
+-        //
+-        // Bit 7 of $10 is clear, so DRV_INIT is queued and the call
+-        // returns at once. It does not take twenty seconds; it does not
+-        // take any time at all. The drive gets on with spinning up and
+-        // reading its table of contents over the following seconds, on
+-        // its own schedule, and Doom does exactly that -- posts
+-        // DRV_INIT, posts CDCSETMODE, carries straight on, and tests
+-        // CDBSTAT in its frame loop.
+-        //
+-        // What this file was doing instead was blocking on CDB_STAT
+-        // inside the visit, with EmuTOS swapped out, its vectors
+-        // borrowed and a watchdog running, waiting for an asynchronous
+-        // command to finish. That is where the twenty-second budget
+-        // came from, and it was twenty seconds of answering the wrong
+-        // question. Post it and get out; EmuTOS has a whole boot left
+-        // to run and the drive can use it.
+-        tst.l   4(a5)
+-        beq     brd_posted
++        // So the visit has to stay long enough for the firmware to
++        // finish, which is what this loop is. That the call is
++        // asynchronous is a fact about the BIOS; that we must block on
++        // it anyway is a fact about having evicted the BIOS.
+ 
+ brd_wait_init:
+         move.l  _segacd_bios_frames,d2
+@@ -645,11 +634,6 @@ brd_wait_init:
+         beq     brd_init_done
+         cmpi.w  #0x0010,d0              // playing, also fine
+         bne     brd_wait_init
+-brd_posted:
+-        move.b  #1,_bios_woken          // asked once; that is enough
+-        clr.w   32(a5)                  // stage 0: posted, nothing failed
+-        bra     brd_done
+-
+ brd_init_done:
+         // The read gets its own clock. Every stage below tests the same
+         // counter against a threshold measured from the start of the

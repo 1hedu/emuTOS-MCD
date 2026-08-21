@@ -1,0 +1,287 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 22:03:33 +0000
+Subject: [PATCH 089/184] segacd: timeshare phase 2 in progress -- BIOS reads
+ attempted, not yet working
+
+The visit survives a full read attempt: DRV_INIT to wake firmware whose
+internal state has been frozen since eviction, CDCSTOP, ROMREADN, and
+the CDCSTAT/CDCREAD/CDCTRN/CDCACK loop, all with Sega's vectors in low
+memory and the gate array passing levels 4 and 5 so its own handlers
+drive the state machine. EmuTOS comes back intact every time and the
+diagnostic runs on afterwards. What does not yet happen is a sector.
+
+Fixed on the way, both mine: the interrupt mask was cleared with
+0xFCFF, which leaves bit 10 set, so the following ori restored level 7
+and Sega's handlers never ran at all; and the C wrapper collapsed every
+failure to 1, discarding the only thing the read had to say.
+
+Scratch for the visit -- stack, packet, buffer -- is 0x7C000-0x7EFFF,
+taken off the top of the A: ramdisk. It has to be above phystop, where
+EmuTOS never allocates, and outside the 24 KB that gets exchanged; that
+region is the only memory on the machine that is both.
+
+Current state: read returns 0x0FAA rather than a stage code, which does
+not match any path in the routine, so the next step is finding out what
+is clobbering d5 across the BIOS calls -- the documented clobber list
+is d0-d1/a0-a1 and the real one is evidently wider.
+
+Normal boots are unaffected: none of this runs outside the diagnostic.
+---
+ bios/bios.c    |   5 +-
+ bios/segacd.c  |  43 +++++++++++++-
+ bios/segacd.h  |   1 +
+ bios/segacd2.S | 149 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 195 insertions(+), 3 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index c688091..25f4160 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1124,8 +1124,9 @@ void biosmain(void)
+              * immediate return. 0xFFFF means nothing is parked. */
+             if (run == 0) {
+                 UWORD br = segacd_bios_probe();
+-                cprintf(" CDBIOS probe %04X swaps %u\r\n",
+-                        br, segacd_bios_swaps());
++                UWORD rr = segacd_bios_readtest();
++                cprintf(" CDBIOS probe %04X read %04X swaps %u\r\n",
++                        br, rr, segacd_bios_swaps());
+             }
+             cprintf("\r\n");
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index b264600..895ce8e 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2298,6 +2298,37 @@ static BOOL bios_parked(void)
+ WORD segacd_bios_call(WORD fn);         /* segacd2.S */
+ extern UWORD segacd_bios_swapcnt;       /* segacd2.S */
+ 
++WORD segacd_bios_read(ULONG lba, WORD count);   /* segacd2.S */
++
++/* Phase two: does the parked firmware actually READ?
++ *
++ * The pattern sector is the right target because the answer needs no
++ * reference data -- the driver regenerates those 2048 bytes from a
++ * formula, so a match is proof and not a coincidence. Returns 0 for a
++ * verified read, 1 for a read that failed, 2 for a read that returned
++ * the wrong bytes, 0xFFFF for no firmware parked. */
++UWORD segacd_bios_readtest(void)
++{
++    const UBYTE *got = (const UBYTE *)0x7D000UL;
++    UWORD i;
++
++    if (!bios_parked())
++        return 0xFFFF;
++
++    {   /* Pass the stage code through. Collapsing it to 1 here threw
++         * away the only thing the read had to say. */
++        WORD rc = segacd_bios_read(CDR_PATTERN_LBA, 1);
++
++        if (rc)
++            return (UWORD)rc;
++    }
++
++    for (i = 0; i < CDC_DATA_BYTES; i++)
++        if (got[i] != (UBYTE)(((i * 5) ^ (i >> 4) ^ 0xA5) & 0xFF))
++            return 2;
++    return 0;
++}
++
+ UWORD segacd_bios_probe(void)
+ {
+     if (!bios_parked())
+@@ -2729,7 +2760,17 @@ void segacd_int_2_c(void)
+  * we only do linear sector math (16 sectors/track, 1 side, 512 bytes). */
+ 
+ #define ADISK_BASE  ((UBYTE *)0x60000)
+-#define ADISK_SECTORS 248               /* 0x1F000 / 512 */
++#define ADISK_SECTORS 224               /* 0x1C000 / 512.
++                                         * Twelve KB shorter than it was:
++                                         * 0x7C000-0x7EFFF is now the
++                                         * timeshare's scratch -- stack,
++                                         * BIOS packet and read buffer for
++                                         * visits to the parked firmware.
++                                         * It has to live above phystop,
++                                         * where EmuTOS never allocates,
++                                         * and outside the 24 KB that gets
++                                         * exchanged. This is the only
++                                         * such region on the machine. */
+ 
+ /* B: is the backup RAM cartridge, which only the Genesis-side CPU can
+  * reach. Sectors move through a bounce buffer at the top of the same
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 7dc67ee..34952e5 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -40,6 +40,7 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UWORD *flba, UWORD *fsame);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
+ UWORD segacd_bios_probe(void);  /* exchange the CDBIOS in, call it, out */
++UWORD segacd_bios_readtest(void); /* ...and have it read a known sector */
+ UWORD segacd_bios_swaps(void);
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 9dac982..13b2c04 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -209,8 +209,157 @@ bios_xchg:
+         .data
+ _segacd_bios_swapcnt:
+         .word   0
++_bios_woken:
++        .byte   0
++        .even
+         .text
+ 
++// WORD segacd_bios_read(ULONG lba, WORD count)
++//
++// A real read, done by the machine's own firmware. Returns 0 on
++// success; the sectors land at 0x7D000.
++//
++// This is the part a synchronous probe could not prove: ROMREADN does
++// not read anything by itself, it starts the drive and then makes
++// progress on the drive's own interrupts. So the BIOS's vectors must
++// be live AND the gate array's interrupt mask must let levels 4 and 5
++// through while its code is in low memory -- Sega's handlers, driving
++// Sega's state machine, exactly as they did before eviction.
++//
++// Levels 2 and 3 stay masked for the duration. Level 2 is the
++// servant's frame interrupt and level 3 EmuTOS's tick; with Sega's
++// vector table installed both would run Sega's handlers against
++// EmuTOS's parked variables.
++//
++// Scratch -- stack at 0x7C900, packet at 0x7C000, buffer at 0x7D000 --
++// is above phystop and outside the exchanged region, the only memory
++// on this machine that is both.
++        .globl  _segacd_bios_read
++_segacd_bios_read:
++        move.l  4(sp),d0                // lba
++        move.w  8(sp),d1                // sector count
++        movem.l d1-d7/a0-a6,-(sp)
++        move.w  sr,-(sp)
++        ori.w   #0x0700,sr              // no interrupts across the swap
++        move.b  0xFF8033,d7             // EmuTOS's gate-array mask
++        ext.w   d7
++
++        move.l  sp,a6
++        move.l  #0x7C900,sp             // scratch stack, outside the swap
++
++        movem.l d0-d1/d7,-(sp)
++        bsr     bios_xchg               // Sega's world into low memory
++        movem.l (sp)+,d0-d1/d7
++
++        lea     0x7C000,a5
++        move.l  d0,(a5)                 // start sector
++        ext.l   d1
++        move.l  d1,4(a5)                // sector count
++        move.l  #0x7D000,8(a5)          // destination
++
++        move.b  #0x30,0xFF8033          // CDD and CDC interrupts, nothing else
++        andi.w  #0xF8FF,sr              // clear ALL THREE mask bits --
++        ori.w   #0x0300,sr              // 0xFCFF left bit 10 set, so the
++                                        // ori put it straight back to 7
++                                        // and Sega's handlers never ran
++
++        // Wake the firmware before asking it for anything.
++        //
++        // Its internal state is frozen from the instant of eviction --
++        // half an hour and several thousand of our own drive commands
++        // ago -- so it believes the drive is wherever it last left it
++        // and mid-whatever it was doing. DRV_INIT is how a Sega program
++        // starts a session: read the TOC from track 1, all tracks, and
++        // establish where the disc actually is. It is asynchronous, so
++        // the wait for readiness is on CDB_STAT afterwards.
++        tst.b   _bios_woken
++        bne     brd_awake
++        move.b  #1,0x7C010              // first track
++        move.b  #0xFF,0x7C011           // ...through the last
++        lea     0x7C010,a0
++        move.w  #0x0010,d0              // DRV_INIT
++        jsr     0x5F22
++        move.l  #200000,d4
++brd_wait_init:
++        subq.l  #1,d4
++        jeq     brd_fail_init
++        move.w  #0x0081,d0              // CDB_STAT
++        jsr     0x5F22
++        move.w  (a0),d3                 // status word: low byte is the
++        andi.w  #0x00FF,d3              //  drive state the BIOS believes
++        cmpi.w  #0x0004,d3              // 4 = paused, ready to be read
++        beq     brd_init_done
++        cmpi.w  #0x0001,d3              // 1 = playing, also fine
++        bne     brd_wait_init
++brd_init_done:
++        move.b  #1,_bios_woken
++brd_awake:
++
++        movea.l a5,a0
++        move.w  #0x0089,d0              // CDCSTOP
++        jsr     0x5F22
++        movea.l a5,a0
++        move.w  #0x0020,d0              // ROMREADN
++        jsr     0x5F22
++
++        move.l  #150000,d6              // overall bound; the drive is the
++                                        // clock, but a dead link is not
++brd_stat:
++        subq.l  #1,d6
++        jeq     brd_fail_stat
++        move.w  #0x008A,d0              // CDCSTAT
++        jsr     0x5F22
++        bcs     brd_stat                // no sector ready yet
++brd_read:
++        subq.l  #1,d6
++        jeq     brd_fail_read
++        move.w  #0x008B,d0              // CDCREAD
++        jsr     0x5F22
++        bcc     brd_read
++        movea.l 8(a5),a0                // where this sector goes
++        lea     12(a5),a1               // header scratch
++        move.w  #0x008C,d0              // CDCTRN
++        jsr     0x5F22
++        bcc     brd_read                // transfer incomplete, go again
++        move.w  #0x008D,d0              // CDCACK
++        jsr     0x5F22
++        addq.l  #1,(a5)                 // next sector
++        addi.l  #0x0800,8(a5)
++        subq.l  #1,4(a5)
++        bne     brd_stat
++        moveq   #0,d5                   // every sector delivered
++        bra     brd_done
++        // Each stage names itself, because "it did not work" has cost
++        // enough already: 2 the firmware never reported itself ready,
++        // 3 no sector was ever announced, 4 one was announced and never
++        // came out. Low byte carries the drive state the BIOS believed.
++brd_fail_init:
++        moveq   #2,d5
++        bra     brd_failed
++brd_fail_stat:
++        moveq   #3,d5
++        bra     brd_failed
++brd_fail_read:
++        moveq   #4,d5
++brd_failed:
++        lsl.w   #8,d5
++        or.w    d3,d5
++brd_done:
++        ori.w   #0x0700,sr              // shut the door before swapping back
++        move.b  #0,0xFF8033
++        move.l  d5,-(sp)
++        move.l  d7,-(sp)
++        bsr     bios_xchg               // EmuTOS's world back into place
++        move.l  (sp)+,d7
++        move.l  (sp)+,d5
++        move.b  d7,0xFF8033             // EmuTOS's mask, as we found it
++
++        move.l  a6,sp
++        move.w  (sp)+,sr
++        movem.l (sp)+,d1-d7/a0-a6
++        move.w  d5,d0
++        rts
++
+ // Level 3: gate array timer, 200 Hz system tick
+         .globl  _segacd_int_3
+ _segacd_int_3:

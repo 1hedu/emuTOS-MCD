@@ -1,0 +1,143 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 16 Aug 2026 06:54:43 +0000
+Subject: [PATCH 165/184] Sega CD: the boot signature, and no guard on the
+ internal memory
+
+A FAT volume with no partition table reaches check_for_no_partitions()
+in bios/disk.c only when its root sector ends 55 AA. bram_format() wrote
+a good boot sector and left offsets 510-511 zero, so atari_partition()
+called it a non-ATARI root sector and I: was never allocated a drive
+letter. D: and S: escaped the same fate only because internal_inquire()
+marks them removable and disk_init_one() force-adds a partition to a
+removable unit; the internal backup RAM is soldered down and had no such
+cover. A volume that is already ours but missing the signature has the
+two bytes written in place rather than being reformatted.
+
+bram_probe() also looked for Sega's SEGA_CD_ROM footer and refused to
+format, on the grounds that game saves might be there. Every Mega CD's
+BIOS writes that footer before the owner sees the machine, so the rule
+fired on every console ever built and I: could not work anywhere.
+---
+ bios/segacd.c | 66 +++++++++++++++++++++++++++++++++++----------------
+ 1 file changed, 45 insertions(+), 21 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 0d5484e..a208d62 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -4265,7 +4265,14 @@ void segacd_int_2_c(void)
+ #define CART_LBA    (*(volatile UWORD *)0xFF8024)
+ #define CART_REQ    (*(volatile UWORD *)0xFF8026)   /* (op<<8)|seq */
+ #define CART_ACK    (*(volatile UWORD *)0xFF8018)   /* echoed seq */
+-#define CART_CNT    (*(volatile UWORD *)0xFF801A)   /* sectors, 0 = absent */
++/* Sector count in the low eleven bits -- 16<<6 is 1024, the most a
++ * backup RAM cart can report -- with the servant's probe evidence in
++ * the five above it: bits 11-13 the raw ID byte's low three, bit 14 the
++ * write-enable read back, bit 15 the write/read-back test. CDTEST
++ * prints the lot, so a boot that finds no cart still says which step
++ * failed rather than only that one did. */
++#define CART_CNT    (*(volatile UWORD *)0xFF801A)
++#define CART_CNT_SECTORS (CART_CNT & 0x07FF)
+ 
+ /* Every Mega CD has 8 KB of internal backup RAM on the sub CPU's own
+  * bus at 0xFE0000, odd bytes only — no cartridge, no servant proxy. It
+@@ -4273,15 +4280,15 @@ void segacd_int_2_c(void)
+  * only persistent store available on a stock console (a cartridge in
+  * the slot would make the machine boot the cart instead of the CD).
+  *
+- * It may already hold Sega-format game saves, so we only format it when
+- * it is blank: a Sega-formatted BRAM is left strictly alone. */
++ * It may already hold Sega-format game saves. It gets formatted
++ * anyway -- see bram_probe() -- because a drive that refuses to exist
++ * on every console ever built is worth less than eight kilobytes. */
+ #define BRAM_BASE    0xFE0000UL
+ #define BRAM_BYTES   8192UL
+ #define BRAM_SECTORS (BRAM_BYTES / SECTOR_SIZE)     /* 16 */
+ 
+ #define BRAM_NONE  0
+ #define BRAM_OURS  1
+-#define BRAM_SEGA  2        /* holds game saves: hands off */
+ 
+ static UWORD cart_sectors;
+ static UBYTE cart_seq;
+@@ -4334,6 +4341,15 @@ static void bram_format(void)
+     bram_wr(22, 1); bram_wr(23, 0);                /* sectors per FAT */
+     bram_wr(24, 16); bram_wr(25, 0);               /* sectors per track */
+     bram_wr(26, 1); bram_wr(27, 0);                /* sides */
++    /* The signature the block layer looks for. A volume with no
++     * partition table reaches check_for_no_partitions() in disk.c only
++     * when the root sector ends 55 AA, and this formatter left those two
++     * bytes zero -- so I: never mounted, however well the memory worked.
++     * D: and S: got away with it because internal_inquire() calls the
++     * disc and the cartridge removable and disk_init_one() force-adds a
++     * partition for a removable unit. The internal backup RAM is
++     * soldered down, so nothing covered for it. */
++    bram_wr(510, 0x55); bram_wr(511, 0xAA);
+ 
+     bram_wr(512, 0xF8); bram_wr(513, 0xFF); bram_wr(514, 0xFF);
+     bram_wr(1024, 0xF8); bram_wr(1025, 0xFF); bram_wr(1026, 0xFF);
+@@ -4375,30 +4391,38 @@ static void bram_probe(void)
+     /* already ours? */
+     if (bram_rd(2) == 'E' && bram_rd(3) == 'm'
+      && bram_rd(4) == 'u' && bram_rd(5) == 'T') {
++        /* Volumes written before the signature was added are perfectly
++         * good filesystems that the block layer will not look at. Put
++         * the two bytes in rather than reformatting: whatever is on
++         * there is the user's, and it survives. */
++        if (bram_rd(510) != 0x55 || bram_rd(511) != 0xAA) {
++            bram_wr(510, 0x55);
++            bram_wr(511, 0xAA);
++        }
+         bram_state = BRAM_OURS;
+         return;
+     }
+ 
+-    /* Sega's own format ends with a "SEGA_CD_ROM" marker; if the user's
+-     * game saves live here, leave them be. */
+-    {
+-        for (i = BRAM_BYTES - 64; i < BRAM_BYTES - 10; i++) {
+-            if (bram_rd(i) == 'S' && bram_rd(i + 1) == 'E'
+-             && bram_rd(i + 2) == 'G' && bram_rd(i + 3) == 'A'
+-             && bram_rd(i + 4) == '_') {
+-                bram_state = BRAM_SEGA;
+-                return;
+-            }
+-        }
+-    }
+-
++    /* Anything else gets formatted.
++     *
++     * There was a guard here: find Sega's "SEGA_CD_ROM" footer, assume
++     * game saves, refuse to touch it. It fired on every console ever
++     * made -- the machine's own BIOS formats this memory before the
++     * owner sees it -- so I: never worked anywhere, while the desktop
++     * carried an icon for it that errored when clicked. Narrowing it to
++     * "formatted and not empty" would have been a better guard and
++     * still the wrong idea: this is eight kilobytes on a console that
++     * somebody has deliberately booted a 1985 desktop operating system
++     * on, from a disc they burned to do it. They know what it is for.
++     *
++     * If those saves matter, SRAMTOOL.PRG copies the memory off before
++     * this ever runs. */
+     bram_format();
+     bram_state = BRAM_OURS;
+ }
+ 
+-/* 0 no backup RAM, 1 ours, 2 somebody's game saves. The diagnostic's
+- * log has nowhere to go in states 0 and 2, and "Fcreate -2" on its own
+- * does not say which.
++/* 0 no backup RAM, 1 ours. The diagnostic's log has nowhere to go in
++ * state 0, and "Fcreate -2" on its own does not say why.
+  *
+  * It used to return 3 for "a RAM cart answered, so B: is the cart and
+  * none of this applies". A cartridge no longer displaces the internal
+@@ -4426,7 +4450,7 @@ void segacd_floppy_init(void)
+                   && ADISK_BASE[4] == 'u' && ADISK_BASE[5] == 'T');
+     if (adisk_present)
+         segacd_event(5);
+-    cart_sectors = CART_CNT;    /* published by the servant at startup */
++    cart_sectors = CART_CNT_SECTORS;   /* published by the servant at startup */
+ 
+     /* Both, now, and not one or the other.
+      *

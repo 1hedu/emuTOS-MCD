@@ -1,0 +1,133 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 08:26:03 +0000
+Subject: [PATCH 038/184] segacd: never go silent on the CD drive
+
+The standalone test disc came back green on hardware: the same driver,
+on the same interrupt, with EmuTOS and the screen pump taken away, gets
+the drive to name two different questions. So the protocol is right and
+the fault was in how EmuTOS shares this CPU with the drive.
+
+Diffing the two left one behavioural difference. The test writes a
+command on every exchange -- its command path is fallen into
+unconditionally -- while this driver only wrote when it had a question
+and said nothing in between. The drive will not be talked to
+intermittently: the exchange is a conversation with a turn every 1/75 s
+and missing your turn ends it. So a command always goes out, and the
+VBL rotates which question it is.
+
+Taking a turn 75 times a second made the bus interlock starve the
+screen outright -- the desktop stopped being drawn. The busy flag now
+covers only the register accesses instead of the whole handler.
+---
+ bios/segacd.c | 53 +++++++++++++++++++++++++--------------------------
+ 1 file changed, 26 insertions(+), 27 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 93a258d..0fe361f 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -132,7 +132,6 @@ static UBYTE cdd_score;         /* valid packets in the last 16, latched */
+ static UBYTE cdd_count, cdd_good;
+ static UBYTE cdd_tick;
+ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
+-static UBYTE cdd_repeat;        /* exchanges left to keep asking for */
+ static UBYTE cdd_queued[9];
+ static UBYTE cdd_sent;          /* commands actually handed to the drive */
+ static UBYTE cdd_irqs;          /* level-4 arrivals, for the watchdog */
+@@ -151,6 +150,8 @@ static UBYTE cdd_want;          /* the sub-command last asked for */
+ static UBYTE cdd_answered;      /* the reply named it */
+ static UBYTE cdd_alt;           /* alternates the two search questions */
+ 
++static void cdd_ask(UBYTE cmd, UBYTE sub);
++
+ void segacd_cdd_init(void)
+ {
+     /* Holding A at power-on keeps the link passive. A malformed command
+@@ -177,6 +178,9 @@ void segacd_cdd_init(void)
+         cdd_cmd_on = (UBYTE)((f & 1) ? 0 : 1);
+     }
+ 
++    cdd_ask(CDD_CMD_INFO, 0x03);        /* something to say from the first
++                                         * exchange onwards */
++
+     /* Vector first, then unmask, then start the clock: the first packet
+      * must not arrive before there is something to catch it. */
+     VEC_LEVEL4 = segacd_int_4;
+@@ -262,7 +266,6 @@ static void cdd_ask(UBYTE cmd, UBYTE sub)
+     cdd_queued[3] = sub;
+     cdd_want = sub;
+     cdd_answered = 0;
+-    cdd_repeat = 75;    /* the BIOS's retry budget: one second */
+ }
+ 
+ /* Even with the sequence taken from the BIOS itself, "it should work"
+@@ -334,8 +337,11 @@ void segacd_int_4_c(void)
+      * split *command* is exactly the corruption that killed the link
+      * at the first one, on every build, whatever the sequence. No
+      * emulator reproduces it: their arbitration is instant and neither
+-     * models the transfer window at all. */
+-    *(volatile UWORD *)0xFF8022 |= 0x0008;
++     * models the transfer window at all.
++     *
++     * Raised around the register work only. Held across the whole
++     * handler it covered so much of each 1/75 s that the servant almost
++     * never got the bus and the desktop stopped being drawn at all. */
+ 
+     /* The VBL is a lower level than this one, so it cannot preempt a
+      * handler that keeps being re-entered: if the gate array holds the
+@@ -370,6 +376,7 @@ void segacd_int_4_c(void)
+      * when its condition is true, btst sets Z when the bit is *zero*,
+      * so `btst #1,$FF8037 / dbeq` waits for the bit to clear. Read at
+      * a glance it looks like the opposite, and I read it at a glance. */
++    *(volatile UWORD *)0xFF8022 |= 0x0008;
+     {
+         UWORD n;
+         for (n = 0; n < 512; n++) {
+@@ -394,31 +401,23 @@ void segacd_int_4_c(void)
+     if (*CDD_CTRL_RD & CDD_DTS)
+         *CDD_CTRL_B = CDD_HOCK;
+ 
+-    /* Re-send the same command every exchange until the drive answers
+-     * it. This is the piece every previous attempt was missing: the
+-     * BIOS loads a retry count of 75 -- a full second of exchanges --
+-     * and puts the identical packet out again on each one, giving up
+-     * only when the count runs out. A command is not a message you
+-     * post once; it is a request you hold up until it is taken.
++    /* A command goes out on every exchange, always. Never silent.
+      *
+-     * Both emulators accept a single shot, which is why six discs
+-     * looked fine here and did nothing on silicon.
++     * This is the last behavioural difference between this driver and
++     * the standalone test that went green on the console -- that test
++     * falls into its command write unconditionally, while this one only
++     * wrote when it had a question and said nothing in between. The
++     * drive is evidently not willing to be talked to intermittently:
++     * the exchange is a conversation with a turn every 1/75 s and
++     * missing your turn ends it.
+      *
+-     * Nothing goes out when there is no question outstanding. The BIOS
+-     * does send an idle NOP every exchange, but the one build that
+-     * copied that behaviour was also the one that stopped checksumming
+-     * on hardware, so that stays out until the rest is working. */
+-    if (cdd_repeat) {
+-        cdd_command(cdd_queued);
+-        if (cdd_sent < 0xFF)
+-            cdd_sent++;
+-        if (cdd_answered || --cdd_repeat == 0)
+-            cdd_repeat = 0;
+-        cdd_ctrl_ever |= (UBYTE)(*CDD_CTRL_RD & (CDD_DTS | CDD_DRS));
+-    }
+-
+-    *(volatile UWORD *)0xFF8022 &= (UWORD)~0x0008;   /* bus is yours */
+-
++     * The question itself is rotated by the VBL every 32 frames, so the
++     * same packet repeats for about half a second before changing --
++     * which is also what the BIOS's retry counter amounts to. */
++    cdd_command(cdd_queued);
++    if (cdd_sent < 0xFF)
++        cdd_sent++;
++    cdd_ctrl_ever |= (UBYTE)(*CDD_CTRL_RD & (CDD_DTS | CDD_DRS));
+     /* A boolean cannot tell a dead link from a flaky one. Count how
+      * many of the last sixteen packets checksummed and report that:
+      * F is a clean link, 0 is nothing, anything between is a race. */

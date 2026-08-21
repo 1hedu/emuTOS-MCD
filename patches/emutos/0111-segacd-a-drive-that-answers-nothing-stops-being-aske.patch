@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 09:29:04 +0000
+Subject: [PATCH 111/184] segacd: a drive that answers nothing stops being
+ asked
+
+A failed CD read is expensive on purpose -- Sega's patience is eight
+seconds and this driver adopts it, because a drive that needs a
+re-seek deserves the time. What was never priced in is a drive that
+fails EVERY read. Then it multiplies: one fetch plus five of
+read-ahead per fill, two fills per block, more than one block per
+probe. disk_init_all spent twelve and a half minutes not mounting one
+drive, with the screen showing nothing for all of it, and that is the
+wrong failure. C: is one drive letter, and on this branch EmuTOS,
+IOFW and the A: ramdisk all come out of the cartridge -- nothing about
+reaching a desktop depends on the disc.
+
+Three consecutive failed blocks and the drive is treated as not
+answering; further reads return EREADF immediately. Three because a
+re-seek costs one and the mispair correction can cost another, so two
+is inside ordinary bad luck. Cleared on media change, so putting a
+disc in gets a fresh start.
+
+With that, disk_init_all completes and bios_init runs to its last
+step. An unreadable drive is now an absent icon instead of an absent
+computer.
+
+The boot traces also move to 0xFF802E and are read live rather than as
+a high-water mark. 0xFF8020 becomes the screen base once EmuTOS is up,
+and a high-water read cannot see past a nested code that outranks
+everything after it -- E3FF hid every bios_init step from 32 on.
+---
+ bios/bios.c   |  2 +-
+ bios/disk.c   |  4 ++--
+ bios/segacd.c | 36 ++++++++++++++++++++++++++++++++++++
+ bios/segacd.h |  1 +
+ 4 files changed, 40 insertions(+), 3 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 8d80dda..882a143 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -217,7 +217,7 @@ extern PFVOID vbl_list[8]; /* Default array for vblqueue */
+  * out of the comm register, and it costs a word store per init call on
+  * a path that runs once. */
+ #ifdef MACHINE_SEGACD
+-#define SCTRACE(n) (*(volatile UWORD *)0xFF8020 = (UWORD)(0xE100u + (n)))
++#define SCTRACE(n) (*(volatile UWORD *)0xFF802E = (UWORD)(0xE100u + (n)))
+ #else
+ #define SCTRACE(n)
+ #endif
+diff --git a/bios/disk.c b/bios/disk.c
+index 94eb536..aab7b68 100644
+--- a/bios/disk.c
++++ b/bios/disk.c
+@@ -329,7 +329,7 @@ void disk_init_all(void)
+         UWORD unit = NUMFLOPPIES + majors[i];
+ #ifdef MACHINE_SEGACD
+         /* Which unit swallowed the boot, if one does. */
+-        *(volatile UWORD *)0xFF8020 = (UWORD)(0xE300u + unit);
++        *(volatile UWORD *)0xFF802E = (UWORD)(0xE300u + unit);
+ #endif
+         disk_init_one(unit,&devices_available);
+         if (!devices_available) {
+@@ -344,7 +344,7 @@ void disk_init_all(void)
+      * also save bitmap of removable drives
+      */
+ #ifdef MACHINE_SEGACD
+-    *(volatile UWORD *)0xFF8020 = 0xE3FF;       /* every unit probed */
++    *(volatile UWORD *)0xFF802E = 0xE3FF;       /* every unit probed */
+ #endif
+     for (i = 0; i < UNITSNUM; i++)  /* initialise */
+         units[i].drivemap = 0L;
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 732eb96..a0fdd90 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2598,18 +2598,54 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+ }
+ 
+ /* The block-layer entry point. Read only: it is a compact disc. */
++/* Consecutive failed blocks before the drive is treated as not
++ * answering, and stops being asked.
++ *
++ * A failed read is expensive on purpose: Sega's own patience is eight
++ * seconds and this driver adopts it, because a drive that needs a
++ * re-seek deserves the time. What was never priced in is a drive that
++ * fails EVERY read. Then the cost multiplies -- one fetch plus five of
++ * read-ahead per fill, two fills per block, more than one block per
++ * probe -- and disk_init_all spends twelve minutes not mounting a
++ * drive, with the machine showing nothing the whole time.
++ *
++ * That is what a Mode 1 boot does today, and it is the wrong failure.
++ * C: is one drive letter; on this branch EmuTOS, IOFW and the A:
++ * ramdisk all come out of the cartridge, so nothing about reaching a
++ * desktop depends on the disc. A drive that cannot be read should be
++ * an absent icon, not an absent computer.
++ *
++ * Three, because a re-seek costs one and the mispair correction can
++ * cost another, so two is inside the range of ordinary bad luck.
++ * Cleared on media change, so putting a disc in gets a fresh start. */
++#define CD_DEADRUN 3
++
++static UBYTE cd_deadrun;        /* consecutive failed blocks */
++static UBYTE cd_dead;           /* ...and the latch they set */
++
++void segacd_cd_revive(void)
++{
++    cd_deadrun = 0;
++    cd_dead = 0;
++}
++
+ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+ {
+     if (rw & RW_WRITE)
+         return EWRPRO;
+     if (sector < 0 || (ULONG)sector + count > CD_DDISK_BLOCKS)
+         return ESECNF;
++    if (cd_dead)                /* answer immediately, as it has been */
++        return EREADF;
+ 
+     while (count--) {
+         if (!cd_read_block((ULONG)sector, buf)) {
++            if (++cd_deadrun >= CD_DEADRUN)
++                cd_dead = 1;
+             cd_park();
+             return EREADF;
+         }
++        cd_deadrun = 0;
+         sector++;
+         buf += SECTOR_SIZE;
+     }
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 20ab9ab..43d355d 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -33,6 +33,7 @@ void segacd_keyclick(void);
+ 
+ /* D: -- a filesystem read off the disc itself, through the CDC */
+ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
++void segacd_cd_revive(void);   /* the drive gets another chance */
+ LONG segacd_cd_ioctl(WORD op, void *arg);
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,

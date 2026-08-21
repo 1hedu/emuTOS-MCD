@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 21:32:22 +0000
+Subject: [PATCH 086/184] segacd: the cache cannot be larger than the chip's
+ buffer
+
+Pooled hardware failures -- 1608, 1617, 1618, 1620 -- land late in a
+read run and never early: 1608 ends a FAT walk that began at 1600,
+the others follow a root scan that began at 1616. Position within the
+run, not position on the disc.
+
+Twelve per fill was set on the reasoning that one seek should serve a
+whole structure. The reasoning was right and the number was not: the
+decoder's RAM is 16 KB and a block is 2352 bytes, so it holds 6.9,
+and the recycler was measured arriving at five. The last five sectors
+of every twelve were overwritten before the read reached them.
+
+Six is what one streaming pass can actually carry.
+---
+ bios/segacd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 036e3e0..25b093c 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2106,7 +2106,7 @@ static void cd_park(void)
+  * milliseconds apart and free -- Lunar drains everything available
+  * before it yields, for this reason -- so the only cost of taking
+  * twelve is the buffer. */
+-#define CD_CACHE_SECTORS 12
++#define CD_CACHE_SECTORS 6
+ 
+ static UBYTE cd_cache[CD_CACHE_SECTORS][CDC_DATA_BYTES];
+ 

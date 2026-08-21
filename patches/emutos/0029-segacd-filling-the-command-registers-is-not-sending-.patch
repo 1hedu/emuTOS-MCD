@@ -1,0 +1,162 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 05:13:12 +0000
+Subject: [PATCH 029/184] segacd: filling the command registers is not sending
+ them
+
+The drive answered 0xF -- "invalid" -- to all seven probes, including
+get-status, which asks for nothing and cannot be out of range. A drive
+that refuses even that is not refusing the question; it never heard
+one.
+
+megadev's register map, vendored in this repository the whole time,
+documents $FF8037 as three bits and not one. Bit 0 (DTS) means a
+command is transferring out to the CDD, bit 1 (DRS) means a status
+packet is transferring in, and both take a written 0 to abort. Bit 2
+(HOCK) is documented as "starts communication with the CDD".
+
+So two things were wrong. `|= HOCK` is a read-modify-write on a
+register whose low two bits are the gate array's own in-flight state,
+handing them back to it; that is now a plain word write. And HOCK
+reads as a strobe rather than a level -- enough, set once, for the
+drive's unprompted reports, but a command plausibly needs its own
+start -- so it is pulsed after every command.
+
+Rather than argue the point, measure it: DTS and DRS are sampled and
+latched, so the status line reports whether a command was ever
+transferred at all as distinct from written into registers. Both
+emulators hard-wire those bits to zero, so the driver waits on them
+for at most eight interrupts before sending anyway, in case silicon
+holds one high and would otherwise stop commands silently.
+---
+ bios/segacd.c | 68 ++++++++++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 57 insertions(+), 11 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index d147df6..286cf1a 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -97,10 +97,24 @@ const UBYTE *segacd_physbase(void)
+  * raises level 4 when a status packet has landed, and that interrupt is
+  * the one moment the window is quiet -- so all CDD work happens there,
+  * which is exactly what the CDBIOS we evicted was doing. */
+-#define CDD_CTRL    ((volatile UBYTE *)0xFF8037)
++/* The control register's low two bits are not ours to write back.
++ * DTS says a command is on its way out to the drive and DRS says a
++ * status packet is on its way in, and both are documented as taking a
++ * written 0 to *abort* the transfer -- so the obvious `|= HOCK`
++ * read-modify-write reads whatever the gate array is busy doing and
++ * writes it straight back at it. Set the register, never adjust it.
++ *
++ * HOCK is documented as "starts communication with the CDD", which
++ * reads as a strobe rather than a level, so it goes down again after
++ * every command rather than once at boot. Setting it while it is
++ * already set costs nothing if it turns out to be a level. */
++#define CDD_CTRL    ((volatile UWORD *)0xFF8036)
++#define CDD_CTRL_RD ((const volatile UBYTE *)0xFF8037)
+ #define CDD_STATUS  ((const volatile UBYTE *)0xFF8038)
+ #define CDD_CMD     ((volatile UBYTE *)0xFF8042)
+ #define CDD_HOCK    0x04
++#define CDD_DTS     0x01        /* command going out to the drive */
++#define CDD_DRS     0x02        /* status coming in from the drive */
+ 
+ /* Command packet: nibble 0 is the command, 1-8 its parameters, 9 the
+  * checksum. Writing the last nibble is what hands it to the drive, so
+@@ -127,6 +141,9 @@ static UWORD cdd_burst;         /* level-4 arrivals since the VBL last ran */
+ static UBYTE cdd_stormed;       /* level 4 was masked off to save the machine */
+ static UBYTE cdd_probe;         /* which question we are asking */
+ static UBYTE subvbl;            /* the sub CPU's own heartbeat */
++static UBYTE cdd_ctrl;          /* DTS/DRS as last sampled */
++static UBYTE cdd_ctrl_ever;     /* DTS/DRS ever seen set at all */
++static UBYTE cdd_blocked;       /* interrupts spent waiting for DTS/DRS */
+ 
+ void segacd_cdd_init(void)
+ {
+@@ -158,7 +175,7 @@ void segacd_cdd_init(void)
+      * must not arrive before there is something to catch it. */
+     VEC_LEVEL4 = segacd_int_4;
+     GA_INTMASK |= 0x10;
+-    *CDD_CTRL |= CDD_HOCK;      /* start the 75 Hz status reports */
++    *CDD_CTRL = CDD_HOCK;       /* start the 75 Hz status reports */
+ }
+ 
+ /* Written as five 16-bit registers, two nibbles to a word, rather than
+@@ -179,7 +196,13 @@ static void cdd_command(const UBYTE *nib)       /* nine nibbles */
+     w[1] = (UWORD)((nib[2] << 8) | nib[3]);
+     w[2] = (UWORD)((nib[4] << 8) | nib[5]);
+     w[3] = (UWORD)((nib[6] << 8) | nib[7]);
+-    w[4] = (UWORD)((nib[8] << 8) | ((~sum) & 0x0F));    /* this sends it */
++    w[4] = (UWORD)((nib[8] << 8) | ((~sum) & 0x0F));
++
++    /* And now start the transfer. Filling the registers is not sending
++     * them: the drive answered "invalid" to every question including
++     * the one that asks for nothing, which is what a drive says when it
++     * is reporting on its own and never heard the question at all. */
++    *CDD_CTRL = CDD_HOCK;
+ }
+ 
+ /* Ask the drive something, cycling through the questions.
+@@ -238,6 +261,8 @@ static void cdd_poll(void)
+  * in cdd_queued for this handler to post. */
+ void segacd_int_4_c(void)
+ {
++    UBYTE ctrl;
++
+     /* The VBL is a lower level than this one, so it cannot preempt a
+      * handler that keeps being re-entered: if the gate array holds the
+      * request asserted, nothing below level 4 ever runs again and the
+@@ -263,11 +288,30 @@ void segacd_int_4_c(void)
+     cdd_irqs++;
+     cdd_poll();
+ 
++    /* Whether the gate array is actually carrying anything, latched as
++     * well as sampled: these two bits are the difference between "we
++     * wrote the command registers" and "the drive was sent a command",
++     * and assuming the first meant the second is what left every reply
++     * reading `invalid`. If DTS is never once seen set, nothing we
++     * write is reaching the drive, whatever the registers say. */
++    ctrl = *CDD_CTRL_RD;
++    cdd_ctrl = (UBYTE)(ctrl & (CDD_DTS | CDD_DRS));
++    cdd_ctrl_ever |= cdd_ctrl;
++
++    /* Hold off while the gate array is mid-transfer, but not for ever:
++     * these bits read as a constant zero under both emulators, so if
++     * silicon holds one high the wait would be silent and permanent,
++     * and a test disc would come back with nothing sent and no reason
++     * given. Eight refusals and it goes anyway -- the latch above
++     * still records what the bits were doing. */
+     if (cdd_pending) {
+-        cdd_pending = 0;
+-        cdd_command(cdd_queued);
+-        if (cdd_sent < 0xFF)
+-            cdd_sent++;
++        if (!(ctrl & (CDD_DTS | CDD_DRS)) || ++cdd_blocked >= 8) {
++            cdd_blocked = 0;
++            cdd_pending = 0;
++            cdd_command(cdd_queued);
++            if (cdd_sent < 0xFF)
++                cdd_sent++;
++        }
+     }
+ 
+     /* A boolean cannot tell a dead link from a flaky one. Count how
+@@ -507,13 +551,15 @@ void segacd_int_2_c(void)
+         | ((UWORD)(subvbl & 0x0F) << 4)
+         |  (UWORD)(cdd_probe & 0x0F));
+ 
+-    /* What the drive last said: its state, whether it accepted the
+-     * question (nibble 1, 0xF meaning it did not), its track flags,
+-     * and the minutes of whatever position it reported. */
++    /* What the drive last said -- its state, whether it accepted the
++     * question (nibble 1, 0xF meaning it did not), its track flags --
++     * and then the one reading that says whether it was ever asked:
++     * DTS and DRS live in the low two bits, the same two latched in
++     * the high two. Minutes lost its place to that, and deserved to. */
+     *(volatile UWORD *)0xFF8028 = (UWORD)(((UWORD)cdd_stat[0] << 12)
+         | ((UWORD)cdd_stat[1] << 8)
+         | ((UWORD)cdd_stat[8] << 4)
+-        |  (UWORD)cdd_stat[3]);
++        |  (UWORD)(cdd_ctrl | (cdd_ctrl_ever << 2)));
+ 
+     /* Sound telemetry, packed into the spare bits of the drive status
+      * word: no comm register is free, and this answers the only

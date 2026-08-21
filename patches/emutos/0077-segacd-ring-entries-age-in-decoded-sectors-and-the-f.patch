@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 19:11:58 +0000
+Subject: [PATCH 077/184] segacd: ring entries age in decoded sectors, and the
+ freshest one wins
+
+wait 9 on hardware -- the first read commands ever confirmed reaching
+the drive -- and wrong 37 naming what remains: the hover parks the
+head exactly where the last fill ended, so the ring constantly holds
+current-looking entries for the very sectors a file read wants next,
+while their buffer pointers go stale within seven sector times as the
+hover recycles the decoder's RAM. A position-based staleness test
+cannot see recycling that never moves.
+
+Entries now carry their age in sectors-decoded-since-insertion -- the
+unit decoder RAM is actually recycled in -- and a lookup takes the
+freshest matching entry, refusing anything older than four. The hover
+works for us instead of against us: it re-inserts the sectors it loops
+over on every pass, so a fresh copy of a hovered sector is normally in
+the ring, pointer valid, and sequential reads can be served straight
+out of the hover without a seek.
+---
+ bios/segacd.c | 45 ++++++++++++++++++++++++++++-----------------
+ 1 file changed, 28 insertions(+), 17 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 1e31f0a..9464d0d 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -269,6 +269,7 @@ static UWORD cd_seeks, cd_hits; /* seeks against sectors simply waited for */
+ 
+ static volatile ULONG cd_ring_lba[CD_RING];
+ static volatile UWORD cd_ring_pt[CD_RING];
++static volatile UBYTE cd_ring_age[CD_RING];     /* cdc_ints at insertion */
+ static volatile UBYTE cd_ring_head;
+ static volatile ULONG cd_ring_newest = 0xFFFFFFFFUL;
+ 
+@@ -282,28 +283,38 @@ static void cd_ring_reset(void)
+     cd_ring_newest = 0xFFFFFFFFUL;
+ }
+ 
++static volatile UBYTE cdc_ints;         /* sectors the decoder has reported;
++                                         * declared here because the ring's
++                                         * freshness is measured in it */
++
+ static BOOL cd_ring_find(ULONG lba, UWORD *pt)
+ {
+-    UBYTE i;
+-
+-    /* An entry is only as good as the decoder's buffer is deep -- five
+-     * or six sectors -- because the decoder keeps writing while the
+-     * foreground gets round to reading. An entry the stream has since
+-     * lapped points at some newer sector's bytes, and until the header
+-     * check existed, spending one delivered that newer sector with a
+-     * straight face: the ring said 1600, the buffer held 1606. Refuse
+-     * anything the stream has moved more than four past; a refusal
+-     * costs one seek, a stale hit used to cost silent corruption. */
+-    if (cd_ring_newest != 0xFFFFFFFFUL && cd_ring_newest > lba + 4)
+-        return FALSE;
+-
++    UBYTE i, best = 0xFF, age;
++    BOOL found = FALSE;
++
++    /* An entry's pointer is only as good as it is RECENT: the decoder's
++     * buffer is about seven sectors deep and the drive hovers between
++     * reads, re-reading one track continuously -- so decoder RAM is
++     * recycled every seventh of a second even when the position never
++     * moves. A position-based staleness test cannot see that; thirty-
++     * seven wrong-sector grabs on hardware were entries whose LBA
++     * looked current while their buffer slot had been rewritten by the
++     * hover. Age is measured in sectors decoded since insertion, the
++     * same unit the buffer is recycled in; the hover re-inserts the
++     * sectors it loops over every pass, so a fresh copy of the wanted
++     * entry is normally present -- take the freshest, refuse anything
++     * older than four. */
+     for (i = 0; i < CD_RING; i++) {
+         if (cd_ring_lba[i] == lba) {
+-            *pt = cd_ring_pt[i];
+-            return TRUE;
++            age = (UBYTE)(cdc_ints - cd_ring_age[i]);
++            if (age <= 4 && age < best) {
++                best = age;
++                *pt = cd_ring_pt[i];
++                found = TRUE;
++            }
+         }
+     }
+-    return FALSE;
++    return found;
+ }
+ 
+ /* Whether D: has ever been read: bit 0 tried, bit 1 succeeded.
+@@ -809,7 +820,6 @@ void segacd_int_4_c(void)
+  * ends at 0x60000, so none of this is in anyone's way. */
+ #define CDSECT      ((UBYTE *)0x7F800)
+ 
+-static volatile UBYTE cdc_ints; /* sectors the decoder has reported */
+ static UBYTE cdc_head[4];       /* header of the one it reported last */
+ static UBYTE cdc_stat4[4];      /* STAT0-3 with it */
+ static UBYTE cdc_want[3];       /* the header we are waiting for, BCD */
+@@ -993,6 +1003,7 @@ void segacd_int_5_c(void)
+             lba -= 150UL;
+             cd_ring_lba[k] = lba;
+             cd_ring_pt[k] = cdc_pt_last;
++            cd_ring_age[k] = cdc_ints;
+             cd_ring_head = (UBYTE)((k + 1) % CD_RING);
+             cd_ring_newest = lba;
+         }

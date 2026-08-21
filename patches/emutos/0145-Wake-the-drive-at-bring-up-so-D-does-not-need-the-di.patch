@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 09:41:01 +0000
+Subject: [PATCH 145/184] Wake the drive at bring-up, so D: does not need the
+ diagnostic
+
+D: has only ever been readable after a person launched CDTEST and let
+it reach round 3. That is not a quirk of the diagnostic: rounds 1 and 2
+hand the disc to the parked firmware with DRV_INIT on, and round 3
+takes it back and reads the filesystem with this driver. Round 3 alone
+does nothing. Nothing on a normal boot calls DRV_INIT, and this drive
+does not leave its no-information state without it, so at the desktop
+the D: icon opens on an error no number of retries can clear.
+
+Doom does exactly this and says so: three DRV_INIT sites in its sub
+program, one of them the second instruction of its bring-up, followed
+immediately by CDCSETMODE. The comment in this file claiming no Sega
+read path calls DRV_INIT was wrong and the console had already said so.
+
+So: a sector count of zero now asks segacd_bios_read for the wake and
+not the read -- everything above brd_awake, which is DRV_INIT and the
+wait for a state a read may start from, and nothing below it. cd_fetch
+does the reading afterwards, as it does today.
+
+It fires on the first block anyone asks for, which is the boot probe,
+so the drive is awake before disk_init_all decides whether D: has a
+filesystem. One visit, about two seconds on the console measured
+between diagnostic rounds.
+
+The cost when there is no disc: DRV_INIT is allowed twenty seconds
+before it gives up, and the cartridge loader already spends up to
+twenty of its own waiting for the drive, so an empty tray now delays
+the desktop twice over. Worth fixing, not worth blocking this on.
+
+Emulator: woke=1, cd_dtest 0x403 -- tried, succeeded, woken -- cd_why
+0, header 00 23 25 01, and the status line reads DY at the desktop
+with nothing launched by hand.
+---
+ bios/scdapi.h  | 10 +++++++++-
+ bios/segacd.c  | 34 +++++++++++++++++++++++++++++++++-
+ bios/segacd2.S | 15 +++++++++++++++
+ 3 files changed, 57 insertions(+), 2 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index d44878c..a2e9d1c 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  12
++#define SCD_VERSION  14
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -115,6 +115,14 @@ struct scd_snap {
+      * contents question. Until that changes, cdd_ask_next() never
+      * leaves cdd_confirm() and the whole probe rotation, disc length
+      * included, has never run. */
++    /* Did bring-up get the parked firmware to wake the drive? 0 never
++     * asked (no BIOS parked), 1 DRV_INIT succeeded, 2 it was asked and
++     * would not. Nothing else on a normal boot calls DRV_INIT, and this
++     * drive does not leave its no-information state without it -- so
++     * before this existed, D: was readable only after a person launched
++     * the diagnostic and let it reach round 3. */
++    unsigned char  woke;
++
+     unsigned char  cddtoc;              /* cdd_ok: two different subs echoed */
+     unsigned char  cddsub;              /* the last nibble 1 seen */
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 3c328ed..becf4ff 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -578,6 +578,9 @@ static BOOL cd_ring_find(ULONG lba, UWORD *pt)
+  * disc through this exact path, and every read after that either works
+  * or shows up in the error count beside it. */
+ static UBYTE cd_dtest;
++static UBYTE cd_woke;           /* 1 the firmware woke the drive for us,
++                                 * 2 it was asked and would not */
++
+ 
+ static UBYTE cdc_altctrl;       /* holding B picks the other CDC control pair;
+                                  * declared here because the init that reads
+@@ -1955,7 +1958,8 @@ static void cdr_report(void)
+      * a live value, re-read every report. */
+     CDREPORT[27] = (UWORD)(cd_dtest
+                          | (cd_dead ? 0x100 : 0)
+-                         | (cd_deadrun ? 0x200 : 0));
++                         | (cd_deadrun ? 0x200 : 0)
++                         | ((UWORD)cd_woke << 10));
+     CDREPORT[28] = cd_why;
+     /* The drive's own state, nibble 0 of its status packet. The
+      * BIOS dispatches sixteen ways on this byte at $140E and this
+@@ -2975,6 +2979,33 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+             cd_ts = 1;
+             cd_ts_cmdsave = cdd_cmd_on;
+             cdd_cmd_on = 0;     /* our VBL stops talking to the drive */
++        } else if (segacd_bios_available()) {
++            /* Otherwise: let the firmware wake the drive, once, and
++             * then read it ourselves.
++             *
++             * This is the shape the console arrived at by hand and it
++             * took three rounds of a diagnostic to see it. Rounds 1 and
++             * 2 handed the disc to the parked firmware with DRV_INIT
++             * on; round 3 took it back and read the filesystem with
++             * this driver -- Getbpb, Dfree, Fsfirst, Fopen, Fread, all
++             * of them, on the first try. Round 3 alone does nothing,
++             * because nothing else on a normal boot ever calls
++             * DRV_INIT, and this drive does not leave its
++             * no-information state without it. So D: has only ever been
++             * readable after a person launched CDTEST.
++             *
++             * Doom does the same thing and says so plainly: three
++             * DRV_INIT sites in its sub program, one of them the second
++             * instruction of its bring-up. The note in this file
++             * claiming no Sega read path calls DRV_INIT was wrong.
++             *
++             * A count of zero asks segacd_bios_read for the wake and
++             * not the read. It costs one visit -- about two seconds on
++             * the console, measured between diagnostic rounds -- and it
++             * happens on the first block anyone asks for, which is the
++             * boot probe, so the drive is awake before disk_init_all
++             * decides whether D: has a filesystem. */
++            cd_woke = (UBYTE)(segacd_bios_read(0UL, 0) == 0 ? 1 : 2);
+         }
+     }
+ 
+@@ -3604,6 +3635,7 @@ static void scd_snapshot(struct scd_snap *s)
+     s->cddmask = cdd_statemask;
+     s->cddfirst = cdd_first;
+     s->cddftick = cdd_firsttick;
++    s->woke = cd_woke;
+     s->cddtoc = cdd_ok;
+     s->cddsub = cdd_stat[1];
+ 
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 45aa3c1..9b3fb2e 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -612,6 +612,21 @@ brd_init_done:
+         clr.l   _segacd_bios_frames
+         move.b  #1,_bios_woken
+ brd_awake:
++        // A count of zero means "wake the drive and nothing else".
++        //
++        // Everything above this line is the part D: actually needs from
++        // the firmware: DRV_INIT, which spins the disc up, reads the
++        // table of contents and leaves the drive in a state a read may
++        // start from. Everything below is a read this driver would
++        // rather perform itself, and does -- the console's round 3 is
++        // our own CDC path, and it works, but only because rounds 1 and
++        // 2 had run DRV_INIT first.
++        //
++        // Nothing on a normal boot ran it, which is why D: has been
++        // unusable until the diagnostic was launched by hand. Splitting
++        // the wake out of the read is what lets bring-up call it.
++        tst.l   4(a5)
++        beq     brd_done                // stage stays zero: woken, no read
+ 
+         movea.l a5,a0
+         move.w  #0x0089,d0              // CDCSTOP

@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Mon, 17 Aug 2026 22:45:08 +0000
+Subject: [PATCH 166/184] Sega CD: the VBL status rotation could overwrite an
+ unsent command
+
+The 32-frame status question is suspended while a sector read is
+outstanding, because the drive takes one command at a time. It was not
+suspended while a command sat queued and unsent.
+
+cdd_handover means somebody has put a packet in cdd_next for the CDD
+interrupt to collect. The rotation writes cdd_next as well, so landing
+in that window replaces the queued command with a status query and the
+original never goes out. Nothing reports it: the caller queued, the
+interrupt sent, the drive answered. What went out was simply not what
+was asked for.
+
+SCD_EJECT is where it shows: the tray does not open, and EJECT.PRG
+carries on and closes it again, which is exactly the report from the
+console -- no tray, no hang, a clean return.
+---
+ bios/scdapi.h | 24 ++++++++++++++++++++++++
+ bios/segacd.c | 14 ++++++++++++--
+ 2 files changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index ce99a95..b984b74 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -157,6 +157,30 @@ struct scd_snap {
+ #define SCD_EJECT         9             /* open the tray (drive cmd $D) */
+ #define SCD_RELOAD        10            /* close it and remount from zero */
+ 
++/* Where the servant publishes the controller, for programs that have to
++ * read it directly.
++ *
++ * It is here, in the header both sides already agree on, because it has
++ * moved once. The pad used to ride in GA_CMD1, which also carries the
++ * buttons held at power-on; one register carrying two things lost the
++ * CD boot a race, so the pad went to GA_CMD3's top byte. CDTEST was
++ * updated and EJECT.PRG was not, and EJECT.PRG then sat forever in
++ * `while (!(PADWORD & PAD_A));` against a register whose bit 6 is never
++ * set -- which looked like the CD driver hanging the machine, and cost
++ * a day of looking at the CD driver.
++ *
++ * The sub CPU sees main's GA_CMD3 at 0xFF8016. The pad byte is bit 0 up
++ * through bit 7 Start, shifted into the top half. */
++#define SCD_PADWORD  (*(volatile unsigned short *)0x00FF8016L)
++#define SCD_PAD_UP     0x0100
++#define SCD_PAD_DOWN   0x0200
++#define SCD_PAD_LEFT   0x0400
++#define SCD_PAD_RIGHT  0x0800
++#define SCD_PAD_B      0x1000
++#define SCD_PAD_C      0x2000
++#define SCD_PAD_A      0x4000
++#define SCD_PAD_START  0x8000
++
+ struct scd_api {
+     unsigned short size;                /* sizeof(struct scd_api) */
+     unsigned short version;
+diff --git a/bios/segacd.c b/bios/segacd.c
+index a208d62..e9f17ac 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -4077,8 +4077,18 @@ void segacd_int_2_c(void)
+      *
+      * Suspended while a sector read is outstanding: the drive gets one
+      * command at a time, and rotating a status query into the middle of
+-     * a read would end it. */
+-    if (cdd_cmd_on && !cd_busy
++     * a read would end it.
++     *
++     * And suspended while any command is queued but unsent. cdd_handover
++     * means somebody has put a packet in cdd_next for the interrupt to
++     * pick up, and this rotation writes cdd_next too: land in that
++     * window and the queued command is overwritten by a status query
++     * and never goes out. Nothing reports it, because everything here
++     * succeeded -- the caller queued, the interrupt sent, the drive
++     * answered. It is just that what went out was not what was asked
++     * for. SCD_EJECT is the visible casualty: the tray does not open and
++     * the program carries on to close it again. */
++    if (cdd_cmd_on && !cd_busy && !cdd_handover
+             && cdr_state != CDR_COMMAND && cdr_state != CDR_STREAM
+             && ++cdd_tick >= 32) {
+         cdd_tick = 0;

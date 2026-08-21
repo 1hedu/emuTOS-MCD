@@ -1,0 +1,151 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 09:14:35 +0000
+Subject: [PATCH 044/184] segacd: make the CDD transfers the same instructions
+ as the working code
+
+The C was verified correct against its own disassembly: right widths,
+right order, right indices, checksum summing 0-8 and comparing against
+byte 9. The algorithm was never wrong.
+
+What differed from the standalone test that works on hardware was the
+addressing mode. Absolute-long costs three instruction-fetch cycles per
+transfer, so
+
+    movel ff8038,%d0 / movel %d0,dst / movel ff803c,%d0 / ...
+
+spreads the first read to the last over roughly two and a half times
+the window of
+
+    movel %a0@+,%a1@+ / movel %a0@+,%a1@+ / movew %a0@+,%a1@+
+
+which is what the BIOS uses and what the green test uses. Rather than
+argue about whether that width is enough to matter, the difference is
+gone: both transfers are now assembler, emitting exactly those three
+instructions.
+
+Verified in the object file, not assumed.
+---
+ bios/segacd.c  | 31 ++++++++++++-------------------
+ bios/segacd.h  |  2 ++
+ bios/segacd2.S | 32 ++++++++++++++++++++++++++++++++
+ 3 files changed, 46 insertions(+), 19 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index adfeda7..618603a 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -138,6 +138,8 @@ static UBYTE cdd_tick;
+ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
+ static UBYTE cdd_queued[9];
+ static UBYTE cdd_next[9];       /* built by the VBL, taken by level 4 */
++static ULONG cdd_outbuf[3];     /* aligned: the write below is long-wide */
++#define cdd_out ((UBYTE *)cdd_outbuf)
+ static UBYTE cdd_handover;
+ static UBYTE cdd_sent;          /* commands actually handed to the drive */
+ static UBYTE cdd_irqs;          /* level-4 arrivals, for the watchdog */
+@@ -220,23 +222,21 @@ void segacd_cdd_init(void)
+  * after it. Order matters here in a way it does not in a mailbox. */
+ static void cdd_command(const UBYTE *nib)       /* nine nibbles */
+ {
+-    volatile ULONG *l = (volatile ULONG *)0xFF8042;
+-    volatile UWORD *w = (volatile UWORD *)0xFF804A;
+     UBYTE sum = 0;
+     int i;
+ 
+     for (i = 0; i < 9; i++)
+         sum = (UBYTE)(sum + nib[i]);
+ 
+-    /* Long, long, word -- the shape the BIOS uses. Each long is two
+-     * bus cycles on a 68000, so this is five word writes in the same
+-     * order; it is written this way to stay recognisably the same
+-     * sequence as the code it was taken from. */
+-    l[0] = ((ULONG)nib[0] << 24) | ((ULONG)nib[1] << 16)
+-         | ((ULONG)nib[2] << 8)  |  (ULONG)nib[3];
+-    l[1] = ((ULONG)nib[4] << 24) | ((ULONG)nib[5] << 16)
+-         | ((ULONG)nib[6] << 8)  |  (ULONG)nib[7];
+-    w[0] = (UWORD)((nib[8] << 8) | ((~sum) & 0x0F));
++    /* Handed to the assembler routine so the instructions are the
++     * BIOS's, not the compiler's approximation of them. */
++    cdd_out[0] = nib[0]; cdd_out[1] = nib[1];
++    cdd_out[2] = nib[2]; cdd_out[3] = nib[3];
++    cdd_out[4] = nib[4]; cdd_out[5] = nib[5];
++    cdd_out[6] = nib[6]; cdd_out[7] = nib[7];
++    cdd_out[8] = nib[8];
++    cdd_out[9] = (UBYTE)((~sum) & 0x0F);
++    segacd_cdd_put(cdd_out);
+ }
+ 
+ /* Ask the drive something, cycling through the questions.
+@@ -333,14 +333,7 @@ static void cdd_poll(void)
+      * long/long/word and passed; this one did not and failed. I wrote
+      * "long, long, word" in the notes, implemented it for the command
+      * write, and never looked at the read. */
+-    {
+-        volatile ULONG *src = (volatile ULONG *)CDD_STATUS;
+-        ULONG *dst = (ULONG *)cdd_raw;
+-
+-        dst[0] = src[0];
+-        dst[1] = src[1];
+-        *(UWORD *)(cdd_raw + 8) = *(volatile UWORD *)(CDD_STATUS + 8);
+-    }
++    segacd_cdd_fetch(cdd_raw);
+ 
+     for (i = 0; i < 10; i++)
+         cdd_stat[i] = (UBYTE)(cdd_raw[i] & 0x0F);
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 5fdc193..83285f5 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -48,6 +48,8 @@ void segacd_int_3(void);        /* INT3: gate array timer, 200 Hz */
+ void segacd_int_4(void);        /* INT4: CDD status packet, 75 Hz */
+ void segacd_int_2_c(void);
+ void segacd_int_4_c(void);
++void segacd_cdd_fetch(UBYTE *dst);      /* ten status bytes, BIOS form */
++void segacd_cdd_put(const UBYTE *src);  /* ten command bytes, BIOS form */
+ void segacd_call_5ms(void);
+ 
+ #endif /* MACHINE_SEGACD */
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 7af1c6c..f32f59a 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -44,6 +44,38 @@ _segacd_int_4:
+         movem.l (sp)+,d0-d1/a0-a1
+         rte
+ 
++// The CDD status read and command write, as instructions rather than as
++// C.
++//
++// The C versions were verified correct against their own disassembly --
++// right registers, right widths, right order. But absolute-long
++// addressing costs three instruction-fetch cycles per transfer, so the
++// window between the first read and the last is about two and a half
++// times wider than the BIOS's, and the standalone test that works on
++// hardware uses the BIOS's form. Rather than argue about whether that
++// width matters, this removes the difference: these are now the same
++// instructions, in the same order, as the code known to work.
++//
++// void segacd_cdd_fetch(UBYTE *dst)   ten status bytes
++        .globl  _segacd_cdd_fetch
++_segacd_cdd_fetch:
++        move.l  4(sp),a1
++        lea     0xFF8038,a0
++        move.l  (a0)+,(a1)+
++        move.l  (a0)+,(a1)+
++        move.w  (a0)+,(a1)+
++        rts
++
++// void segacd_cdd_put(const UBYTE *src)   ten command bytes
++        .globl  _segacd_cdd_put
++_segacd_cdd_put:
++        move.l  4(sp),a0
++        lea     0xFF8042,a1
++        move.l  (a0)+,(a1)+
++        move.l  (a0)+,(a1)+
++        move.w  (a0)+,(a1)+
++        rts
++
+ // Level 3: gate array timer, 200 Hz system tick
+         .globl  _segacd_int_3
+ _segacd_int_3:

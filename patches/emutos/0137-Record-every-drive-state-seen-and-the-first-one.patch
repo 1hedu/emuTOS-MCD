@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 07:44:41 +0000
+Subject: [PATCH 137/184] Record every drive state seen, and the first one
+
+The loader's own report letter reads R this boot: Sega's firmware read
+LBA 1600 off this disc on the first attempt, with the drive in state 2,
+seconds before EmuTOS started. Under EmuTOS the same drive reports 7 --
+no disc information -- on every round. Something between those two
+loses it, and the candidates sit on opposite sides of a line: the gate
+array reset the loader performs at handover (reset_ga drives SRES low),
+or this driver's own traffic afterwards.
+
+No field could tell them apart. cdd_stat[0] is a live value, so by the
+time anything reads it the history is gone.
+
+One bit per state, set only from a packet that checksummed, plus the
+first such state and the tick it arrived on. If the first state EmuTOS
+ever sees is already 7, the drive arrived that way and nothing down
+here will fix it. If it starts at 2 and the mask shows 1, 4 or C before
+it settles on 7, we broke it.
+---
+ bios/scdapi.h | 11 ++++++++++-
+ bios/segacd.c | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+), 1 deletion(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index cb505ca..d94fa7b 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  5
++#define SCD_VERSION  6
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -97,6 +97,15 @@ struct scd_snap {
+     unsigned char  cddok;               /* the last packet checksummed */
+     unsigned char  cddscore;            /* how many of the last 16 did */
+ 
++    /* Which drive states this session has ever seen, on packets that
++     * checksummed: one bit per state, plus the first one and when.
++     * Answers whether the drive was already in a no-information state
++     * when EmuTOS first heard from it, or got there later -- the loader
++     * hands over a drive that had just read a sector. */
++    unsigned short cddmask;
++    unsigned char  cddfirst;            /* 0xFF: no valid packet yet */
++    unsigned short cddftick;
++
+     /* The whole CD report block, verbatim.
+      *
+      * This is what the hardware status line renders, and the question
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 8e9ad20..179da36 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -144,6 +144,25 @@ const UBYTE *segacd_physbase(void)
+  * them. Without it the compiler samples the state once before the loop
+  * and waits for ever on a copy. */
+ static volatile UBYTE cdd_stat[10];
++/* Every drive state ever seen, and the first one.
++ *
++ * The loader's own report says the drive was in state 2 when Sega's
++ * firmware read LBA 1600 off this disc, first try, seconds before
++ * EmuTOS started -- and under EmuTOS it reports 7, "no disc
++ * information", on every round. Something between those two loses it,
++ * and the candidates are on opposite sides of a line: the gate array
++ * reset the loader performs at handover, or this driver's own traffic
++ * afterwards.
++ *
++ * One bit per state, set only from a packet that checksummed, plus the
++ * very first such state and the tick it arrived on. If the first state
++ * EmuTOS ever sees is already 7 then the drive arrived broken and no
++ * amount of tuning down here will help; if it starts at 2 and the mask
++ * shows it visiting 1, 4 or C before settling on 7, then we broke it
++ * and the mask says roughly when. Neither question has a field today. */
++static UWORD cdd_statemask;     /* bit n: state n seen on a valid packet */
++static UBYTE cdd_first = 0xFF;  /* ...the first one, 0xFF until there is one */
++static UWORD cdd_firsttick;
+ static ULONG cdd_rawbuf[3];     /* aligned: the read below is long-wide */
+ #define cdd_raw ((UBYTE *)cdd_rawbuf)
+ static UBYTE cdd_valid;         /* last packet checksummed */
+@@ -857,6 +876,14 @@ static void cdd_poll(void)
+     cdd_got_ck  = cdd_stat[9];                  /* what arrived */
+     cdd_valid = (UBYTE)((cdd_want_ck == cdd_got_ck) ? 1 : 0);
+ 
++    if (cdd_valid) {
++        cdd_statemask |= (UWORD)(1 << (cdd_stat[0] & 0x0F));
++        if (cdd_first == 0xFF) {
++            cdd_first = cdd_stat[0];
++            cdd_firsttick = cdd_ticks;
++        }
++    }
++
+     /* The only evidence that a command arrived: the drive naming the
+      * sub-command it was asked for. Checked on every packet, because
+      * the reply may be a packet or two behind the request. */
+@@ -3486,6 +3513,9 @@ static void scd_snapshot(struct scd_snap *s)
+     s->ticks = cdd_ticks;
+     s->cddok = cdd_valid;
+     s->cddscore = cdd_score;
++    s->cddmask = cdd_statemask;
++    s->cddfirst = cdd_first;
++    s->cddftick = cdd_firsttick;
+ 
+     for (i = 0; i < 32; i++)            /* the status line's own source */
+         s->rep[i] = CDREPORT[i];

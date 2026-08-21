@@ -1,0 +1,234 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 22:58:02 +0000
+Subject: [PATCH 064/184] segacd: a D: diagnostic and a read lead, both chosen
+ at boot
+
+There is one CD-R left, so this disc has to be able to answer questions
+it is asked after it is burned.
+
+Hold Down at power-on and EmuTOS runs the calls EmuDesk makes when a
+drive icon is double-clicked -- Dfree, Dsetpath, Fsfirst, Fopen, Fread
+-- against the disc, forever, printing every return code and the
+driver's own counters after each round. 'Disk C will not open its
+folder' is not actionable: opening a window is three calls underneath
+and EmuDesk shows the same alert for any of them failing, and for none
+of them. This turns it into a number. It repeats because the failures
+come and go and one sample of an intermittent fault is an anecdote.
+
+Hold Left and reads are commanded two frames before the target rather
+than twenty. Two is what the CDBIOS does on this console, measured
+three times in the hardware trace. Twenty might be why the decoder
+never locks, or it might be load-bearing. The disc can now answer that
+rather than me picking one blind on someone else's last disc.
+
+Runtime, not build options, for the same reason: a disc that can only
+answer the question I thought of while building it is worth much less
+than one that can be asked again.
+---
+ bios/bios.c   | 98 ++++++++++++++++++++++++++++-----------------------
+ bios/segacd.c | 34 +++++++++++++++++-
+ bios/segacd.h |  3 ++
+ 3 files changed, 90 insertions(+), 45 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 7a9eabb..72feb5d 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1028,62 +1028,72 @@ void biosmain(void)
+     }
+ #endif
+ 
+-#if defined(MACHINE_SEGACD) && defined(CONF_SEGACD_CTEST)
++#if defined(MACHINE_SEGACD) && defined(CONF_WITH_SEGACD_CD)
+     /*
+-     * Diagnostic build only: the calls EmuDesk makes when a drive icon
+-     * is double-clicked, against the disc. Opening a window is
+-     * Dfree/Dsetpath/Fsfirst underneath, and if any of them fails the
+-     * desktop does nothing at all -- no window, no alert -- which is
+-     * exactly what a console reported. This says which one.
++     * Hold Down at power-on and this runs instead of the desktop: the
++     * calls EmuDesk makes when a drive icon is double-clicked, against
++     * the disc, over and over, with the driver's own counters after
++     * each round.
++     *
++     * It exists because there is one CD-R left. "Disk C will not open
++     * its folder" is not something anyone can act on -- opening a
++     * window is Dfree, Dsetpath and Fsfirst underneath, any of which
++     * can fail, and EmuDesk shows the same alert for all of them and
++     * for none of them. This turns it into a number. Repeating forever
++     * matters as much as running at all: the failures here come and go,
++     * and one sample of an intermittent fault is an anecdote.
++     *
++     * Runtime rather than a build option, for the same reason. A disc
++     * that can only answer the question I thought of while building it
++     * is worth much less than one that can be asked again.
+      */
+-    {
++    if (segacd_diag) {
+         static char buf[512];
+         static DTA dta;
+         LONG h, rc;
++        UWORD run, seeks, hits, errs, why;
++        UBYTE state;
+         int i;
+ 
+         cprintf("\033E");
+-        cprintf("C: read test\r\n");
++        for (run = 1; ; run++) {
++            cprintf("D: TEST %u  (Down held at boot)\r\n", run);
+ 
+-        rc = Dfree((LONG *)buf, 1);             /* control: A: */
+-        cprintf("DfreeA   = %ld free %ld of %ld\r\n",
+-                rc, *(LONG *)buf, *((LONG *)buf + 1));
+-        rc = Dfree((LONG *)buf, 3);             /* 3 = C: */
+-        cprintf("DfreeC   = %ld free %ld of %ld\r\n",
+-                rc, *(LONG *)buf, *((LONG *)buf + 1));
++            rc = Dfree((LONG *)buf, 3);         /* 3 = C: */
++            cprintf(" Dfree    %ld   %ld of %ld free\r\n",
++                    rc, *(LONG *)buf, *((LONG *)buf + 1));
++            rc = Dsetpath("C:\\");
++            cprintf(" Dsetpath %ld\r\n", rc);
+ 
+-        rc = Dsetdrv(2);                        /* 2 = C: */
+-        cprintf("Dsetdrv  = %ld\r\n", rc);
+-        rc = Dsetpath("C:\\");
+-        cprintf("Dsetpath = %ld\r\n", rc);
+-
+-        Fsetdta(&dta);
+-        rc = Fsfirst("C:\\*.*", 0x17);
+-        cprintf("Fsfirst  = %ld  [%s]\r\n", rc, dta.d_fname);
+-        while (rc == 0L) {
+-            rc = Fsnext();
+-            if (rc == 0L)
+-                cprintf("Fsnext   = 0  [%s]\r\n", dta.d_fname);
+-        }
+-        cprintf("Fsnext   = %ld (end)\r\n", rc);
++            Fsetdta(&dta);
++            rc = Fsfirst("C:\\*.*", 0x17);
++            cprintf(" Fsfirst  %ld   [%s]\r\n", rc, dta.d_fname);
+ 
+-        h = Fopen("C:\\READCD.TXT", 0);
+-        cprintf("Fopen    = %ld\r\n", h);
+-        if (h >= 0L) {
+-            rc = Fread((WORD)h, 64L, buf);
+-            cprintf("Fread    = %ld\r\n", rc);
+-            Fclose((WORD)h);
+-            for (i = 0; i < 32; i++)
+-                if (buf[i] < 32 || buf[i] > 126)
+-                    buf[i] = '.';
+-            buf[32] = 0;
+-            cprintf("[%s]\r\n", buf);
++            h = Fopen("C:\\READCD.TXT", 0);
++            cprintf(" Fopen    %ld\r\n", h);
++            if (h >= 0L) {
++                rc = Fread((WORD)h, 32L, buf);
++                Fclose((WORD)h);
++                for (i = 0; i < 24; i++)
++                    if (buf[i] < 32 || buf[i] > 126)
++                        buf[i] = '.';
++                buf[24] = 0;
++                cprintf(" Fread    %ld   [%s]\r\n", rc, buf);
++            }
++
++            segacd_cd_stats(&seeks, &hits, &errs, &state, &why);
++            cprintf(" drive %X  seek %u  wait %u  err %u  why %04X\r\n\r\n",
++                    state, seeks, hits, errs, why);
++
++            /* Long enough to read a round before the next scrolls it
++             * away, and long enough that the drive is not being flogged
++             * by the diagnostic meant to observe it. */
++            {
++                LONG t = hz_200 + 1000L;        /* five seconds */
++                while (hz_200 < t)
++                    ;
++            }
+         }
+-        rc = Dfree((LONG *)buf, 3);             /* again, now warm */
+-        cprintf("DfreeC2  = %ld free %ld of %ld\r\n",
+-                rc, *(LONG *)buf, *((LONG *)buf + 1));
+-        for (;;)
+-            ;
+     }
+ #endif
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index b59d834..7057df2 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -143,6 +143,13 @@ static UBYTE cdd_score;         /* valid packets in the last 16, latched */
+ static UBYTE cdd_count, cdd_good;
+ static UBYTE cdd_tick;
+ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
++UBYTE segacd_diag;              /* holding Down runs the D: diagnostic */
++/* How far before the target a read is commanded. Sega uses two frames,
++ * measured three times in the hardware trace; this driver has always
++ * used twenty. Selectable at boot -- hold Left -- because with one
++ * CD-R left, choosing between them blind is not a decision I get to
++ * make on someone else's disc. */
++static ULONG cd_lead = 20UL;
+ /* D: telemetry. Declared up here because the report that publishes it
+  * is written before the code that keeps it, and a forward declaration
+  * for four counters is less to get wrong than moving either. */
+@@ -320,6 +327,18 @@ void segacd_cdd_init(void)
+          * selects the reset-time pair alone, so one disc can answer it
+          * instead of two. */
+         cdc_altctrl = (UBYTE)((f & 2) ? 1 : 0);
++
++        /* Down: run the D: diagnostic instead of the desktop. With one
++         * CD-R left, "the folder will not open" has to become a return
++         * code and a counter without another burn.
++         *
++         * Left: command the read two frames before the target, which is
++         * what the CDBIOS does on this console -- measured, three times,
++         * in the trace. This driver asks for twenty. Twenty may be why
++         * the decoder never locks, or it may be load-bearing; the disc
++         * can now answer that instead of me choosing. */
++        segacd_diag = (UBYTE)((f & 4) ? 1 : 0);
++        cd_lead = (f & 8) ? 2UL : 20UL;
+     }
+ 
+     cdd_ask(CDD_CMD_INFO, 0x03);        /* something to say from the first
+@@ -1058,7 +1077,7 @@ static void cdd_ask_idle(void)
+  * frames late and the sector is behind the head, and reading forward
+  * never comes back to it. Twenty frames is a quarter of a second of
+  * run-up and costs nothing but that. */
+-#define CDR_LEADIN 20UL
++#define CDR_LEADIN cd_lead
+ 
+ /* ...and if it lands late anyway, ask again. This is the BIOS's own
+  * answer: $4124 re-issues the whole read when an arriving header is not
+@@ -1753,6 +1772,19 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+     return E_OK;
+ }
+ 
++/* What the D: layer has been through, for the on-screen diagnostic.
++ * The counters are the diagnosis: a read that fails and a read that
++ * never happened look identical from GEMDOS's side of the call. */
++void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
++                     UBYTE *state, UWORD *why)
++{
++    *seeks = cd_seeks;
++    *hits = cd_hits;
++    *errs = cd_errors;
++    *state = cdd_stat[0];
++    *why = cd_why;
++}
++
+ LONG segacd_cd_ioctl(WORD op, void *arg)
+ {
+     ULONG *info = (ULONG *)arg;
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 3c72012..4ce6180 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -34,6 +34,9 @@ void segacd_keyclick(void);
+ /* D: -- a filesystem read off the disc itself, through the CDC */
+ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
+ LONG segacd_cd_ioctl(WORD op, void *arg);
++void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
++                     UBYTE *state, UWORD *why);
++extern UBYTE segacd_diag;       /* Down held at power-on */
+ 
+ /* Clock */
+ ULONG segacd_getdt(void);

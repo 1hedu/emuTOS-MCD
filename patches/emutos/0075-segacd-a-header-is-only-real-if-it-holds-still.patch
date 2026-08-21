@@ -1,0 +1,170 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 07:52:42 +0000
+Subject: [PATCH 075/184] segacd: a header is only real if it holds still
+
+why 55 then why 1, wrong-sector frozen at 32, twelve thousand sectors
+decoded and none matching the wanted LBA -- plus 01:80:00 back on the
+HUD. Header reads racing the decoder's updates: the level-5 handler
+runs 'immediately' on the decode interrupt except when the Genesis has
+this CPU halted for a screen copy, which stretches immediately by
+milliseconds, into the next sector's arrival. The BIOS reads heads
+the same way but never ran under another CPU's bus grabs, and an
+emulator's arbitration is instant, so neither ever sees it.
+
+Mechanics only, no chip semantics: the header is read twice and an
+entry is made only when the two readings agree -- a disagreement
+proves the value was moving, which is all that is claimed -- counted
+as torn. The ambiguous 'flagged' counter splits into torn / badbcd /
+flagged (STAT0, telemetry only), so the next screen off a CRT is
+unambiguous about which pathology it is showing.
+
+And the servant now means it about politeness: half a second of
+deference while the sub's busy bit says a sector read is in flight,
+against the four frames that were letting it halt the sub mid-read
+every 67 ms.
+---
+ bios/bios.c   |  7 ++++---
+ bios/segacd.c | 45 ++++++++++++++++++++++++++++++++++++++++-----
+ bios/segacd.h |  3 ++-
+ 3 files changed, 46 insertions(+), 9 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index af04140..11304bc 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1073,7 +1073,7 @@ void biosmain(void)
+         static char buf[512];
+         static DTA dta;
+         LONG h, rc;
+-        UWORD run, arm, seeks, hits, errs, why, bad, wrong;
++        UWORD run, arm, seeks, hits, errs, why, bad, wrong, torn, flag;
+         UBYTE state;
+         int i;
+ 
+@@ -1108,10 +1108,11 @@ void biosmain(void)
+             }
+ 
+             segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
+-                            &bad, &wrong);
++                            &bad, &wrong, &torn, &flag);
+             cprintf(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+                     state, seeks, hits, errs, why);
+-            cprintf(" flagged %u  wrong-sector %u\r\n\r\n", bad, wrong);
++            cprintf(" torn %u  badbcd %u  wrong %u  flag %u\r\n\r\n",
++                    torn, bad, wrong, flag);
+ 
+             /* Long enough to read a round before the next scrolls it
+              * away, and long enough that the drive is not being flogged
+diff --git a/bios/segacd.c b/bios/segacd.c
+index fd34d42..5c516e5 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -230,8 +230,10 @@ static UBYTE cd_gone;           /* the drive said the disc changed */
+ static UBYTE cd_badrun;         /* consecutive packets saying "nothing" */
+ static UBYTE cd_badstate;       /* ...and the state that said it */
+ static UWORD cd_notready;       /* reads that found the drive unfit */
+-static UWORD cd_badhdr;         /* sectors the decoder disowned, plus
+-                                 * headers rejected as impossible BCD */
++static UWORD cd_badhdr;         /* headers rejected as impossible BCD */
++static UWORD cd_tornhdr;        /* headers that changed between two reads */
++static UWORD cd_flagged;        /* sectors with STAT0 bit 7 clear: counted,
++                                 * never obeyed */
+ static UWORD cd_wrongsec;       /* transfers that delivered the wrong
+                                  * sector and were caught by the header
+                                  * check -- each one of these used to be
+@@ -892,6 +894,16 @@ void segacd_int_5_c(void)
+     cdc_stat4[0] = *CDC_DATA_RD;        /* IFSTAT, into a slot we reuse
+                                          * below -- read for its effect */
+ 
++    /* Twice, and the two readings must agree. This handler runs
++     * "immediately" on the decode interrupt -- except when the Genesis
++     * has this CPU halted for a screen copy, which stretches
++     * immediately into milliseconds, far enough into the next sector's
++     * arrival that the registers are changing under the read. A torn
++     * header is how 01:80:00 gets displayed, how the ring points at
++     * one sector while the buffer holds another, and why none of it
++     * reproduces on an emulator's instant bus. Two matching reads
++     * prove nothing about the chip; they prove the value held still,
++     * which is all that is claimed. */
+     *CDC_AR = 0x04;
+     h0  = *CDC_DATA_RD;                 /* HEAD0: minute */
+     h1  = *CDC_DATA_RD;                 /* HEAD1: second */
+@@ -899,6 +911,25 @@ void segacd_int_5_c(void)
+     h3  = *CDC_DATA_RD;                 /* HEAD3: mode */
+     ptl = *CDC_DATA_RD;                 /* PTL */
+     pth = *CDC_DATA_RD;                 /* PTH */
++    {
++        UBYTE g0, g1, g2, g3;
++
++        *CDC_AR = 0x04;
++        g0 = *CDC_DATA_RD;
++        g1 = *CDC_DATA_RD;
++        g2 = *CDC_DATA_RD;
++        g3 = *CDC_DATA_RD;
++        if (g0 != h0 || g1 != h1 || g2 != h2 || g3 != h3) {
++            cd_tornhdr++;
++            *CDC_AR = 0x0C;             /* still consume STAT: reading
++                                         * STAT3 re-arms the interrupt */
++            cdc_stat4[0] = *CDC_DATA_RD;
++            cdc_stat4[1] = *CDC_DATA_RD;
++            cdc_stat4[2] = *CDC_DATA_RD;
++            cdc_stat4[3] = *CDC_DATA_RD;
++            return;
++        }
++    }
+ 
+     *CDC_AR = 0x0C;
+     cdc_stat4[0] = *CDC_DATA_RD;
+@@ -925,7 +956,7 @@ void segacd_int_5_c(void)
+      * never sets under our configuration is worth knowing about; it
+      * decides nothing. */
+     if (!(cdc_stat4[0] & 0x80))
+-        cd_badhdr++;
++        cd_flagged++;
+ 
+     if (!cdc_hit && h0 == cdc_want[0] && h1 == cdc_want[1]
+                  && h2 == cdc_want[2]) {
+@@ -1391,7 +1422,8 @@ static void cdr_report(void)
+     CDREPORT[33] = (UWORD)(((UWORD)cdd_len_f << 8) | cdd_len_ok);
+     CDREPORT[34] = (UWORD)((cd_wrongsec > 0xFF ? 0xFF00
+                             : (cd_wrongsec << 8))
+-                           | (cd_badhdr > 0xFF ? 0xFF : cd_badhdr));
++                           | ((cd_badhdr + cd_tornhdr) > 0xFF ? 0xFF
++                              : (cd_badhdr + cd_tornhdr)));
+     CDREPORT[0] = CDREPORT_MAGIC;
+ }
+ 
+@@ -2051,7 +2083,8 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+  * The counters are the diagnosis: a read that fails and a read that
+  * never happened look identical from GEMDOS's side of the call. */
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+-                     UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong)
++                     UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
++                     UWORD *torn, UWORD *flag)
+ {
+     *seeks = cd_seeks;
+     *hits = cd_hits;
+@@ -2060,6 +2093,8 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+     *why = cd_why;
+     *bad = cd_badhdr;
+     *wrong = cd_wrongsec;
++    *torn = cd_tornhdr;
++    *flag = cd_flagged;
+ }
+ 
+ /* The diagnostic's knobs. The disc got burned with exactly one
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 6f212c9..220a47b 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -35,7 +35,8 @@ void segacd_keyclick(void);
+ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
+ LONG segacd_cd_ioctl(WORD op, void *arg);
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+-                     UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong);
++                     UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
++                     UWORD *torn, UWORD *flag);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);

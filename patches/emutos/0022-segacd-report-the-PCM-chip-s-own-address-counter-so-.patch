@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 01:35:50 +0000
+Subject: [PATCH 022/184] segacd: report the PCM chip's own address counter, so
+ ears are optional
+
+Still silent on hardware with every register field verified against
+MAME and the emulated channel demonstrably running. The remaining
+question -- driver or audio path -- cannot be settled from secondhand
+cabling guides, which say the CD unit's audio does not cross the
+expansion connector, while the JP BIOS boot music is pure RF5C164 and
+hearing it would prove exactly the opposite.
+
+So the VBL now samples channel 0's address counter while a note is
+sounding and keeps the furthest value reached. It moves only if the
+chip is genuinely playing. Reported in the spare bits of the drive
+status word alongside the keyclick count.
+---
+ bios/segacd.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 22fca2a..f7c058a 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -123,6 +123,7 @@ static void pcm_reg(volatile UBYTE *reg, UBYTE v)
+ 
+ static UBYTE pcm_countdown;             /* VBLs left before we silence it */
+ static UBYTE pcm_clicks;                /* keyclicks actually requested */
++static UBYTE pcm_seen;                  /* furthest the channel ever got */
+ static UBYTE pcm_ready;                 /* segacd_sound_init() completed */
+ static UWORD bram_status;               /* base value of the status word */
+ 
+@@ -269,7 +270,18 @@ void segacd_int_2_c(void)
+     *(volatile UWORD *)0xFF802A = (UWORD)(bram_status
+         | (pcm_ready ? 0x20 : 0)
+         | ((conterm & 1) ? 0x40 : 0)
+-        | ((UWORD)pcm_clicks << 8));
++        | ((UWORD)(pcm_clicks & 0x0F) << 8)
++        | ((UWORD)(pcm_seen & 0x0F) << 12));
++
++    /* Watch the channel's own address counter while a note is sounding.
++     * It only moves if the chip is genuinely playing, so this is the
++     * one reading that separates "the driver is broken" from "the
++     * audio never reaches a speaker" without anyone having to listen. */
++    if (pcm_countdown) {
++        UBYTE hi = *(volatile UBYTE *)0xFF0023;   /* channel 0 addr high */
++        if (hi > pcm_seen)
++            pcm_seen = hi;
++    }
+ 
+     if (pcm_countdown) {                /* silence the bell when it is due */
+         if (--pcm_countdown == 0)

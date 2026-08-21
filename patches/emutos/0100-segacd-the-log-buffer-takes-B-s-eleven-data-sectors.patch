@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 06:03:26 +0000
+Subject: [PATCH 100/184] segacd: the log buffer takes B:'s eleven data sectors
+
+3584 was inherited from the older graft and the round is bigger now --
+about 305 bytes, so eleven rounds. B: is sixteen 512-byte sectors,
+five spent on the reserved sector, two FATs and a 32-entry root, which
+leaves 5632 and caps any file there whatever the buffer holds.
+Eighteen rounds for two kilobytes of BSS.
+
+Not urgent. Eleven rounds of an intermittent fault is a usable sample
+and the disc already burned is unaffected.
+---
+ bios/bios.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index c26fd5c..312ca10 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -824,8 +824,17 @@ BOOL can_shutdown(void)
+  * flash cart writes it to an SD card.
+  *
+  * When the buffer fills it stops: the file stops changing and says so,
+- * and the screen keeps running. */
+-#define CDLOG_MAX 3584
++ * and the screen keeps running.
++ *
++ * The size is everything B: can hold. That volume is sixteen 512-byte
++ * sectors, one cluster each, of which five go to the reserved sector,
++ * two FATs and a 32-entry root -- so eleven are left and a file cannot
++ * exceed 5632 bytes however much RAM this buffer has. A round costs
++ * about 305 bytes, which is eighteen rounds. The failures being chased
++ * here are intermittent and six rounds was already the most useful
++ * sample this port has had; there is no reason to leave the other
++ * seven on the floor. */
++#define CDLOG_MAX 5632
+ 
+ static char cdlog[CDLOG_MAX];
+ static UWORD cdlog_len;

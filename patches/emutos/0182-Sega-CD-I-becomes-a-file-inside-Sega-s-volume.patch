@@ -1,0 +1,445 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 20 Aug 2026 20:58:22 +0000
+Subject: [PATCH 182/184] Sega CD: I: becomes a file inside Sega's volume
+
+Our FAT12 went over the whole of the backup memory, footer and all, so a
+cartridge could carry our files or a game's saves and not both. Now the
+volume stays Sega's and our filesystem is one file in it, AROSDISK,
+sitting in the console's own Backup RAM Manager beside anything else.
+
+Sector i is bytes [i*512, i*512+512) of that file, reached at
+a0out + 1 + 2*i -- the odd-byte mapping bram_rd() has always used, and
+the offset measured rather than assumed. Reads and writes both go
+straight through, because a file's data takes a write in place.
+
+bvol_rd/bvol_wr/bvol_sectors are the one seam: the formatter and the
+block device go through them and never know which home they have, so an
+old whole-memory volume keeps working exactly as it did. bram_probe
+prefers a Sega volume with our file in it, falls back to the FAT12
+signature, and otherwise leaves the memory alone -- a Sega volume with
+no AROSDISK is somebody's saves, and the moment to take 7 KB of it is
+when they ask.
+
+Which is segacd_bram_rw(), because FORMATI.PRG formats by writing
+sectors through Rwabs and there is no other entry point to hook. On a
+write, once per session, to a Sega volume with no file of ours: create
+it, then let the sectors land inside. On a read, never.
+
+bfs_create allocates with BRMWRITE pointed at EmuTOS's own code for its
+source. That is not a trick for its own sake: BRMWRITE copies size*64
+bytes and there is nowhere here to put 7680 of them, and every byte it
+copies is overwritten a moment later through the pointer. The call is
+being used to allocate. Any readable bytes would do.
+
+Measured end to end:
+
+    0040  60 38 45 6d 75 54 4f 53 ...   our boot sector, at byte 64
+    1fc0  5f x11 00 00 00 00 40         Sega's footer, untouched
+    1fd0  00 05 x4  00 01 x4            5 free, 1 file
+    1fe0  SEGA_CD_ROM. RAM_CARTRIDGE___
+
+and on the next boot the manager answers 03020501 -- Sega formatted,
+5 blocks free, one file. A plain boot with no formatting leaves such a
+volume byte for byte alone; all 8128 bytes before the footer still zero.
+
+Two corrections to what was written down yesterday. The eight bytes at
+end-0x28 are the file count, four times over, not padding -- they read
+00 01 x4 with our file present, and Genesis Plus GX's template only ever
+shows zeros there because it only ever writes an empty volume. And the
+directory stores the filename in the manager's own encoding, not ASCII,
+so grepping an image for AROSDISK says it is missing when it is there.
+
+Owned: rewriting the formatter, I replaced a range of the file I had
+assumed held only bram_format, and the whole Backup RAM manager block
+was inside it. Recovered from HEAD and checked symbol by symbol against
+it -- nothing else went with it.
+
+Desktop 26213da8979c5fbb on disc and cartridge.
+---
+ bios/segacd.c | 321 +++++++++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 268 insertions(+), 53 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 6de0dac..c818d3b 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -4504,7 +4504,8 @@ static UWORD adisk_sectors;
+ #define BRAM_SECTORS (BRAM_BYTES / SECTOR_SIZE)     /* 16 */
+ 
+ #define BRAM_NONE  0
+-#define BRAM_OURS  1
++#define BRAM_OURS  1            /* our FAT12 over the whole memory */
++#define BRAM_SEGA  2            /* Sega's volume, our filesystem a file in it */
+ 
+ static UWORD cart_sectors;
+ static UBYTE cart_seq;
+@@ -4543,51 +4544,6 @@ static void bram_wr(ULONG i, UBYTE v)
+     }
+ }
+ 
+-/* Lay down a minimal FAT12 volume: 16 sectors, 1 sector per cluster,
+- * one reserved + two 1-sector FATs + two root sectors + 11 data. */
+-static void bram_format(void)
+-{
+-    ULONG i;
+-
+-    for (i = 0; i < SECTOR_SIZE * 5UL; i++)
+-        bram_wr(i, 0);
+-
+-    bram_wr(0, 0x60); bram_wr(1, 0x38);            /* bra.s, Atari style */
+-    bram_wr(2, 'E'); bram_wr(3, 'm'); bram_wr(4, 'u');
+-    bram_wr(5, 'T'); bram_wr(6, 'O'); bram_wr(7, 'S');
+-    bram_wr(8, 0x24); bram_wr(9, 0x08); bram_wr(10, 0x27);
+-    bram_wr(11, 0x00); bram_wr(12, 0x02);          /* 512 bytes/sector */
+-    bram_wr(13, 1);                                /* sectors/cluster */
+-    bram_wr(14, 1); bram_wr(15, 0);                /* reserved sectors */
+-    bram_wr(16, 2);                                /* FAT count */
+-    bram_wr(17, 32); bram_wr(18, 0);               /* root entries */
+-    bram_wr(19, (UBYTE)BRAM_SECTORS); bram_wr(20, 0);
+-    bram_wr(21, 0xF8);                             /* media descriptor */
+-    bram_wr(22, 1); bram_wr(23, 0);                /* sectors per FAT */
+-    bram_wr(24, 16); bram_wr(25, 0);               /* sectors per track */
+-    bram_wr(26, 1); bram_wr(27, 0);                /* sides */
+-    /* The signature the block layer looks for. A volume with no
+-     * partition table reaches check_for_no_partitions() in disk.c only
+-     * when the root sector ends 55 AA, and this formatter left those two
+-     * bytes zero -- so I: never mounted, however well the memory worked.
+-     * D: and S: got away with it because internal_inquire() calls the
+-     * disc and the cartridge removable and disk_init_one() force-adds a
+-     * partition for a removable unit. The internal backup RAM is
+-     * soldered down, so nothing covered for it. */
+-    bram_wr(510, 0x55); bram_wr(511, 0xAA);
+-
+-    bram_wr(512, 0xF8); bram_wr(513, 0xFF); bram_wr(514, 0xFF);
+-    bram_wr(1024, 0xF8); bram_wr(1025, 0xFF); bram_wr(1026, 0xFF);
+-
+-    {   /* volume label in the first root entry */
+-        static const char lbl[11] = {'M','E','G','A','C','D',' ',
+-                                     ' ',' ',' ',' '};
+-        for (i = 0; i < 11; i++)
+-            bram_wr(1536 + i, (UBYTE)lbl[i]);
+-        bram_wr(1536 + 11, 0x08);
+-    }
+-}
+-
+ /* ---- Sega's own Backup RAM manager --------------------------------------
+  *
+  * Everything above lays a FAT12 volume over the whole of the memory,
+@@ -4641,6 +4597,12 @@ static UBYTE *const brm_work  = (UBYTE *)BRM_SCRATCH;          /* 0x640 */
+ static UBYTE *const brm_names = (UBYTE *)(BRM_SCRATCH + 0x640);/* 12 */
+ static struct brmcall *const brmc =
+                 (struct brmcall *)(BRM_SCRATCH + 0x680);
++/* The filename and the 14-byte file-info block go here for the same
++ * reason everything else does: the manager reads them while low memory
++ * is holding EmuTOS's bytes, so a local would be read off a stack at
++ * 0x800 that is not there at the time. */
++static UBYTE *const bfs_nm   = (UBYTE *)(BRM_SCRATCH + 0x6A0);   /* 12 */
++static UBYTE *const bfs_info = (UBYTE *)(BRM_SCRATCH + 0x6B0);   /* 14 */
+ static UWORD brm_size, brm_stat, brm_free, brm_files;
+ static UBYTE brm_checked, brm_usable;
+ 
+@@ -4745,6 +4707,229 @@ static ULONG segacd_buram_info(BOOL again)
+     return (st << 24) | (sz << 16) | (fr << 8) | nf;
+ }
+ 
++/* ---- I: as a file inside Sega's volume -------------------------------
++ *
++ * The old arrangement wrote our FAT12 over the whole memory, footer and
++ * all, so a cartridge could carry our files or a game's saves and not
++ * both. This is the other way round: Sega's volume stays Sega's, and our
++ * filesystem is one file in it called AROSDISK, sitting in the console's
++ * own Backup RAM Manager beside whatever else is there.
++ *
++ * Sector i of the volume is bytes [i*512, i*512+512) of that file. The
++ * manager hands back the file's address and the data is the odd byte of
++ * each word from one past it -- a0out + 1 + 2*i -- which is measured, not
++ * assumed; see docs/bram-filesystem.md. Reads and writes both go straight
++ * through that pointer, because a file's data takes a write in place and
++ * the manager reads back what we put there.
++ */
++#define BFS_NAME    "AROSDISK"          /* 11 chars, zero padded */
++
++static UBYTE *bfs_base;                 /* the file's data, or NULL */
++static UBYTE  bfs_tried;                /* asked the manager once already */
++static UWORD  bfs_sects;                /* 512-byte sectors in it */
++
++static UBYTE bfs_rd(ULONG i)
++{
++    return bfs_base[1 + 2 * i];
++}
++
++/* Write, then confirm, for the same reason bram_wr does: this is slow
++ * SRAM behind a gate array and a tight run of writes can be dropped on
++ * real hardware, which reads as a volume that mounts and loses files. */
++static void bfs_wr(ULONG i, UBYTE v)
++{
++    volatile UBYTE *p = bfs_base + 1 + 2 * i;
++    WORD tries;
++
++    for (tries = 0; tries < 8; tries++) {
++        *p = v;
++        if (*p == v)
++            return;
++    }
++}
++
++static void bfs_setname(void)
++{
++    const char *t = BFS_NAME;
++    WORD i;
++
++    for (i = 0; i < 11; i++)
++        bfs_nm[i] = (UBYTE)(*t ? *t++ : 0);
++    bfs_nm[11] = 0;
++}
++
++/* BRMINIT, which every other call needs in place first. FALSE means
++ * this is not a Sega volume and none of the rest applies. */
++static BOOL bfs_init(void)
++{
++    if (!segacd_buram_ready())
++        return FALSE;
++    brmc->fn = BRM_INIT;
++    brmc->d1in = 0;
++    brmc->a0in = (ULONG)brm_work;
++    brmc->a1in = (ULONG)brm_names;
++    segacd_buram_call(brmc);
++    return brmc->cs ? FALSE : TRUE;
++}
++
++/* Find AROSDISK. Sets bfs_base and bfs_sects, or clears them. */
++static BOOL bfs_find(void)
++{
++    bfs_base = NULL;
++    bfs_sects = 0;
++
++    if (!bfs_init())
++        return FALSE;
++    bfs_setname();
++    brmc->fn = BRM_SERCH;
++    brmc->d1in = 0;
++    brmc->a0in = (ULONG)bfs_nm;
++    brmc->a1in = 0;
++    segacd_buram_call(brmc);
++    if (brmc->cs)
++        return FALSE;                   /* no file of ours in there yet */
++    bfs_base = (UBYTE *)brmc->a0out;
++    bfs_sects = (UWORD)(brmc->d0out / (SECTOR_SIZE / 64));
++    if (!bfs_sects) {
++        bfs_base = NULL;
++        return FALSE;
++    }
++    return TRUE;
++}
++
++/* Make one, as large as the volume will presently give us.
++ *
++ * BRMWRITE copies size*64 bytes from a1, and there is nowhere in this
++ * port to put a buffer that large -- 7680 bytes for the internal memory
++ * alone, on a machine whose spare fixed-address scratch is measured in
++ * hundreds. It does not need one. The call is being used to *allocate*,
++ * and every byte it copies is overwritten immediately afterwards through
++ * the pointer BRMSERCH returns, because a file's data takes a write in
++ * place. So a1 points at EmuTOS's own code at 0x80000: readable, on the
++ * right side of the exchange, and never written to. Any bytes would do;
++ * these are the ones that are certainly there.
++ */
++static BOOL bfs_create(void)
++{
++    UWORD have, want;
++    WORD i;
++
++    if (!bfs_init())
++        return FALSE;
++
++    brmc->fn = BRM_STAT;
++    brmc->d1in = 0;
++    brmc->a0in = 0;
++    brmc->a1in = (ULONG)brm_names;
++    segacd_buram_call(brmc);
++    have = brmc->d0out;                 /* free space, in 0x40 blocks */
++
++    /* Three blocks back for the directory to grow into, and a whole
++     * number of sectors so the block layer never sees a short one. */
++    if (have < 3 + (SECTOR_SIZE / 64))
++        return FALSE;
++    want = (UWORD)((have - 3) & ~((SECTOR_SIZE / 64) - 1));
++    if (!want)
++        return FALSE;
++
++    bfs_setname();
++    for (i = 0; i < 11; i++)
++        bfs_info[i] = bfs_nm[i];
++    bfs_info[11] = 0;                   /* normal mode: 0x40 to a block */
++    bfs_info[12] = (UBYTE)(want >> 8);
++    bfs_info[13] = (UBYTE)want;
++
++    brmc->fn = BRM_WRITE;
++    brmc->d1in = 0;                     /* Tech Bulletin #1 says so */
++    brmc->a0in = (ULONG)bfs_info;
++    brmc->a1in = 0x80000UL;             /* allocate; see above */
++    segacd_buram_call(brmc);
++    if (brmc->cs)
++        return FALSE;
++
++    return bfs_find();
++}
++
++/* One volume, two possible homes. Everything below writes through these
++ * rather than knowing which. */
++static UBYTE bvol_rd(ULONG i)
++{
++    return (bram_state == BRAM_SEGA) ? bfs_rd(i) : bram_rd(i);
++}
++static void bvol_wr(ULONG i, UBYTE v)
++{
++    if (bram_state == BRAM_SEGA) bfs_wr(i, v); else bram_wr(i, v);
++}
++static UWORD bvol_sectors(void)
++{
++    return (bram_state == BRAM_SEGA) ? bfs_sects : (UWORD)BRAM_SECTORS;
++}
++
++/* Lay down a minimal FAT12 volume in whichever home we have: one
++ * reserved sector, two 1-sector FATs, two root sectors, the rest data.
++ *
++ * Written through bvol_wr, so this is the same code whether the volume
++ * is the whole of the memory (the old arrangement, and any cartridge
++ * already carrying one) or a file inside Sega's (the new one). */
++static void bram_format(void)
++{
++    ULONG i;
++    UWORD sects = bvol_sectors();
++
++    if (sects < 6)                      /* boot + 2 FATs + 2 root + data */
++        return;
++
++    for (i = 0; i < SECTOR_SIZE * 5UL; i++)
++        bvol_wr(i, 0);
++
++    bvol_wr(0, 0x60); bvol_wr(1, 0x38);            /* bra.s, Atari style */
++    bvol_wr(2, 'E'); bvol_wr(3, 'm'); bvol_wr(4, 'u');
++    bvol_wr(5, 'T'); bvol_wr(6, 'O'); bvol_wr(7, 'S');
++    bvol_wr(8, 0x24); bvol_wr(9, 0x08); bvol_wr(10, 0x27);
++    bvol_wr(11, 0x00); bvol_wr(12, 0x02);          /* 512 bytes/sector */
++    bvol_wr(13, 1);                                /* sectors/cluster */
++    bvol_wr(14, 1); bvol_wr(15, 0);                /* reserved sectors */
++    bvol_wr(16, 2);                                /* FAT count */
++    bvol_wr(17, 32); bvol_wr(18, 0);               /* root entries */
++    bvol_wr(19, (UBYTE)sects); bvol_wr(20, (UBYTE)(sects >> 8));
++    bvol_wr(21, 0xF8);                             /* media descriptor */
++    bvol_wr(22, 1); bvol_wr(23, 0);                /* sectors per FAT */
++    bvol_wr(24, 16); bvol_wr(25, 0);               /* sectors per track */
++    bvol_wr(26, 1); bvol_wr(27, 0);                /* sides */
++    /* The signature the block layer looks for. A volume with no
++     * partition table reaches check_for_no_partitions() in disk.c only
++     * when the root sector ends 55 AA, and this formatter left those two
++     * bytes zero -- so I: never mounted, however well the memory worked.
++     * D: and S: got away with it because internal_inquire() calls the
++     * disc and the cartridge removable and disk_init_one() force-adds a
++     * partition for a removable unit. The internal backup RAM is
++     * soldered down, so nothing covered for it. */
++    bvol_wr(510, 0x55); bvol_wr(511, 0xAA);
++
++    bvol_wr(512, 0xF8); bvol_wr(513, 0xFF); bvol_wr(514, 0xFF);
++    bvol_wr(1024, 0xF8); bvol_wr(1025, 0xFF); bvol_wr(1026, 0xFF);
++
++    {   /* volume label in the first root entry */
++        static const char lbl[11] = {'M','E','G','A','C','D',' ',
++                                     ' ',' ',' ',' '};
++        for (i = 0; i < 11; i++)
++            bvol_wr(1536 + i, (UBYTE)lbl[i]);
++        bvol_wr(1536 + 11, 0x08);
++    }
++}
++
++/* Make the file first if there is none, then lay the volume in it. This
++ * is what FORMATI.PRG reaches, and what holding C at power-on runs. */
++static void bram_make(void)
++{
++    if (bram_state == BRAM_SEGA || bfs_find() || bfs_create()) {
++        if (!bfs_base)
++            return;
++        bram_state = BRAM_SEGA;
++    }
++    bram_format();
++}
++
+ static void bram_probe(void)
+ {
+     UBYTE save;
+@@ -4764,12 +4949,21 @@ static void bram_probe(void)
+      * survived several builds that reported failed writes which had in
+      * fact landed. */
+     if (*(volatile UWORD *)0xFF801E == 0x0C1A) {
+-        bram_format();
+-        bram_state = BRAM_OURS;
++        bram_state = BRAM_OURS;         /* bram_make may lift it to SEGA */
++        bram_make();
+         return;
+     }
+ 
+-    /* already ours? */
++    /* A Sega volume with our file already in it. Tried before the FAT12
++     * signature because a volume can hold both -- an old whole-memory
++     * filesystem of ours has no Sega footer, so the two never overlap,
++     * but the file is the arrangement to prefer where there is one. */
++    if (bfs_find()) {
++        bram_state = BRAM_SEGA;
++        return;
++    }
++
++    /* already ours, the old way? */
+     if (bram_rd(2) == 'E' && bram_rd(3) == 'm'
+      && bram_rd(4) == 'u' && bram_rd(5) == 'T') {
+         /* Volumes written before the signature was added are perfectly
+@@ -5069,15 +5263,36 @@ LONG segacd_bram_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+ 
+     if (bram_state == BRAM_NONE)
+         return EUNDEV;
+-    if (sector < 0 || sector + count > BRAM_SECTORS)
++
++    /* Formatting a Sega volume, for the first time.
++     *
++     * FORMATI.PRG formats by writing sectors through Rwabs, so this is
++     * where "make me a filesystem here" actually arrives -- there is no
++     * other entry point to hook. If the memory holds Sega's volume and
++     * has no AROSDISK in it yet, the file is created now and the sectors
++     * land inside it, instead of going raw and taking the volume's
++     * footer, and somebody's saves, with them.
++     *
++     * A write, not a read: an unformatted drive merely being looked at
++     * must not quietly take seven kilobytes of a cartridge. And once,
++     * not per sector: bfs_init() is two visits to the parked firmware
++     * and an old whole-memory volume of ours would pay for them on every
++     * block written for the rest of the session. */
++    if ((rw & RW_WRITE) && bram_state != BRAM_SEGA && !bfs_tried) {
++        bfs_tried = 1;
++        if (bfs_find() || bfs_create())
++            bram_state = BRAM_SEGA;
++    }
++
++    if (sector < 0 || sector + count > (LONG)bvol_sectors())
+         return ESECNF;
+ 
+     off = (ULONG)sector * SECTOR_SIZE;
+     while (count--) {
+         WORD i;
+         for (i = 0; i < SECTOR_SIZE; i++) {
+-            if (rw & RW_WRITE) bram_wr(off + i, buf[i]);
+-            else               buf[i] = bram_rd(off + i);
++            if (rw & RW_WRITE) bvol_wr(off + i, buf[i]);
++            else               buf[i] = bvol_rd(off + i);
+         }
+         buf += SECTOR_SIZE;
+         off += SECTOR_SIZE;
+@@ -5094,7 +5309,7 @@ LONG segacd_bram_ioctl(WORD op, void *arg)
+ 
+     switch (op) {
+     case GET_DISKINFO:
+-        info[0] = BRAM_SECTORS;
++        info[0] = bvol_sectors();
+         info[1] = SECTOR_SIZE;
+         return E_OK;
+     case GET_DISKNAME:

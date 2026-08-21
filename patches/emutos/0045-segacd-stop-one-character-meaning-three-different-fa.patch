@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 09:26:51 +0000
+Subject: [PATCH 045/184] segacd: stop one character meaning three different
+ failures
+
+There is no cdd_valid bug. Annotating the current object file against
+the current symbol table shows it written to 1 on the matching path at
+$436, cleared on the mismatching path at $580, and tested by the
+scoring at $540. The earlier claim that the two paths wrote different
+addresses came from mapping a stale build's offsets, after cdd_outbuf
+had shifted every .bss address.
+
+The real defect the same disassembly shows is that the score digit
+reports three unrelated states as '0': no packet validated, the
+interrupt stopped and the watchdog zeroed the score, and nothing
+latched yet. Reading the first when it was the second is what sent the
+last few rounds after torn reads and bus contention.
+
+The watchdog now says so: 'q' when it zeroed the score itself, 'S' for
+a storm, a hex count otherwise. The command counter loses its top bit
+to make room, which costs nothing -- it wraps four times a second.
+---
+ bios/segacd.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 618603a..0d66577 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -130,6 +130,9 @@ static UBYTE cdd_stat[10];
+ static ULONG cdd_rawbuf[3];     /* aligned: the read below is long-wide */
+ #define cdd_raw ((UBYTE *)cdd_rawbuf)
+ static UBYTE cdd_valid;         /* last packet checksummed */
++static UBYTE cdd_stalled;       /* the score is zero because the interrupt
++                                 * stopped, not because packets are bad --
++                                 * one character cannot mean both */
+ static UBYTE cdd_want_ck;       /* checksum we computed over the packet */
+ static UBYTE cdd_got_ck;        /* checksum the packet carried */
+ static UBYTE cdd_score;         /* valid packets in the last 16, latched */
+@@ -686,8 +689,10 @@ void segacd_int_2_c(void)
+     if (cdd_irqs != cdd_seen) {
+         cdd_seen = cdd_irqs;
+         cdd_quiet = 0;
++        cdd_stalled = 0;
+     } else if (cdd_quiet < 255 && ++cdd_quiet >= 8) {
+         cdd_score = 0;          /* eight VBLs is six missed packets */
++        cdd_stalled = 1;
+     }
+ 
+     /* Two counters that must both be spinning, because between them
+@@ -737,7 +742,8 @@ void segacd_int_2_c(void)
+         | (cdd_cmd_on ? 0x80 : 0)
+         | ((UWORD)(cdd_stormed ? 1 : 0) << 8)
+         | ((UWORD)((cdd_ctrl | (cdd_ctrl_ever << 2)) & 0x07) << 9)
+-        | ((UWORD)(cdd_sent & 0x0F) << 12));
++        | ((UWORD)(cdd_sent & 0x07) << 12)
++        | (cdd_stalled ? 0x8000 : 0));
+ 
+     if (pcm_countdown) {                /* silence the bell when it is due */
+         if (--pcm_countdown == 0)

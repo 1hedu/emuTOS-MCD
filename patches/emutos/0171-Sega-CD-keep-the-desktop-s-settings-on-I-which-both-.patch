@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 19 Aug 2026 03:28:02 +0000
+Subject: [PATCH 171/184] Sega CD: keep the desktop's settings on I:, which
+ both boots share
+
+EmuTOS keeps EMUDESK.INF on the boot drive. On this machine that is C:,
+a RAM disk rebuilt from the disc or from the cartridge ROM every time
+the console starts, so Options > Save Desktop wrote the background
+colour, the window positions and the icon layout somewhere that ceased
+to exist at power-off. The setting could be changed and never kept.
+
+I: is the console's own internal backup RAM: soldered down, battery
+backed, eight kilobytes, and present however the machine was booted --
+from the disc, or from a cartridge in Mode 1. It is the one writable
+volume both boot paths share, so a setting saved from either is there
+for the other.
+
+So INF_PERSIST_NAME, defined for MACHINE_SEGACD as I:\EMUDESK.INF.
+Saving goes there. Reading tries it first and falls back to the boot
+drive, so a console whose I: has never been formatted still gets the
+defaults that shipped on the disc.
+
+Verified in the emulator: with a FAT12 volume seeded on the internal
+backup RAM carrying an EMUDESK.INF that omits one drive icon, the
+desktop comes up with that icon gone -- 1006 pixels different from the
+same boot without it. (Persistence itself cannot be shown headless:
+Genesis Plus GX wipes the internal BRAM at load unless it finds Sega's
+own format footer in the last 64 bytes, and refuses to write the file
+back without it. That is the emulator enforcing Sega's layout, not the
+hardware.)
+---
+ desk/deskapp.c   | 19 +++++++++++++++++++
+ include/config.h | 20 ++++++++++++++++++++
+ 2 files changed, 39 insertions(+)
+
+diff --git a/desk/deskapp.c b/desk/deskapp.c
+index 1564304..2f57a3f 100644
+--- a/desk/deskapp.c
++++ b/desk/deskapp.c
+@@ -682,6 +682,18 @@ static void read_inf_file(char *infbuf)
+     LONG ret;
+     char inf_file_name[sizeof(INF_FILE_NAME)];
+ 
++#ifdef INF_PERSIST_NAME
++    /* The settings the user saved, on a volume that survives the power
++     * going off, before the copy that shipped with the system. An
++     * absent or unformatted persistent drive just falls through. */
++    ret = dos_load_file(INF_PERSIST_NAME, SIZE_SHELBUF-CPDATA_LEN-1, infbuf);
++    if (ret > 0L)
++    {
++        infbuf[ret] = '\0';
++        return;
++    }
++#endif
++
+     strcpy(inf_file_name, INF_FILE_NAME);
+     inf_file_name[0] += G.g_stdrv;      /* Adjust drive letter  */
+ 
+@@ -1046,8 +1058,15 @@ static void save_to_disk(char *buf, WORD len)
+     if (fun_alert(1, STSVINF) != 1)
+         return;
+ 
++#ifdef INF_PERSIST_NAME
++    /* Saved settings go where they will still be after the power has
++     * been off, and where the other boot path will also find them --
++     * not to the boot drive, which here is a RAM disk. */
++    strcpy(inf_file_name, INF_PERSIST_NAME);
++#else
+     strcpy(inf_file_name, INF_FILE_NAME);
+     inf_file_name[0] += G.g_stdrv;  /* Adjust drive letter  */
++#endif
+ 
+     while(1)
+     {
+diff --git a/include/config.h b/include/config.h
+index aa8bcf6..e61cba1 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -632,6 +632,26 @@
+ # ifndef CONF_WITH_READ_INF
+ #  define CONF_WITH_READ_INF 0
+ # endif
++# ifndef INF_PERSIST_NAME
++   /* Where the desktop's own settings live.
++    *
++    * EmuTOS keeps EMUDESK.INF on the boot drive, and on this machine
++    * the boot drive is C:, a RAM disk rebuilt from the disc or from the
++    * cartridge ROM on every start. Anything saved there is gone at
++    * power-off, so the background colour, the window positions and the
++    * icon layout could be changed but never kept.
++    *
++    * I: is the console's own internal backup RAM: soldered down,
++    * battery-backed, eight kilobytes, and present no matter which way
++    * the machine was booted -- from the disc, or from a cartridge in
++    * Mode 1. It is the one volume both boot paths share and neither can
++    * lose, which makes it the right home for a setting the owner
++    * expects to still be there tomorrow.
++    *
++    * Reading falls back to the boot drive, so a console whose I: has
++    * never been formatted still gets the shipped defaults. */
++#  define INF_PERSIST_NAME "I:\\EMUDESK.INF"
++# endif
+ # ifndef CONF_STRAM_SIZE
+ #  define CONF_STRAM_SIZE (384UL*1024)
+ # endif

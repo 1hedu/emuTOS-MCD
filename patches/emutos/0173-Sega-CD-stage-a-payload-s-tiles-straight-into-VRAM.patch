@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 19 Aug 2026 07:37:17 +0000
+Subject: [PATCH 173/184] Sega CD: stage a payload's tiles straight into VRAM
+
+A payload gets 32000 bytes of Genesis RAM, which is what is spare there.
+Sonic's art is fifty thousand, and tiles do not want to be in RAM
+anyway: VRAM is 64K and is entirely free for as long as a payload owns
+the screen, because the ST screen's own thousand tiles are rebuilt from
+scratch on the way out regardless.
+
+So SCD_PAYLOAD_VRAM, beside BLOCK and RUN, carrying 512 bytes to a block
+index in video memory. Same bounce buffer, same handshake, op 6.
+---
+ bios/scdapi.h | 4 ++++
+ bios/segacd.c | 5 +++--
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 2dc6c5c..ff689cc 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -163,6 +163,10 @@ struct scd_snap {
+  * See docs/payload.md for what the servant does with them. */
+ #define SCD_PAYLOAD_BLOCK 12
+ #define SCD_PAYLOAD_RUN   13
++/* ...and 512 bytes straight into VRAM at a = block index. Tiles belong
++ * in video memory, not in the 32000 bytes of Genesis RAM a payload
++ * gets, and VRAM is free for as long as a payload owns the screen. */
++#define SCD_PAYLOAD_VRAM  14
+ #define SCD_CARTSWAP      11            /* Mode 1: expect the cartridge to
+                                          * be pulled and another put in */
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index ca34571..6eccdfd 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3797,6 +3797,7 @@ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+         cart_swap_arm();
+         break;
+     case SCD_PAYLOAD_BLOCK:
++    case SCD_PAYLOAD_VRAM:
+     case SCD_PAYLOAD_RUN:
+         return scd_payload(op, a, b);
+     case SCD_EJECT:
+@@ -4622,10 +4623,10 @@ static WORD cart_xfer(UWORD op, UWORD lba)
+  * servant that had died. */
+ static ULONG scd_payload(LONG op, LONG a, LONG b)
+ {
+-    if (op == SCD_PAYLOAD_BLOCK) {
++    if (op == SCD_PAYLOAD_BLOCK || op == SCD_PAYLOAD_VRAM) {
+         if (!b) return EREADF;
+         memcpy((void *)BOUNCE, (const void *)b, SECTOR_SIZE);
+-        return (ULONG)cart_xfer(4, (UWORD)a);
++        return (ULONG)cart_xfer(op == SCD_PAYLOAD_VRAM ? 6 : 4, (UWORD)a);
+     }
+     return (ULONG)cart_xfer(5, 0);
+ }

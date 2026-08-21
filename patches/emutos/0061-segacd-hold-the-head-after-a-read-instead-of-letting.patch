@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 20:45:24 +0000
+Subject: [PATCH 061/184] segacd: hold the head after a read instead of letting
+ it run to the rim
+
+Command 3 does not read a sector, it starts the drive reading, and the
+drive keeps going. Nothing stopped it between one read and the next, so
+across a request -- across GEMDOS -- it ran forward to the end of the
+disc and sat in the lead-out.
+
+A console reported the head at 01:80:00 on a disc 01:28:48 long while
+waiting for 00:02:16, with thirty-seven seeks against three waits and
+twelve errors, and a boot slow enough to look hung. Every read was a
+journey back from the rim.
+
+Command 6 after each fill holds position rather than stopping the disc,
+so the next read is a short seek from where the last one finished.
+---
+ bios/segacd.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index ec78d85..8990c76 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1766,6 +1766,22 @@ static BOOL cd_fill(ULONG lba)
+         memcpy(cd_cache[i], CDSECT, CDC_DATA_BYTES);
+         cd_cache_have = (UBYTE)(i + 1);
+     }
++
++    /* Hold the head where it is.
++     *
++     * Command 3 does not read a sector, it starts the drive reading and
++     * the drive keeps going. Between one read and the next -- across
++     * GEMDOS, across a whole request -- nothing was stopping it, so it
++     * ran forward to the end of the disc and sat in the lead-out. A
++     * console reported the head at 01:80:00 on a disc 01:28:48 long
++     * while waiting for 00:02:16, thirty-seven seeks against three
++     * waits, and a boot slow enough to look hung.
++     *
++     * Command 6 holds position rather than stopping the disc, so the
++     * next read is a short seek from where this one finished instead of
++     * a journey back from the rim. */
++    cdd_ask_ready();
++    cd_streaming = 0;
+     return TRUE;
+ }
+ 

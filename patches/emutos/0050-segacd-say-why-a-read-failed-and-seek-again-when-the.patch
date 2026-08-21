@@ -1,0 +1,326 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 11:16:54 +0000
+Subject: [PATCH 050/184] segacd: say why a read failed, and seek again when
+ the drive lands late
+
+The console reported a failure with no way to tell which of four it was,
+which is the same class of mistake that cost stage 2 discs: an
+instrument that says something went wrong but not what.
+
+Now the report carries the header the decoder is actually delivering
+beside the one being waited for, per-slot fail codes and sector counts,
+the header attached to the data, and how many re-seeks it took. When a
+read times out it takes whichever sector the decoder last wrote and
+reports its header, so a timeout yields evidence instead of silence.
+
+Behaviour changes, both grounded in the BIOS rather than guessed:
+
+- Twenty frames of lead-in instead of two. Sega uses two because a
+  seek in an emulator lands exactly; a real one lands approximately and
+  then reads forward, and landing two frames late puts the sector
+  behind the head for ever.
+- Re-seek when the arriving headers pass the target, which is what
+  $4124 does. Guarded by a settle delay, because re-seeking does not
+  stop the decoder and the sectors still arriving are from where the
+  head just was -- without the guard all four retries are spent in four
+  frames before the drive has moved.
+
+Holding B at power-on selects the reset-time CDC control pair alone,
+so the two configurations the BIOS writes can be told apart in one
+burn rather than two. The report block's magic word is now written
+last and cleared first: the servant reads it by halting us, and a
+half-written report reads as a coherent one.
+---
+ bios/segacd.c | 177 +++++++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 152 insertions(+), 25 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 11ae800..3a6922e 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -140,6 +140,9 @@ static UBYTE cdd_score;         /* valid packets in the last 16, latched */
+ static UBYTE cdd_count, cdd_good;
+ static UBYTE cdd_tick;
+ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
++static UBYTE cdc_altctrl;       /* holding B picks the other CDC control pair;
++                                 * declared here because the init that reads
++                                 * the pad runs long before the CDC code */
+ static UBYTE cdd_queued[9];
+ static UBYTE cdd_next[9];       /* built by the VBL, taken by level 4 */
+ static ULONG cdd_outbuf[3];     /* aligned: the write below is long-wide */
+@@ -193,6 +196,16 @@ void segacd_cdd_init(void)
+         } while ((f & 0xFF00) != 0x5A00 && --spin);
+ 
+         cdd_cmd_on = (UBYTE)((f & 1) ? 0 : 1);
++
++        /* B does the same job for the decoder. The BIOS writes two
++         * different CTRL0/CTRL1 pairs -- $A0/$F8 when it resets the
++         * decoder and $A7/$F0 once the drive has locked -- and it waits
++         * on the drive's status in between, which this driver does not.
++         * Neither emulator models those registers meaningfully, so
++         * emulation cannot say whether the wait matters. Holding B
++         * selects the reset-time pair alone, so one disc can answer it
++         * instead of two. */
++        cdc_altctrl = (UBYTE)((f & 2) ? 1 : 0);
+     }
+ 
+     cdd_ask(CDD_CMD_INFO, 0x03);        /* something to say from the first
+@@ -537,6 +550,10 @@ static UBYTE cdc_head[4];       /* header of the one it reported last */
+ static UBYTE cdc_stat4[4];      /* STAT0-3 with it */
+ static UBYTE cdc_want[3];       /* the header we are waiting for, BCD */
+ static UWORD cdc_pt;            /* where in buffer RAM ours landed */
++static UWORD cdc_pt_last;       /* ...and where the newest one is, matched
++                                 * or not, so a read that never finds its
++                                 * sector can still take one and say what
++                                 * it was */
+ static UBYTE cdc_hit;           /* it went by, and cdc_pt says where */
+ static UBYTE cdc_hdr[4];        /* header that arrived with the data */
+ static UBYTE cdc_fail;          /* why the read did not finish */
+@@ -557,7 +574,9 @@ static void cdc_setup(void)
+     GA_INTMASK |= 0x20;         /* level 5, once per sector decoded */
+ 
+     *CDC_AR = 0x0A; *CDC_DATA = 0xA0; *CDC_DATA = 0xF8; /* CTRL0, CTRL1 */
+-    *CDC_AR = 0x0A; *CDC_DATA = 0xA7; *CDC_DATA = 0xF0;
++    if (!cdc_altctrl) {
++        *CDC_AR = 0x0A; *CDC_DATA = 0xA7; *CDC_DATA = 0xF0;
++    }
+ }
+ 
+ /* CDCSTOP, $1FB6: mask level 5, write IFCTRL twice, and finish by
+@@ -612,9 +631,10 @@ void segacd_int_5_c(void)
+     /* Latch the first one whose header is the sector we asked for. The
+      * pointer has to be latched with it: by the time the foreground gets
+      * round to the transfer, PT has moved on to later sectors. */
++    cdc_pt_last = (UWORD)(((UWORD)pth << 8) | ptl);
+     if (!cdc_hit && h0 == cdc_want[0] && h1 == cdc_want[1]
+                  && h2 == cdc_want[2]) {
+-        cdc_pt = (UWORD)(((UWORD)pth << 8) | ptl);
++        cdc_pt = cdc_pt_last;
+         cdc_hit = 1;
+     }
+ }
+@@ -709,6 +729,12 @@ static UWORD cdr_hold;          /* frames spent sitting on a finished read */
+ static UBYTE cdr_slot;          /* which of the two is being read */
+ static UBYTE cdr_pub = 0xFF;    /* which one is in the buffer right now */
+ static ULONG cdr_sum[CDR_SLOTS];
++static UBYTE cdr_fails[CDR_SLOTS];      /* how each attempt ended */
++static UBYTE cdr_ints[CDR_SLOTS];       /* sectors decoded during each */
++static UBYTE cdr_reseeks;               /* times the drive landed late */
++static UBYTE cdr_forced;                /* the buffer holds a sector we did
++                                         * not ask for, taken to find out
++                                         * whether the transfer works at all */
+ 
+ /* The verdict, one bit per slot plus two for how it went wrong, because
+  * on a console this is the entire result and it has to be legible as a
+@@ -797,41 +823,74 @@ static void cdd_ask_idle(void)
+     cdd_handover = 1;
+ }
+ 
+-static void cdr_start(ULONG lba)
++/* How far ahead of the wanted sector the drive is asked to start.
++ *
++ * The BIOS uses two frames -- ROMREAD converts LBA + 148 and keeps the
++ * sector whose header reads LBA + 150. Two is enough for a drive that
++ * lands exactly where it was sent, which is what both emulators model,
++ * and it is not obviously enough for one that has to physically settle.
++ * A real seek lands approximately and then reads forward: land two
++ * frames late and the sector is behind the head, and reading forward
++ * never comes back to it. Twenty frames is a quarter of a second of
++ * run-up and costs nothing but that. */
++#define CDR_LEADIN 20UL
++
++/* ...and if it lands late anyway, ask again. This is the BIOS's own
++ * answer: $4124 re-issues the whole read when an arriving header is not
++ * the frame it expected. Bounded, because a drive that cannot find the
++ * sector at all must end with a diagnosis rather than spin for ever. */
++#define CDR_RESEEKS 4
++
++/* Frames to let a re-seek actually happen before judging it. Three
++ * quarters of a second: the command goes out within 1/75 s and a drive
++ * seek is tens of milliseconds, so this is generous, and generous is
++ * right for something whose failure mode is spending every retry
++ * without moving. */
++#define CDR_SETTLE 45
++
++static void cdr_reissue(void)
+ {
+     UBYTE start[3];
+ 
+-    /* Ask the drive to start two frames early and keep the sector whose
+-     * header matches. That is not caution, it is what the BIOS does:
+-     * ROMREAD converts LBA + 148 for the drive and then compares each
+-     * arriving header against the frame number of LBA + 150. */
+-    lba_to_msf(lba, cdc_want);
+-    lba_to_msf(lba >= 2 ? lba - 2 : 0, start);
+-
++    lba_to_msf(cdr_lbas[cdr_slot] >= CDR_LEADIN
++                   ? cdr_lbas[cdr_slot] - CDR_LEADIN : 0, start);
+     cdc_hit = 0;
+-    cdc_fail = 0;
+     cdc_ints = 0;
+     cdr_seen = 0;
+     cdr_wait = 0;
+-
+-    cdc_setup();
+     cdd_ask_read(start);
+     cdr_state = CDR_COMMAND;
+ }
+ 
++static void cdr_start(ULONG lba)
++{
++    lba_to_msf(lba, cdc_want);
++
++    cdc_fail = 0;
++    cdr_reseeks = 0;
++    cdc_setup();
++    cdr_reissue();
++}
++
+ /* Where the servant looks for all of this. All eight sub->main comm
+  * registers are spoken for -- screen base, the interlock and two
+  * heartbeats, two for the backup-RAM cart, two for the CDD, two for the
+  * block layer -- and a disc read needs more than the three spare bits
+- * left among them. So the report goes in PRG-RAM, sixteen bytes below
+- * the captured sector, and the servant fetches it through the same bank
+- * window it already uses. One spare bit of $FF8028 says whether there is
+- * anything to fetch, so it only pays for the bank switch when there is.
++ * left among them. So the report goes in PRG-RAM below the captured
++ * sector, and the servant fetches it through the same bank window it
++ * already uses. One spare bit of $FF8028 says whether there is anything
++ * to fetch, so it only pays for the bank switch when there is.
++ *
++ * The magic word is written last and cleared first, because the servant
++ * reads this block by halting us -- and it can halt us in the middle of
++ * writing it. A half-updated report reads as a coherent one: a run that
++ * had failed twice showed a state from the new attempt beside a verdict
++ * from the old, which is exactly the kind of instrument that has cost
++ * this port discs before.
+  *
+- * The sequence number is not decoration: it is the difference between a
+- * report that is stale and a report that has stopped, which is a
+- * distinction this port has already paid for twice. */
+-#define CDREPORT    ((volatile UWORD *)0x7F7E0)
++ * The sequence number is not decoration either: it is the difference
++ * between a report that is stale and a report that has stopped. */
++#define CDREPORT    ((volatile UWORD *)0x7F7C0)
+ #define CDREPORT_MAGIC 0xCDC0
+ 
+ static UWORD cdr_seq;
+@@ -840,13 +899,13 @@ static void cdr_report(void)
+ {
+     UBYTE k;
+ 
+-    CDREPORT[0] = CDREPORT_MAGIC;
++    CDREPORT[0] = 0;            /* torn from here until the last line */
+     CDREPORT[1] = (UWORD)(((UWORD)(cdr_state & 0x0F) << 12)
+                         | ((UWORD)cdc_ints << 4)
+                         |  (UWORD)(cdc_fail & 0x0F));
+     CDREPORT[2] = (UWORD)(((UWORD)cdc_head[0] << 8) | cdc_head[1]);
+     CDREPORT[3] = (UWORD)(((UWORD)cdc_head[2] << 8) | cdc_head[3]);
+-    CDREPORT[4] = cdc_pt;
++    CDREPORT[4] = cdc_pt_last;
+     CDREPORT[5] = ++cdr_seq;
+     CDREPORT[6] = cdr_pub;      /* which sector the buffer holds */
+     CDREPORT[7] = cdr_verdict;  /* and whether it was the right one */
+@@ -856,6 +915,41 @@ static void cdr_report(void)
+         CDREPORT[12 + 2 * k] = (UWORD)(cdr_lbas[k] >> 16);
+         CDREPORT[13 + 2 * k] = (UWORD)cdr_lbas[k];
+     }
++    /* The position we asked the decoder for, beside the one it is
++     * actually delivering. Those two numbers together are the whole
++     * diagnosis when a read finds no sector: same, and the matching is
++     * at fault; different, and the drive is somewhere else; zero or
++     * nonsense, and the decoder is not decoding. */
++    CDREPORT[16] = (UWORD)(((UWORD)cdc_want[0] << 8) | cdc_want[1]);
++    CDREPORT[17] = (UWORD)(((UWORD)cdc_want[2] << 8) | cdr_slot);
++    /* The header that arrived attached to the data, which need not be
++     * the one the registers reported. */
++    CDREPORT[18] = (UWORD)(((UWORD)cdc_hdr[0] << 8) | cdc_hdr[1]);
++    CDREPORT[19] = (UWORD)(((UWORD)cdc_hdr[2] << 8) | cdc_hdr[3]);
++    CDREPORT[20] = (UWORD)(((UWORD)cdr_fails[0] << 8) | cdr_fails[1]);
++    CDREPORT[21] = (UWORD)(((UWORD)cdr_ints[0] << 8) | cdr_ints[1]);
++    CDREPORT[22] = (UWORD)(((UWORD)cdr_forced << 8)
++                         | ((UWORD)(cdr_reseeks & 0x0F) << 4) | cdc_altctrl);
++    CDREPORT[23] = (UWORD)(((UWORD)cdc_stat4[0] << 8) | cdc_stat4[3]);
++    CDREPORT[0] = CDREPORT_MAGIC;
++}
++
++/* Is the decoder past the sector we are waiting for? BCD digits compare
++ * as plain bytes, so minute, second and frame in that order is an
++ * ordinary lexicographic comparison -- no arithmetic, and no chance of
++ * getting the packing wrong. A frame of slack, because the header
++ * arriving *is* the sector arriving and the two are latched together. */
++static BOOL cdr_past_target(void)
++{
++    UBYTE i;
++
++    for (i = 0; i < 3; i++) {
++        if (cdc_head[i] > cdc_want[i])
++            return TRUE;
++        if (cdc_head[i] < cdc_want[i])
++            return FALSE;
++    }
++    return FALSE;               /* exactly on it: cdc_hit has it */
+ }
+ 
+ /* Once per frame while a read is outstanding. Ten seconds is generous
+@@ -886,6 +980,7 @@ static void cdr_step(void)
+         break;
+ 
+     case CDR_STREAM:
++        cdr_wait++;
+         if (cdc_hit) {
+             BOOL ok = cdc_grab();
+ 
+@@ -912,9 +1007,39 @@ static void cdr_step(void)
+                 cdr_state = CDR_FAILED;
+             }
+             cdr_hold = 0;
+-        } else if (++cdr_wait > CDR_TIMEOUT) {
++        } else if (cdr_wait > CDR_SETTLE && cdc_ints && cdr_past_target()
++                   && cdr_reseeks < CDR_RESEEKS) {
++            /* The decoder is delivering sectors from beyond the one we
++             * want, so waiting cannot help: the drive reads forward and
++             * will not come back. Seek again.
++             *
++             * Not before CDR_SETTLE, and that guard is the whole reason
++             * this is written out rather than folded into the condition
++             * above. Re-seeking clears the sector counter but does not
++             * stop the decoder, so the sectors still arriving are from
++             * where the head was a moment ago -- which is, by
++             * definition, past the target. Without the wait the four
++             * retries are spent in four frames, before the drive has
++             * moved at all, and the log says it tried when it did
++             * not. */
++            cdr_reseeks++;
++            cdr_reissue();
++        } else if (cdr_wait > CDR_TIMEOUT) {
++            /* The sector we asked for never came round. Rather than end
++             * with nothing, take whichever one the decoder last wrote
++             * and report its header: that separates "the drive is
++             * reading somewhere else" from "the transfer path does not
++             * work", and those need opposite fixes. A timeout that
++             * yields no evidence is how this stage would cost another
++             * disc. */
++            cdc_fail = 4;
++            if (cdc_ints && cdc_pt_last) {
++                cdc_pt = cdc_pt_last;
++                cdr_forced = 1;
++                if (cdc_grab())
++                    cdr_pub = cdr_slot;
++            }
+             cdc_stop();
+-            cdc_fail = 4;               /* our sector never came round */
+             cdr_verdict |= CDR_V_NOREAD;
+             cdr_state = CDR_FAILED;
+             cdr_hold = 0;
+@@ -923,6 +1048,8 @@ static void cdr_step(void)
+ 
+     case CDR_DONE:
+     case CDR_FAILED:
++        cdr_fails[cdr_slot] = cdc_fail;
++        cdr_ints[cdr_slot] = cdc_ints;
+         /* Sit on the result for two seconds before touching the buffer
+          * again. The servant fetches four times a second, so that is
+          * eight chances to copy this sector out before the next read

@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 01:09:50 +0000
+Subject: [PATCH 097/184] segacd: the control that should have been the first
+ test
+
+Everything the parked firmware has ever been seen to read on this
+console lives at LBA 24 to 194 -- ADISK.IMG and EMUTOS.IMG, a hundred
+and seventy-one sectors, loaded flawlessly on every boot in the seconds
+before it is parked. Everything it has been ASKED for since is at 1400
+or 1600. Two variables moved at once and neither has ever been held
+still: the firmware was parked, and the target moved most of the way
+across the disc. Our own driver's failures cluster at 1608 to 1620,
+which fits either story just as well.
+
+So the diagnostic now reads sector 16 as well -- the volume descriptor,
+which sits with the boot files and carries its own proof of identity in
+the "CD001" at bytes 1 to 5. The line prints near and far side by side.
+
+near 0000 far 05xx would mean the parking is fine and the problem is
+where the sector is, which makes the last four builds' worth of
+interrupt archaeology beside the point. Both failing would mean the
+distance never mattered.
+---
+ bios/bios.c   |  5 +++--
+ bios/segacd.c | 42 ++++++++++++++++++++++++++++++++++++++++--
+ bios/segacd.h |  1 +
+ 3 files changed, 44 insertions(+), 4 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index d5b1973..8134fe4 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1139,8 +1139,9 @@ void biosmain(void)
+                 UWORD ctrl, lost;
+ 
+                 segacd_bios_ipath(&i4, &own, &vec4, &ctrl, &lost);
+-                cprintf(" CDBIOS probe %04X read %04X sw %u\r\n",
+-                        br, rr, segacd_bios_swaps());
++                cprintf(" CDBIOS probe %04X near %04X far %04X sw %u\r\n",
++                        br, segacd_bios_nearread(), rr,
++                        segacd_bios_swaps());
+                 cprintf(" i4 %lu/%lu v4 %06lX ctl %04X ls %02X\r\n",
+                         own, i4, vec4, ctrl, lost);
+                 {   /* The one exchange that matters, in full. */
+diff --git a/bios/segacd.c b/bios/segacd.c
+index c69a4c5..d690e89 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2400,8 +2400,9 @@ extern UWORD segacd_bios_ctl2;          /* segacd2.S */
+  * The pattern sector is the right target because the answer needs no
+  * reference data -- the driver regenerates those 2048 bytes from a
+  * formula, so a match is proof and not a coincidence. Returns 0 for a
+- * verified read, 1 for a read that failed, 2 for a read that returned
+- * the wrong bytes, 0xFFFF for no firmware parked. */
++ * verified read, 2 for a read that returned the wrong bytes, the
++ * visit's own stage code for a read that failed, 0xFFFF for no
++ * firmware parked. */
+ UWORD segacd_bios_readtest(void)
+ {
+     const UBYTE *got = (const UBYTE *)0x7D000UL;
+@@ -2424,6 +2425,43 @@ UWORD segacd_bios_readtest(void)
+     return 0;
+ }
+ 
++/* The control that should have been run first.
++ *
++ * Everything the firmware has ever been seen to read on this console
++ * lives at LBA 24 to 194 -- ADISK.IMG and EMUTOS.IMG, a hundred and
++ * seventy-one sectors, loaded flawlessly on every boot in the seconds
++ * before it is parked. Everything it has been ASKED for since is at
++ * 1400 or 1600. Two things changed at once and neither has been held
++ * still: the firmware was parked, and the target moved most of the way
++ * across the disc. Our own driver's failures cluster at 1608 to 1620,
++ * which fits either story.
++ *
++ * So: the volume descriptor at sector 16, which sits with the boot
++ * files and carries its own proof of identity. It needs no reference
++ * data either -- ISO 9660 puts "CD001" at bytes 1 to 5 and nothing
++ * else on this disc does.
++ *
++ * If this returns 0 and the pattern sector does not, the parking is
++ * fine and the problem is where the sector is. If this fails too, the
++ * problem is the parking and the distance never mattered. */
++UWORD segacd_bios_nearread(void)
++{
++    const UBYTE *got = (const UBYTE *)0x7D000UL;
++    WORD rc;
++
++    if (!bios_parked())
++        return 0xFFFF;
++
++    rc = segacd_bios_read(16UL, 1);
++    if (rc)
++        return (UWORD)rc;
++
++    if (got[1] != 'C' || got[2] != 'D' || got[3] != '0'
++        || got[4] != '0' || got[5] != '1')
++        return 2;
++    return 0;
++}
++
+ /* The stage-3 verification, re-based on the timeshare.
+  *
+  * The old self-test proved OUR driver could read; with the firmware
+diff --git a/bios/segacd.h b/bios/segacd.h
+index a380b9d..9d148c7 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -42,6 +42,7 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+ extern UBYTE segacd_diag;       /* Down held at power-on */
+ UWORD segacd_bios_probe(void);  /* exchange the CDBIOS in, call it, out */
+ UWORD segacd_bios_readtest(void); /* ...and have it read a known sector */
++UWORD segacd_bios_nearread(void); /* ...one it read at boot, near the boot files */
+ BOOL segacd_bios_available(void);
+ void segacd_bios_selftest(void);
+ WORD segacd_bios_read(ULONG lba, WORD count);

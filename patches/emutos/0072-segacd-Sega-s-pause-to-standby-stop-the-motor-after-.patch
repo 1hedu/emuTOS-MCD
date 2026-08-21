@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 05:23:58 +0000
+Subject: [PATCH 072/184] segacd: Sega's pause-to-standby -- stop the motor
+ after 60 idle seconds
+
+The access lamp sat solid at an idle desktop and the user called it
+days before it was understood: pause is a hover, the head re-reading
+one track 75 times a second, and adopting Lunar's pause-between-reads
+without the standby half of the contract meant the hover ran for every
+idle minute since. CDBPAUSE's documentation states the missing half
+with a warning attached -- the delay runs 0x1194 ticks and up, and
+never stopping 'can damage the drive if used improperly'.
+
+Command 1 returns for its one legitimate purpose: sixty seconds after
+the last real work, stop the motor. Any new read wakes the drive
+through the same unready-state path as always. The lamp goes dark at
+an idle desktop, and idle costs the mechanism nothing.
+---
+ bios/segacd.c | 47 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 611201b..5dc40f3 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -232,6 +232,10 @@ static UWORD cd_wrongsec;       /* transfers that delivered the wrong
+                                  * sector and were caught by the header
+                                  * check -- each one of these used to be
+                                  * silent corruption */
++#define CD_STANDBY 0x1194       /* 60 s at 75 Hz: Sega's documented floor
++                                 * for the pause-to-standby delay */
++static UWORD cd_workmark;       /* cdd_ticks when the drive last worked */
++static UBYTE cd_standing;       /* the idle stop has been sent */
+ static UWORD cd_why;            /* nibble per attempt of the last
+                                  * failed fetch: 1 timed out, 2 the
+                                  * head was already past, 3 the
+@@ -1170,6 +1174,31 @@ static void cdd_ask_read(const UBYTE *msf)
+     cdd_handover = 1;           /* last: the interrupt reads this */
+ }
+ 
++/* Command 1, no arguments: stop the drive.
++ *
++ * Removed once on the strength of the trace -- the CDBIOS never sends
++ * it during reads -- and that was half right. It has exactly one
++ * legitimate use, and Sega documents it with a warning attached:
++ * CDBPAUSE sets how long a paused drive waits before spinning down,
++ * normal range 0x1194 ticks up, and a setting that never stops "can
++ * damage the drive if used improperly". Pause is a hover; the head
++ * re-reads the same track 75 times a second for as long as it holds.
++ * Between reads that is the fast path. Held for an idle hour it is
++ * the documented way to wear the mechanism -- and the access lamp
++ * sitting solid at an idle desktop was this driver doing exactly
++ * that, reported by the user days before it was understood. */
++static void cdd_ask_stop(void)
++{
++    int i;
++
++    for (i = 0; i < 9; i++)
++        cdd_next[i] = 0;
++    cdd_next[0] = 0x01;
++    cdd_want = 0xFF;
++    cdd_answered = 0;
++    cdd_handover = 1;
++}
++
+ /* Three commands this driver used to send and the CDBIOS does not.
+  *
+  * A trace of Sega's own code reading this disc on the console -- three
+@@ -1645,6 +1674,7 @@ static BOOL cd_fetch(ULONG lba)
+      * interrupts the streaming that read is waiting on. */
+     cd_busy = 1;
+     cd_led(1);
++    cd_standing = 0;
+     cd_why = 0;
+ 
+     /* Eight, up from three, after reading Sega's sample policy: it
+@@ -1852,6 +1882,7 @@ done:
+         cd_cached = 0xFFFFFFFFUL;
+     }
+     cd_led(0);
++    cd_workmark = cdd_ticks;
+     cd_busy = 0;
+     return got;
+ }
+@@ -2241,6 +2272,22 @@ void segacd_int_2_c(void)
+         cdd_ask_next();
+     }
+ 
++    /* Sega's pause-to-standby, which pausing between reads obligated
++     * us to and nobody implemented: a paused drive hovers, physically
++     * re-reading one track 75 times a second, and CDBPAUSE's
++     * documentation warns that never stopping "can damage the drive".
++     * Sixty seconds -- Sega's documented floor -- after the last real
++     * work, stop the motor. The read path already knows how to wake a
++     * stopped drive: command 6 and patience, the same as any other
++     * unready state. The access lamp at an idle desktop goes dark,
++     * because idle finally means idle. */
++    if (cdd_cmd_on && !cd_busy && !cd_standing
++            && cdr_state != CDR_COMMAND && cdr_state != CDR_STREAM
++            && (UWORD)(cdd_ticks - cd_workmark) > CD_STANDBY) {
++        cd_standing = 1;
++        cdd_ask_stop();
++    }
++
+     /* Stage 3: read one known sector off the disc and prove it, once.
+      * Held back until the CDD round trip has been demonstrated, because
+      * a read command sent down a link that is not working proves

@@ -1,0 +1,170 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 03:43:37 +0000
+Subject: [PATCH 129/184] segacd: the decoder bring-up is a coroutine, not a
+ burst
+
+$1F3E is the routine CDCSTART calls between every step, and it is not a
+delay. It pops its own return address, saves d5-a0/a2-a4 into the state
+block at a5+$5A32, clears the busy bit and returns to CDCSTART's
+caller. It is a coroutine yield, resumed by the drive's own exchange.
+
+So the firmware's bring-up is spread across dozens of 1/75 s exchanges
+with a status check between every register write, and the counters it
+carries -- d7=30, d6=5, d5=5 -- count exchanges rather than loop
+iterations. We did the whole sequence as one synchronous burst: CTRL
+$A0,$F8 and the next pair back to back, nothing looked at in between.
+
+That is what segacd.c:610 has been confessing in a comment for weeks,
+and cd_ctrl2_wait was already built to fix it and left switched off
+behind a diagnostic arm nobody had reached. It is the default now: the
+reset pair goes down immediately, the ladder rung waits for the level 4
+handler.
+
+Bounded, because the drive on this machine has never once reported
+state 1 and a rung that is never written is worse than one written too
+early -- the decoder would sit on $A0/$F8, which is the firmware's
+give-up pair. Thirty exchanges, which is what `move.w #30,d7` with
+`dbeq d7` around the wait allows, four tenths of a second at 75 Hz.
+
+cd_late is now cd_ctrl_inline and selects the old behaviour, so the
+diagnostic's A arm compares the two rather than enabling the good one.
+
+The rungs-tried mask moves to where the write happens. With the write
+deferred, "chosen" and "written" stopped being the same event, and a
+mask set at the choice would have reported a ladder that never reached
+the decoder as tried.
+---
+ bios/segacd.c | 59 +++++++++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 48 insertions(+), 11 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 93075c4..a15a6f7 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -192,7 +192,25 @@ static UBYTE cd_hold = 1;       /* pause the drive after each fill.
+  * sectors late, and a fresh setup succeeding where retries inside one
+  * did not. Neither emulator models these two registers at all, which
+  * is why emulation has never been able to see any of this. */
+-static UBYTE cd_late;           /* hold the ladder rung back until lock */
++/* Write the ladder rung inline, the way this driver always did, instead
++ * of the way the firmware does it. Off by default now; the A arm of the
++ * diagnostic turns it back on so the two can be compared.
++ *
++ * CDCSTART does not write two CTRL pairs in one breath. Every step of
++ * it is separated by `bsr $1F3E`, and $1F3E is not a delay -- it pops
++ * its own return address, saves d5-a0/a2-a4 into the state block at
++ * a5+$5A32, clears the busy bit and returns to CDCSTART's caller. It is
++ * a coroutine yield. The drive's exchange resumes it. So the whole
++ * bring-up is spread across dozens of 1/75 s exchanges with a status
++ * check between every register write, and the counters it carries
++ * (d7=30, d6=5, d5=5) count exchanges, not loop iterations.
++ *
++ * We did the entire sequence as one synchronous burst. That is the
++ * difference segacd.c has been confessing in a comment for weeks -- "it
++ * waits on the drive's status in between, which this driver does not"
++ * -- and cd_ctrl2_wait was already built to do it and left switched
++ * off behind a diagnostic arm. */
++static UBYTE cd_ctrl_inline;
+ /* The decoder configuration ladder, defined with cdc_setup() further
+  * down. Declared here because the deferred write below is the second
+  * place the pair gets written, and the first version of this had the
+@@ -202,7 +220,9 @@ static UBYTE cd_late;           /* hold the ladder rung back until lock */
+  * the fix. */
+ extern const UBYTE cdc_ladder[3][2];
+ extern UBYTE cdc_rung;
+-static volatile UBYTE cd_ctrl2_wait;    /* ...and it is currently held */
++extern UBYTE cdc_rungs;
++static volatile UBYTE cd_ctrl2_wait;    /* exchanges left to wait, 0 = not */
++#define CDC_CTRL_WAIT 30                /* what the firmware allows itself */
+ /* D: telemetry. Declared up here because the report that publishes it
+  * is written before the code that keeps it, and a forward declaration
+  * for four counters is less to get wrong than moving either. */
+@@ -984,13 +1004,28 @@ void segacd_int_4_c(void)
+      * and masked to 7 for the three register writes because level 5
+      * uses the same address register and can preempt this level
+      * mid-sequence. */
+-    if (cd_ctrl2_wait && cdd_valid && cdd_stat[0] == 0x1) {
++    /* Bounded, because the drive on this machine has never once
++     * reported state 1 and a rung that is never written is worse than
++     * one written too early -- the decoder would sit on $A0/$F8, which
++     * is the firmware's give-up pair.
++     *
++     * The firmware bounds it the same way: `move.w #30,d7` before the
++     * wait and `dbeq d7` around it, so after thirty exchanges it stops
++     * asking and moves on. Thirty exchanges is four tenths of a second
++     * at 75 Hz. */
++    if (cd_ctrl2_wait
++        && ((cdd_valid && cdd_stat[0] == 0x1) || --cd_ctrl2_wait == 0)) {
+         /* CDC_AR/CDC_DATA are defined further down; their addresses,
+          * not the macros, are what this early handler needs. */
+         WORD sr = set_sr(0x2700);
+         *(volatile UBYTE *)0xFF8005 = 0x0A;
+         *(volatile UBYTE *)0xFF8007 = cdc_ladder[cdc_rung][0];
+         *(volatile UBYTE *)0xFF8007 = cdc_ladder[cdc_rung][1];
++        /* Set here, not where the rung is chosen: with the write
++         * deferred, "chosen" and "written" are no longer the same
++         * event, and a mask that meant the first would report a ladder
++         * that never actually reached the decoder as tried. */
++        cdc_rungs |= (UBYTE)(1 << cdc_rung);
+         set_sr(sr);
+         cd_ctrl2_wait = 0;
+     }
+@@ -1166,7 +1201,7 @@ static UBYTE cdc_rung_ok;       /* this rung put a sector in the ring */
+  * same, and if that number is a multiple of three the rung is back
+  * where it started by the time anything looks at it. A mask cannot
+  * alias. */
+-static UBYTE cdc_rungs;
++UBYTE cdc_rungs;
+ 
+ static void cdc_setup(void)
+ {
+@@ -1198,13 +1233,19 @@ static void cdc_setup(void)
+         if (!cdc_rung_ok)
+             cdc_rung = (UBYTE)((cdc_rung + 1) % 3);
+         cdc_rung_ok = 0;
+-        cdc_rungs |= (UBYTE)(1 << cdc_rung);
+ 
+         *CDC_AR = 0x0A; *CDC_DATA = 0xA0; *CDC_DATA = 0xF8; /* CTRL0, CTRL1 */
+-        if (!cdc_altctrl && !cd_late) {
++        if (cdc_altctrl) {
++            /* B held: the reset pair alone, nothing after it. */
++        } else if (cd_ctrl_inline) {
+             *CDC_AR = 0x0A;
+             *CDC_DATA = cdc_ladder[cdc_rung][0];
+             *CDC_DATA = cdc_ladder[cdc_rung][1];
++            cdc_rungs |= (UBYTE)(1 << cdc_rung);
++        } else {
++            /* The firmware's way: let the drive be looked at first,
++             * for up to thirty of its exchanges. */
++            cd_ctrl2_wait = CDC_CTRL_WAIT;
+         }
+         set_sr(sr);
+     }
+@@ -1730,8 +1771,6 @@ static void cdr_reissue(void)
+      * not the same thing and has no reason to go better. */
+     cdc_setup();
+     cdd_ask_read(start);
+-    if (cd_late && !cdc_altctrl)
+-        cd_ctrl2_wait = 1;
+     cdr_state = CDR_COMMAND;
+ }
+ 
+@@ -2211,8 +2250,6 @@ static BOOL cd_fetch(ULONG lba)
+              * the drive around behind its own back. */
+             lba_to_msf(lba >= CDR_EARLY ? lba - CDR_EARLY : 0, start);
+             cdd_ask_read(start);
+-            if (cd_late && !cdc_altctrl)
+-                cd_ctrl2_wait = 1;
+             cd_quiet = 0;
+             cd_streaming = 1;
+             cd_seeks++;
+@@ -3362,7 +3399,7 @@ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late)
+     cd_booting = 0;
+     cd_lead = lead;
+     cd_hold = (UBYTE)(hold ? 1 : 0);
+-    cd_late = (UBYTE)(late ? 1 : 0);
++    cd_ctrl_inline = (UBYTE)(late ? 1 : 0);
+     /* Only the diagnostic calls this, and a diagnostic that spends
+      * sixteen seconds per failed block prints a line every few minutes
+      * -- which reads as a hang from a couch. Half the leash: the

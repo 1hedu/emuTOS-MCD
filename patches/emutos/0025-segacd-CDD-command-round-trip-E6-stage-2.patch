@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 02:36:25 +0000
+Subject: [PATCH 025/184] segacd: CDD command round-trip (E6 stage 2)
+
+Sends command 0x02 sub-command 0x00, "report the current absolute
+position", and reports the answer. That command was chosen because it
+moves nothing: a round-trip can be proven on real hardware without
+asking the drive to do anything it might refuse.
+
+GPGX answers 00:04:44, about LBA 194 -- where the drive would have been
+left after loading EMUTOS.IMG, so the reply is not merely well-formed
+but right. PicoDrive answers 00:20:24. The cores disagree on the status
+nibble, 1 against C, which is emulator divergence and nothing we lean
+on.
+
+Packet layout confirmed against GPGX's cdd_process(): sub-command in
+nibble 3, play/seek take MM:SS:FF in nibbles 2-7 with tens in the high
+nibble of each pair. Writing nibble 9, the checksum, is what hands the
+command to the drive.
+---
+ bios/segacd.c | 43 +++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 41 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 85ed85b..5ec9490 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -90,8 +90,18 @@ const UBYTE *segacd_physbase(void)
+  * the first thing worth knowing and it costs one control bit. */
+ #define CDD_CTRL    ((volatile UBYTE *)0xFF8037)
+ #define CDD_STATUS  ((const volatile UBYTE *)0xFF8038)
++#define CDD_CMD     ((volatile UBYTE *)0xFF8042)
+ #define CDD_HOCK    0x04
+ 
++/* Command packet: nibble 0 is the command, 1-8 its parameters, 9 the
++ * checksum. Writing the last nibble is what hands it to the drive, so
++ * the checksum must go down last. Command 0x02 reports information
++ * about the disc, selected by nibble 3; sub-command 0 is "where is the
++ * head now", which touches nothing and is therefore the safe way to
++ * prove a command round-trip on real hardware. */
++#define CDD_CMD_INFO    0x02
++#define CDD_INFO_ABSMSF 0x00
++
+ static UBYTE cdd_stat[10];
+ static UBYTE cdd_valid;
+ 
+@@ -100,6 +110,28 @@ void segacd_cdd_init(void)
+     *CDD_CTRL |= CDD_HOCK;      /* start the 75 Hz status reports */
+ }
+ 
++static void cdd_command(const UBYTE *nib)       /* nine nibbles */
++{
++    UBYTE sum = 0;
++    int i;
++
++    for (i = 0; i < 9; i++) {
++        CDD_CMD[i] = nib[i];
++        sum = (UBYTE)(sum + nib[i]);
++    }
++    CDD_CMD[9] = (UBYTE)((~sum) & 0x0F);        /* this sends it */
++}
++
++/* Ask the drive where its head is. Status comes back as the command
++ * echo, the sub-command, then MM:SS:FF in BCD, two nibbles each. */
++static void cdd_ask_position(void)
++{
++    static const UBYTE cmd[9] = {
++        CDD_CMD_INFO, 0, 0, CDD_INFO_ABSMSF, 0, 0, 0, 0, 0
++    };
++    cdd_command(cmd);
++}
++
+ /* Latch one status packet and check it. Cheap enough for the VBL. */
+ static void cdd_poll(void)
+ {
+@@ -302,11 +334,18 @@ void segacd_int_2_c(void)
+         }
+     }
+ 
++    cdd_ask_position();
+     cdd_poll();
++    /* status nibble and the minutes in one word, seconds and frames in
++     * the other: no comm register is free enough to carry all seven */
+     *(volatile UWORD *)0xFF8022 = (UWORD)((cdd_valid ? 0x8000 : 0)
+         | ((UWORD)cdd_stat[0] << 8)
+-        | ((UWORD)cdd_stat[1] << 4)
+-        |  (UWORD)cdd_stat[2]);
++        | ((UWORD)cdd_stat[2] << 4)
++        |  (UWORD)cdd_stat[3]);
++    *(volatile UWORD *)0xFF8028 = (UWORD)(((UWORD)cdd_stat[4] << 12)
++        | ((UWORD)cdd_stat[5] << 8)
++        | ((UWORD)cdd_stat[6] << 4)
++        |  (UWORD)cdd_stat[7]);
+ 
+     /* Sound telemetry, packed into the spare bits of the drive status
+      * word: no comm register is free, and this answers the only

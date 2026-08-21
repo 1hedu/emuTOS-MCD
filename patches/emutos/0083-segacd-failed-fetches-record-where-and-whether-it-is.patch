@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 20:36:13 +0000
+Subject: [PATCH 083/184] segacd: failed fetches record where, and whether it
+ is the same where
+
+The doubled retry leash rests on an unverified diagnosis -- that the
+remaining timeouts are fixed marginal spots on the burn rather than
+something systemic. This makes the build test its own hypothesis: the
+last failed LBA and the consecutive-failure count on it ride the
+diagnostic screen. Piling onto one address is media; scattering is
+not.
+---
+ bios/bios.c   |  8 +++++---
+ bios/segacd.c | 17 ++++++++++++++++-
+ bios/segacd.h |  3 ++-
+ 3 files changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index b3811b1..ccabd39 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1075,7 +1075,7 @@ void biosmain(void)
+         LONG h, rc;
+         UWORD run, arm, seeks, hits, errs, why, bad, wrong, torn, flag;
+         WORD wdelta;
+-        UWORD fix;
++        UWORD fix, flba, fsame;
+         UBYTE state;
+         int i;
+ 
+@@ -1110,11 +1110,13 @@ void biosmain(void)
+             }
+ 
+             segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
+-                            &bad, &wrong, &torn, &flag, &wdelta, &fix);
++                            &bad, &wrong, &torn, &flag, &wdelta, &fix,
++                            &flba, &fsame);
+             cprintf(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+                     state, seeks, hits, errs, why);
+-            cprintf(" torn %u bcd %u wr %u l%d fx %u fl %u\r\n\r\n",
++            cprintf(" torn %u bcd %u wr %u l%d fx %u fl %u\r\n",
+                     torn, bad, wrong, wdelta, fix, flag);
++            cprintf(" lastfail %u x%u\r\n\r\n", flba, fsame);
+ 
+             /* Long enough to read a round before the next scrolls it
+              * away, and long enough that the drive is not being flogged
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 73a2a2c..6f6e214 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -235,6 +235,8 @@ static UWORD cd_tornhdr;        /* headers that changed between two reads */
+ static UWORD cd_flagged;        /* sectors with STAT0 bit 7 clear: counted,
+                                  * never obeyed */
+ static WORD cd_wrongdelta;      /* last wrong grab: delivered minus wanted */
++static ULONG cd_lastfail = 0xFFFFFFFFUL; /* last LBA a fetch gave up on */
++static UWORD cd_samefail;       /* consecutive give-ups on that same LBA */
+ static UWORD cd_fixups;         /* mispaired grabs corrected in-buffer */
+ static UWORD cd_wrongsec;       /* transfers that delivered the wrong
+                                  * sector and were caught by the header
+@@ -2033,6 +2035,16 @@ collect:
+ done:
+     if (!got) {
+         cd_errors++;
++        /* Where, and is it the same where: the difference between a
++         * marginal spot on the burn and a systemic fault is whether
++         * failures pile onto one address or scatter. This makes that a
++         * number instead of an argument. */
++        if (lba == cd_lastfail)
++            cd_samefail++;
++        else {
++            cd_lastfail = lba;
++            cd_samefail = 1;
++        }
+         cd_cached = 0xFFFFFFFFUL;
+     }
+     cd_led(0);
+@@ -2219,10 +2231,13 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+  * never happened look identical from GEMDOS's side of the call. */
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+-                     UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix)
++                     UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
++                     UWORD *flba, UWORD *fsame)
+ {
+     *wdelta = cd_wrongdelta;
+     *fix = cd_fixups;
++    *flba = (UWORD)cd_lastfail;
++    *fsame = cd_samefail;
+     *seeks = cd_seeks;
+     *hits = cd_hits;
+     *errs = cd_errors;
+diff --git a/bios/segacd.h b/bios/segacd.h
+index b3153af..1a756ec 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -36,7 +36,8 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
+ LONG segacd_cd_ioctl(WORD op, void *arg);
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+-                     UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix);
++                     UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
++                     UWORD *flba, UWORD *fsame);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);

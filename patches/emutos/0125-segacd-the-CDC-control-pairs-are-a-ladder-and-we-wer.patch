@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 01:56:26 +0000
+Subject: [PATCH 125/184] segacd: the CDC control pairs are a ladder, and we
+ were on one rung
+
+The header registers read a constant 01 80 00 60 on hardware -- twelve
+rounds across three sessions, identical every time, while cdc_pt_last
+latched in the same tear-checked interrupt varies and torn stays 0. A
+decoder that buffers but never decodes.
+
+docs/cdd-bios-notes.md recorded two CTRL0/CTRL1 pairs, $A0/$F8 at reset
+and $A4/$D8 "once the drive has locked", and this file wrote a third
+value, $A7/$F0, with no citation at all. Decompressing the sub-CDBIOS
+out of all three regional boot ROMs and searching for the write settles
+it. There are four, and they agree across US, EU and JP:
+
+    $A7,$F0   US 0x211A  EU 0x211A  JP 0x2132
+    $A4,$D8   US 0x207A  EU 0x207A  JP 0x2092
+    $A3,$B0   US 0x2168  EU 0x2168  JP 0x2180
+    $A0,$F8   US 0x21DA  EU 0x21DA  JP 0x21F2
+
+They are not alternatives, they are a ladder. The firmware writes a
+pair, waits, checks the drive's status, and drops to the next on
+failure; $A0/$F8 is where it lands when it gives up, immediately before
+setting a flag and bailing out. The note recorded the JP addresses of
+the first and last rung, which is why only two of them were ever here
+and why the third was written from memory.
+
+So the driver walks it. cdc_setup drops a rung whenever the previous
+configuration never put a sector in the ring, and stays put when it
+did -- escalate on failure, never discard a decoder setting that works.
+The rung starts at the top, $A7/$F0, so a first read attempt behaves
+exactly as it always has and only a failed one escalates. Every retry
+of a failed read is another rung, so one read walks the whole ladder
+with nobody holding a button.
+
+The rung is published in CDREPORT[22] bits 2-3, which means it is in
+rep[] and therefore in CDLOG.TXT without any further plumbing.
+---
+ bios/segacd.c | 53 +++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 51 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 030fd62..6dfdce5 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1112,6 +1112,43 @@ static UWORD cdc_spill;         /* words drained while waiting for the end
+  * data bytes, four-byte header, no ECC. The $A0/$F8 pair on the way
+  * there is written too, because the BIOS writes it too and the order of
+  * control-register writes is not obviously free. */
++/* The decoder configurations the console's own firmware tries, in the
++ * order it tries them.
++ *
++ * This driver used to write $A0/$F8 and then immediately $A7/$F0, on
++ * the strength of a note in docs/cdd-bios-notes.md that recorded two
++ * CTRL0/CTRL1 pairs. Decompressing the sub-CDBIOS out of all three
++ * regional boot ROMs (tools/subbios.py) and searching it for the write
++ * shows there are four, identical in US, EU and JP:
++ *
++ *   $A7,$F0   US 0x211A  EU 0x211A  JP 0x2132
++ *   $A4,$D8   US 0x207A  EU 0x207A  JP 0x2092
++ *   $A3,$B0   US 0x2168  EU 0x2168  JP 0x2180
++ *   $A0,$F8   US 0x21DA  EU 0x21DA  JP 0x21F2   -- the reset pair
++ *
++ * and that they are a ladder, not alternatives. The firmware writes a
++ * pair, waits, checks the drive's status, and on failure drops to the
++ * next one; $A0/$F8 is where it lands when it gives up, and it sets a
++ * flag and bails out immediately afterwards. The note recorded the JP
++ * addresses for the first and last of those, which is why only two of
++ * them were ever in this file.
++ *
++ * We wrote one rung, no wait, no check, and never escalated. Now the
++ * rung advances every time the decoder is set up again -- which is
++ * every retry of a failed read -- so one read attempt walks the whole
++ * ladder without anybody holding a button. The reset pair is not in
++ * the table: it is written unconditionally just above, exactly as
++ * CDCSTART does, and it is the firmware's give-up state rather than a
++ * configuration to try. */
++static const UBYTE cdc_ladder[3][2] = {
++    { 0xA7, 0xF0 }, { 0xA4, 0xD8 }, { 0xA3, 0xB0 }
++};
++/* Starts at 2 so the first advance lands on rung 0, $A7/$F0 -- the pair
++ * this driver has always written. A first read attempt therefore
++ * behaves exactly as it did before, and only a failed one escalates. */
++static UBYTE cdc_rung = 2;
++static UBYTE cdc_rung_ok;       /* this rung put a sector in the ring */
++
+ static void cdc_setup(void)
+ {
+     /* Whoever re-initialises the decoder is also moving the drive, so
+@@ -1135,9 +1172,19 @@ static void cdc_setup(void)
+ 
+         GA_INTMASK |= 0x20;     /* level 5, once per sector decoded */
+ 
++        /* Down a rung if the last configuration never produced a
++         * sector, stay put if it did. The firmware escalates on
++         * failure and so does this; what it does not do is throw away
++         * a decoder setting that is working. */
++        if (!cdc_rung_ok)
++            cdc_rung = (UBYTE)((cdc_rung + 1) % 3);
++        cdc_rung_ok = 0;
++
+         *CDC_AR = 0x0A; *CDC_DATA = 0xA0; *CDC_DATA = 0xF8; /* CTRL0, CTRL1 */
+         if (!cdc_altctrl && !cd_late) {
+-            *CDC_AR = 0x0A; *CDC_DATA = 0xA7; *CDC_DATA = 0xF0;
++            *CDC_AR = 0x0A;
++            *CDC_DATA = cdc_ladder[cdc_rung][0];
++            *CDC_DATA = cdc_ladder[cdc_rung][1];
+         }
+         set_sr(sr);
+     }
+@@ -1299,6 +1346,7 @@ void segacd_int_5_c(void)
+             cd_ring_head = (UBYTE)((k + 1) % CD_RING);
+             cd_ring_newest = lba;
+             cd_ring_ok++;
++            cdc_rung_ok = 1;    /* this CTRL pair decodes: keep it */
+         }
+     } else if (h3 == 0x01 || h3 == 0x02) {
+         cd_badhdr++;            /* decoded, mode plausible, MSF impossible */
+@@ -1731,7 +1779,8 @@ static void cdr_report(void)
+     CDREPORT[20] = (UWORD)(((UWORD)cdr_fails[0] << 8) | cdr_fails[1]);
+     CDREPORT[21] = (UWORD)(((UWORD)cdr_ints[0] << 8) | cdr_ints[1]);
+     CDREPORT[22] = (UWORD)(((UWORD)cdr_forced << 8)
+-                         | ((UWORD)(cdr_reseeks & 0x0F) << 4) | cdc_altctrl);
++                         | ((UWORD)(cdr_reseeks & 0x0F) << 4)
++                         | ((UWORD)(cdc_rung & 3) << 2) | cdc_altctrl);
+     CDREPORT[23] = (UWORD)(((UWORD)cdc_stat4[0] << 8) | cdc_stat4[3]);
+     /* D:, the filesystem on the disc: how the block layer is getting on
+      * and whether its own check passed. Seeks against waits is the

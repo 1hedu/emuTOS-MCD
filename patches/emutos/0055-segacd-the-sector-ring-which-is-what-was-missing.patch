@@ -1,0 +1,378 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 19:26:02 +0000
+Subject: [PATCH 055/184] segacd: the sector ring, which is what was missing
+
+The old reader asked the drive for sector N and then tried to be
+listening at the microsecond it went past. Between one GEMDOS call and
+the next the head moves on, so it missed, seeked, and missed again --
+which is why D: worked in an emulator and raced on a console.
+
+The decoder interrupt now writes down every sector it reports: which
+one it was, and where in the decoder's own 16K buffer it landed. The
+foreground looks in the ring instead of chasing. That buffer holds
+about eight sectors, so a reader has most of a tenth of a second to
+come and collect, which against GEMDOS is forever.
+
+This is $1F0A, and CDCREAD taking its buffer address from the entry
+the handler left. docs/cdd-bios-notes.md named the omission at the
+moment it was made -- 'the one place our driver will deliberately
+differ from Sega's, and the place to look first if it misbehaves' --
+and then four rounds were spent tuning timeouts around it instead of
+reading that back.
+
+Read errors during a full Dfree, Fsfirst, Fopen and Fread of the disc:
+five before, none after.
+---
+ bios/segacd.c | 256 ++++++++++++++++++++++----------------------------
+ 1 file changed, 113 insertions(+), 143 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 646ec75..a83b779 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -146,7 +146,6 @@ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
+ static ULONG cd_cached = 0xFFFFFFFFUL;  /* which CD sector is in CDSECT */
+ static ULONG cd_cache_base;
+ static UBYTE cd_cache_have;
+-static ULONG cd_next;           /* the one the drive will deliver next */
+ static UBYTE cd_streaming;
+ static UWORD cd_errors;         /* reads that gave up */
+ static UBYTE cd_quiet;          /* the read command has been withdrawn */
+@@ -157,6 +156,54 @@ static UWORD cd_why;            /* nibble per attempt of the last
+                                  * head was already past, 3 the
+                                  * transfer itself failed */
+ static UWORD cd_seeks, cd_hits; /* seeks against sectors simply waited for */
++/* The sector ring.
++ *
++ * This is the piece Sega has and this driver did not, and going without
++ * it is why D: works in an emulator and races on a console. The old
++ * shape asked the drive for sector N and then tried to be listening at
++ * the microsecond it went past; between one GEMDOS call and the next
++ * the head moves on, so it missed, seeked, and missed again.
++ *
++ * The decoder interrupt now writes down every sector it reports --
++ * which one it was, and where in the decoder's own 16K buffer it
++ * landed. The foreground never has to catch anything: it looks in the
++ * ring. That buffer holds about eight sectors, so a reader has most of
++ * a tenth of a second to come and collect, which is forever.
++ *
++ * $1F0A does exactly this and CDCREAD takes its buffer address from the
++ * entry the handler left. docs/cdd-bios-notes.md named the omission
++ * when it was made: "the one place our driver will deliberately differ
++ * from Sega's, and the place to look first if it misbehaves". */
++#define CD_RING 6               /* under the decoder's own capacity */
++
++static volatile ULONG cd_ring_lba[CD_RING];
++static volatile UWORD cd_ring_pt[CD_RING];
++static volatile UBYTE cd_ring_head;
++static volatile ULONG cd_ring_newest = 0xFFFFFFFFUL;
++
++static void cd_ring_reset(void)
++{
++    UBYTE i;
++
++    for (i = 0; i < CD_RING; i++)
++        cd_ring_lba[i] = 0xFFFFFFFFUL;
++    cd_ring_head = 0;
++    cd_ring_newest = 0xFFFFFFFFUL;
++}
++
++static BOOL cd_ring_find(ULONG lba, UWORD *pt)
++{
++    UBYTE i;
++
++    for (i = 0; i < CD_RING; i++) {
++        if (cd_ring_lba[i] == lba) {
++            *pt = cd_ring_pt[i];
++            return TRUE;
++        }
++    }
++    return FALSE;
++}
++
+ /* Whether D: has ever been read: bit 0 tried, bit 1 succeeded.
+  *
+  * This used to be a set of deliberate probes at boot, and it was a bad
+@@ -611,6 +658,7 @@ static void cdc_setup(void)
+     cd_cache_base = 0xFFFFFFFFUL;
+     cd_cache_have = 0;
+     cd_streaming = 0;
++    cd_ring_reset();
+ 
+     *CDC_AR = 0x0F; *CDC_DATA = 0x00;                   /* RESET */
+     *CDC_AR = 0x01; *CDC_DATA = 0x3A;                   /* IFCTRL */
+@@ -683,6 +731,24 @@ void segacd_int_5_c(void)
+         cdc_pt = cdc_pt_last;
+         cdc_hit = 1;
+     }
++
++    /* Note it in the ring, whether or not anybody asked for it. Cheap:
++     * a couple of multiplies and three stores, against the alternative
++     * of a reader trying to be awake at the right moment. */
++    if (h3 == 0x01 || h3 == 0x02) {     /* a data sector, mode 1 or 2 */
++        UBYTE k = cd_ring_head;
++        ULONG lba = (ULONG)(((h0 >> 4) * 10 + (h0 & 0x0F))) * 4500UL
++                  + (ULONG)(((h1 >> 4) * 10 + (h1 & 0x0F))) * 75UL
++                  + (ULONG)(((h2 >> 4) * 10 + (h2 & 0x0F)));
++
++        if (lba >= 150UL) {
++            lba -= 150UL;
++            cd_ring_lba[k] = lba;
++            cd_ring_pt[k] = cdc_pt_last;
++            cd_ring_head = (UBYTE)((k + 1) % CD_RING);
++            cd_ring_newest = lba;
++        }
++    }
+ }
+ 
+ /* CDCREAD, CDCTRN and CDCACK in one: program the byte count and the
+@@ -694,7 +760,7 @@ void segacd_int_5_c(void)
+  * screen out of PRG-RAM, and a halt in the middle of a transfer the gate
+  * array is clocking is the same hazard that cost the CDD a dozen discs.
+  * Bit 3 of $FF8022 is the interlock the servant already honours. */
+-static BOOL cdc_grab(void)
++static BOOL cdc_grab(UWORD pt)
+ {
+     const UWORD count = CDC_XFER_BYTES - 1;
+     UWORD n;
+@@ -707,8 +773,8 @@ static BOOL cdc_grab(void)
+     *CDC_AR = 0x02;
+     *CDC_DATA = (UBYTE)(count & 0xFF);          /* DBCL */
+     *CDC_DATA = (UBYTE)(count >> 8);            /* DBCH */
+-    *CDC_DATA = (UBYTE)(cdc_pt & 0xFF);         /* DACL */
+-    *CDC_DATA = (UBYTE)(cdc_pt >> 8);           /* DACH */
++    *CDC_DATA = (UBYTE)(pt & 0xFF);             /* DACL */
++    *CDC_DATA = (UBYTE)(pt >> 8);               /* DACH */
+     *CDC_DATA = 0x00;                           /* DTTRG: go */
+ 
+     for (n = 0; n < 2048; n++)                  /* CDCTRN's own bound */
+@@ -1064,7 +1130,7 @@ static void cdr_step(void)
+     case CDR_STREAM:
+         cdr_wait++;
+         if (cdc_hit) {
+-            BOOL ok = cdc_grab();
++            BOOL ok = cdc_grab(cdc_pt);
+ 
+             cdc_stop();
+             if (ok) {
+@@ -1118,7 +1184,7 @@ static void cdr_step(void)
+             if (cdc_ints && cdc_pt_last) {
+                 cdc_pt = cdc_pt_last;
+                 cdr_forced = 1;
+-                if (cdc_grab())
++                if (cdc_grab(cdc_pt))
+                     cdr_pub = cdr_slot;
+             }
+             cdc_stop();
+@@ -1179,169 +1245,73 @@ static void cdr_step(void)
+ #define CD_STREAM_AHEAD 20UL
+ 
+ 
+-/* Wait, with interrupts running, for the sector whose header we have
+- * already asked for. Returns false on timeout.
+- *
+- * This spins in foreground code and that is deliberate: level 5 is what
+- * notices the sector and level 5 cannot run inside itself. A GEMDOS
+- * read blocking for a few frames is what a floppy does too. */
+-static BOOL cd_wait_hit(void)
+-{
+-    ULONG spin;
+-
+-    /* Bounded by a count rather than by the 200 Hz tick, because the
+-     * first read happens during BIOS init and that tick may not exist
+-     * yet.
+-     *
+-     * The count is worked out rather than picked, because picking it is
+-     * what went wrong: "a couple of seconds" was six million, and six
+-     * million is nearly half a minute. The loop is an increment, a
+-     * compare, a branch, a byte test on an absolute address and another
+-     * branch -- call it sixty cycles at 12.5 MHz, so about five
+-     * microseconds an iteration. Three seconds is six hundred thousand,
+-     * and three seconds is a slow seek plus a spin-up.
+-     *
+-     * Eight seconds, not three. The first read after the drive has sat
+-     * idle has to wake it, and three was not enough -- Dfree failed,
+-     * and a desktop window that calls Dfree before it opens simply did
+-     * not open. What made boot feel dead was never this number: it was
+-     * three deliberate probe seeks before anything reached the screen,
+-     * and those are gone. A read that succeeds still costs only as long
+-     * as it takes. */
+-    MAYBE_UNUSED(spin);
+-
+-    /* Spend from one budget shared by every attempt and every
+-     * read-ahead of a single block read, rather than each having its
+-     * own. Three attempts of eight seconds, twice over, with eight
+-     * sectors of read-ahead behind them, is minutes -- and on hardware
+-     * it was: the desktop put up an hourglass and stayed there, alive
+-     * but unable to answer, which is worse than an error.
+-     *
+-     * Six seconds is enough to wake a drive that has been sitting
+-     * still. Past that the honest answer is a read failure, which
+-     * GEMDOS turns into an alert the user can cancel. */
+-    while (cd_budget > 0) {
+-        cd_budget--;
+-        if (cdc_hit)
+-            return TRUE;
+-        if (cdc_ints) {
+-            /* Sectors are arriving, so the drive has done as it was
+-             * told. Stop telling it.
+-             *
+-             * This is the same mistake twice, and the second time it
+-             * cost a mounted drive that would not open. A queued
+-             * command goes out on every exchange -- seventy-five times
+-             * a second -- so leaving "start reading at this position"
+-             * in the queue while waiting for a sector twenty frames
+-             * further on means the drive is asked to start over before
+-             * it ever gets there. It never arrives, the read times out,
+-             * and GEMDOS turns that into a Dfree failure and a desktop
+-             * window that silently does nothing.
+-             *
+-             * Stage 3's state machine has always done this correctly:
+-             * it leaves the command state the moment the decoder
+-             * reports anything. This is that, in a spin loop. */
+-            if (!cd_quiet) {
+-                cd_quiet = 1;
+-                cdd_ask_idle();
+-            }
+-            /* And if the head is already beyond the sector we want,
+-             * waiting cannot help: the drive reads forward and is not
+-             * coming back. Say so now rather than spend the timeout
+-             * learning it. */
+-            if (cdr_past_target())
+-                return FALSE;
+-        }
+-        /* The drive interrupt's storm guard counts arrivals between
+-         * VBLs and switches level 4 off past a thousand. Its premise is
+-         * that the VBL keeps running; here we are deliberately blocking
+-         * in foreground and it does not. Without this the guard trips
+-         * after thirteen seconds of honest waiting and takes the drive
+-         * down with it. */
+-        cdd_burst = 0;
+-    }
+-    return FALSE;
+-}
+-
+-/* Put the drive at a sector and take it. Everything here is stage 3's,
+- * only called from the foreground instead of from the VBL. */
++/* Get one CD sector into CDSECT, by seeking if it is not coming and
++ * then waiting for the ring to report it. */
+ static BOOL cd_fetch(ULONG lba)
+ {
+     UBYTE start[3];
++    UWORD pt;
+     int attempt;
+     BOOL got = FALSE;
+-    /* Read-ahead asks for the sector immediately behind the head and
+-     * must never seek for it: the whole point is that it is nearly
+-     * free. One attempt, and if the stream has moved on, so have we. */
+-    int tries = (cd_streaming && lba == cd_next) ? 1 : 3;
+ 
+     /* Take the drive. The VBL rotates a status question at the CDD
+      * every thirty-two frames, and a question is a command like any
+      * other: queued while a read is in flight it replaces the read, or
+-     * interrupts the streaming that read is waiting on. Stage 3's state
+-     * machine holds the rotation off for exactly this reason and the
+-     * gate names its states; a foreground read needs the same
+-     * protection and could not be named that way. */
++     * interrupts the streaming that read is waiting on. */
+     cd_busy = 1;
+ 
+-    lba_to_msf(lba, cdc_want);
+-
+-    /* Three goes, and the third is not the same as the second.
+-     *
+-     * Waiting for a sector the drive is about to deliver is the fast
+-     * path and it misses often: between one GEMDOS block and the next
+-     * the head keeps moving, so by the time we are looking, the sector
+-     * we wanted has gone past. That costs a seek, which is fine.
+-     *
+-     * What is not fine is a seek that also lands past the target, which
+-     * is why the last attempt asks the drive to start much further
+-     * back. Reading forward over sixty extra sectors costs most of a
+-     * second; failing costs a read error, and GEMDOS turns a read error
+-     * on Dfree into a desktop window that silently does not open. */
+-    static const ULONG leadin[3] = { CDR_LEADIN, CDR_LEADIN, CDR_LEADIN * 3 };
+-
+-    for (attempt = 0; attempt < tries; attempt++) {
++    for (attempt = 0; attempt < 3 && !got; attempt++) {
++        /* Already gone past, or never coming? Then seek. Otherwise the
++         * drive is heading towards it and waiting is free. */
+         if (attempt > 0 || !cd_streaming
+-                || lba < cd_next || lba > cd_next + CD_STREAM_AHEAD) {
+-            ULONG back = leadin[attempt];
+-
+-            cdc_hit = 0;
++                || (cd_ring_newest != 0xFFFFFFFFUL && cd_ring_newest >= lba)
++                || lba > cd_ring_newest + CD_STREAM_AHEAD) {
++            if (cd_ring_find(lba, &pt))
++                goto collect;           /* it is already sitting there */
++            cd_ring_reset();
+             cdc_ints = 0;
+-            /* Only the first attempt resets the decoder. Doing it on
+-             * every retry tears down whatever lock the last one had
+-             * just achieved, which turns three tries into three cold
+-             * starts -- and the first read after the drive has been
+-             * doing something else is exactly the one that needs the
+-             * lock to survive. */
++            cdc_hit = 0;
+             if (attempt == 0)
+                 cdc_setup();
+-            lba_to_msf(lba >= back ? lba - back : 0, start);
++            lba_to_msf(lba >= CDR_LEADIN ? lba - CDR_LEADIN : 0, start);
+             cdd_ask_read(start);
+             cd_quiet = 0;
+             cd_streaming = 1;
+             cd_seeks++;
+         } else {
+-            cdc_hit = 0;                /* it is coming; just wait for it */
+             cd_hits++;
+         }
+ 
+-        cd_why = (UWORD)((cd_why << 4)
+-                       | ((cdc_ints && cdr_past_target()) ? 2 : 1));
+-        if (cd_wait_hit()) {
+-            /* The command was withdrawn inside the wait, as soon as the
+-             * decoder reported anything -- see cd_wait_hit(). */
+-            cd_why = (UWORD)((cd_why & ~0x0F) | 3);
+-            if (cdc_grab()) {
+-                cd_why >>= 4;           /* it worked; forget this attempt */
+-                cd_cached = lba;
+-                cd_next = lba + 1;
+-                got = TRUE;
+-                break;
++        while (cd_budget > 0) {
++            cd_budget--;
++            if (cd_ring_find(lba, &pt))
++                goto collect;
++            if (cdc_ints) {
++                /* Sectors are arriving, so the drive has done as it was
++                 * told. Stop telling it: a queued command goes out on
++                 * every exchange, so leaving the seek in the queue asks
++                 * the drive to start over before it ever arrives. */
++                if (!cd_quiet) {
++                    cd_quiet = 1;
++                    cdd_ask_idle();
++                }
++                /* Past it and not in the ring means it was missed --
++                 * only possible if the reader was away longer than the
++                 * decoder's buffer, which is a tenth of a second. Seek
++                 * rather than wait for a lap of the disc. */
++                if (cd_ring_newest != 0xFFFFFFFFUL && cd_ring_newest > lba)
++                    break;
+             }
+         }
++        continue;
+ 
+-        /* Whatever went wrong, the stream is no longer trustworthy. */
+-        cd_streaming = 0;
++collect:
++        if (cdc_grab(pt)) {
++            cd_cached = lba;
++            got = TRUE;
++        } else {
++            cd_streaming = 0;           /* the transfer is what failed */
++        }
+     }
+ 
+     if (!got) {

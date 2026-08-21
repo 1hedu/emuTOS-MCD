@@ -1,0 +1,322 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: port <port@local>
+Date: Thu, 13 Aug 2026 03:08:59 +0000
+Subject: [PATCH] diagnostic: repeating C: test, and a copy of it on B:
+
+The read path is not touched. Down's flag is parsed, the sector a
+failed fetch gave up on is recorded, a stats accessor is added, and the
+compile-time C: test becomes a runtime loop that also mirrors every
+line into a 3.5 KB buffer written to B:\\CDLOG.TXT after each round.
+
+B: on a stock console is the 8 KB of internal backup RAM. EmuTOS will
+not touch it while it holds Sega-format saves, so the log has nowhere
+to go until C is held at power-on once; the screen reports which of
+those cases it is rather than leaving a bare Fcreate code to guess at.
+---
+ bios/bios.c   | 178 +++++++++++++++++++++++++++++++++++++-------------
+ bios/segacd.c |  38 +++++++++++
+ bios/segacd.h |   6 ++
+ 3 files changed, 178 insertions(+), 44 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 7a9eabb..a8a8ac3 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -63,6 +63,8 @@
+ #include "amiga.h"
+ #include "lisa.h"
+ #include "segacd.h"
++#include <stdarg.h>
++#include "doprintf.h"
+ #include "coldfire.h"
+ #if WITH_CLI
+ #include "../cli/clistub.h"
+@@ -806,6 +808,68 @@ BOOL can_shutdown(void)
+  * exec the user interface (shell or AES)
+  */
+ 
++#ifdef MACHINE_SEGACD
++/* The diagnostic outgrew the tube.
++ *
++ * Eight lines a round, a round every couple of seconds, and the answer
++ * to "which sector does it die on" is somewhere in the scroll-back that
++ * a CRT does not have. So every line goes to two places: the screen,
++ * and a buffer that is written to B:\CDLOG.TXT after each round.
++ *
++ * B: on a stock console is the 8 KB of internal backup RAM on the sub
++ * CPU's own bus -- the only persistent store the machine has when a
++ * cartridge would stop it booting from CD at all. EmuTOS will not touch
++ * that memory if it holds Sega-format game saves, so the log has
++ * nowhere to go until C is held at power-on once to claim it. That
++ * erases whatever is in there, which is why it is a deliberate act and
++ * not something this build does on its own.
++ *
++ * The buffer is written whole each round rather than appended to, so
++ * the file is complete and closed at every moment the power might go
++ * off. When it fills, it stops: the file stops changing and says so,
++ * and the screen keeps running. */
++#define CDLOG_MAX 3584
++
++static char cdlog[CDLOG_MAX];
++static UWORD cdlog_len;
++static UBYTE cdlog_full;
++
++static void cdlog_putc(int c)
++{
++    if (cdlog_len < CDLOG_MAX)
++        cdlog[cdlog_len++] = (char)c;
++    else
++        cdlog_full = 1;
++}
++
++PRINTF_STYLE static void cdlog_printf(const char *fmt, ...);
++static void cdlog_printf(const char *fmt, ...)
++{
++    va_list ap;
++
++    va_start(ap, fmt);
++    doprintf(cdlog_putc, fmt, ap);
++    va_end(ap);
++}
++
++/* Both at once. Every line the diagnostic prints is a line worth
++ * keeping, so there is no version of this where they can drift. */
++#define DLOG(...)                                                       \
++    do { cprintf(__VA_ARGS__); cdlog_printf(__VA_ARGS__); } while (0)
++
++static LONG cdlog_save(void)
++{
++    LONG h, rc;
++
++    h = Fcreate("B:\\CDLOG.TXT", 0);
++    if (h < 0L)
++        return h;
++    rc = Fwrite((WORD)h, (LONG)cdlog_len, cdlog);
++    Fclose((WORD)h);
++    return rc;
++}
++#endif
++
+ void biosmain(void)
+ {
+ #ifdef MACHINE_SEGACD
+@@ -1028,62 +1092,88 @@ void biosmain(void)
+     }
+ #endif
+ 
+-#if defined(MACHINE_SEGACD) && defined(CONF_SEGACD_CTEST)
++#ifdef MACHINE_SEGACD
+     /*
+-     * Diagnostic build only: the calls EmuDesk makes when a drive icon
+-     * is double-clicked, against the disc. Opening a window is
+-     * Dfree/Dsetpath/Fsfirst underneath, and if any of them fails the
+-     * desktop does nothing at all -- no window, no alert -- which is
+-     * exactly what a console reported. This says which one.
++     * Down held at power-on: the calls EmuDesk makes when a drive icon
++     * is double-clicked, against the disc, forever.
++     *
++     * This build is the one that lists C: on hardware and boots fast.
++     * What it will not do is open READCD.TXT, whose 187 bytes live in
++     * CD sector 1624 -- while the directory entry naming it lives in
++     * 1616, which reads. One sector apart, one reads and one does not,
++     * and until now this driver has had nothing in it that could say
++     * so out loud.
++     *
++     * Repeating matters as much as running: the failures come and go,
++     * and one sample of an intermittent fault is an anecdote.
+      */
+-    {
++    /* Unconditional in this image. It is reached by holding Left at
++     * power-on, which is already the choice to run a diagnostic; asking
++     * for a second button on top of that means a diagonal, and a
++     * diagonal on a d-pad cannot be confirmed by the person holding
++     * it. */
++    if (segacd_diag || 1) {
+         static char buf[512];
+         static DTA dta;
+         LONG h, rc;
++        UWORD run, seeks, hits, errs, why, fsame;
++        ULONG flba;
++        UBYTE state;
+         int i;
+ 
+         cprintf("\033E");
+-        cprintf("C: read test\r\n");
++        for (run = 0; ; run++) {
++            DLOG("C: TEST %u   B%02X\r\n", run + 1, segacd_bootflags);
+ 
+-        rc = Dfree((LONG *)buf, 1);             /* control: A: */
+-        cprintf("DfreeA   = %ld free %ld of %ld\r\n",
+-                rc, *(LONG *)buf, *((LONG *)buf + 1));
+-        rc = Dfree((LONG *)buf, 3);             /* 3 = C: */
+-        cprintf("DfreeC   = %ld free %ld of %ld\r\n",
+-                rc, *(LONG *)buf, *((LONG *)buf + 1));
++            rc = Dfree((LONG *)buf, 3);         /* 3 = C: */
++            DLOG(" Dfree    %ld   %ld of %ld\r\n",
++                    rc, *(LONG *)buf, *((LONG *)buf + 1));
++            rc = Dsetpath("C:\\");
++            DLOG(" Dsetpath %ld\r\n", rc);
+ 
+-        rc = Dsetdrv(2);                        /* 2 = C: */
+-        cprintf("Dsetdrv  = %ld\r\n", rc);
+-        rc = Dsetpath("C:\\");
+-        cprintf("Dsetpath = %ld\r\n", rc);
+-
+-        Fsetdta(&dta);
+-        rc = Fsfirst("C:\\*.*", 0x17);
+-        cprintf("Fsfirst  = %ld  [%s]\r\n", rc, dta.d_fname);
+-        while (rc == 0L) {
+-            rc = Fsnext();
+-            if (rc == 0L)
+-                cprintf("Fsnext   = 0  [%s]\r\n", dta.d_fname);
+-        }
+-        cprintf("Fsnext   = %ld (end)\r\n", rc);
++            Fsetdta(&dta);
++            rc = Fsfirst("C:\\*.*", 0x17);
++            DLOG(" Fsfirst  %ld   [%s]\r\n", rc, dta.d_fname);
++            while (rc == 0L) {
++                rc = Fsnext();
++                if (rc == 0L)
++                    DLOG(" Fsnext   0   [%s]\r\n", dta.d_fname);
++            }
+ 
+-        h = Fopen("C:\\READCD.TXT", 0);
+-        cprintf("Fopen    = %ld\r\n", h);
+-        if (h >= 0L) {
+-            rc = Fread((WORD)h, 64L, buf);
+-            cprintf("Fread    = %ld\r\n", rc);
+-            Fclose((WORD)h);
+-            for (i = 0; i < 32; i++)
+-                if (buf[i] < 32 || buf[i] > 126)
+-                    buf[i] = '.';
+-            buf[32] = 0;
+-            cprintf("[%s]\r\n", buf);
++            h = Fopen("C:\\READCD.TXT", 0);
++            DLOG(" Fopen    %ld\r\n", h);
++            if (h >= 0L) {
++                rc = Fread((WORD)h, 32L, buf);
++                Fclose((WORD)h);
++                for (i = 0; i < 24; i++)
++                    if (buf[i] < 32 || buf[i] > 126)
++                        buf[i] = '.';
++                buf[24] = 0;
++                DLOG(" Fread    %ld   [%s]\r\n", rc, buf);
++            }
++
++            segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
++                            &flba, &fsame);
++            DLOG(" drive %X  seek %u  wait %u  err %u\r\n",
++                    state, seeks, hits, errs);
++            DLOG(" why %04X  lastfail %ld x%u\r\n",
++                    why, flba, fsame);
++            DLOG("\r\n");
++
++            /* Then put the round somewhere that survives a power cut.
++             * The return code goes on screen only: it changes every
++             * round and would double the size of the file. */
++            if (!cdlog_full) {
++                LONG lrc = cdlog_save();
++                cprintf(" log %ld  bram %u\r\n\r\n",
++                        lrc, segacd_bram_state());
++            } else {
++                cprintf(" LOG FULL -- safe to power off\r\n\r\n");
++            }
++
++            for (i = 0; i < 120; i++)
++                Bconstat(2);
+         }
+-        rc = Dfree((LONG *)buf, 3);             /* again, now warm */
+-        cprintf("DfreeC2  = %ld free %ld of %ld\r\n",
+-                rc, *(LONG *)buf, *((LONG *)buf + 1));
+-        for (;;)
+-            ;
+     }
+ #endif
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 27e1394..42aa1e8 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -156,6 +156,22 @@ static UWORD cd_why;            /* nibble per attempt of the last
+                                  * head was already past, 3 the
+                                  * transfer itself failed */
+ static UWORD cd_seeks, cd_hits; /* seeks against sectors simply waited for */
++static ULONG cd_lastfail = 0xFFFFFFFFUL;        /* the sector it gave up on */
++static UWORD cd_samefail;       /* ...and how many times running */
++UBYTE segacd_diag;              /* Down held at power-on */
++UWORD segacd_bootflags;         /* the raw button word, for printing */
++
++void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs, UBYTE *state,
++                     UWORD *why, ULONG *flba, UWORD *fsame)
++{
++    *seeks = cd_seeks;
++    *hits = cd_hits;
++    *errs = cd_errors;
++    *state = (UBYTE)(cdd_stat[0] & 0x0F);
++    *why = cd_why;
++    *flba = cd_lastfail;
++    *fsame = cd_samefail;
++}
+ /* Whether D: has ever been read: bit 0 tried, bit 1 succeeded.
+  *
+  * This used to be a set of deliberate probes at boot, and it was a bad
+@@ -233,6 +249,14 @@ void segacd_cdd_init(void)
+          * selects the reset-time pair alone, so one disc can answer it
+          * instead of two. */
+         cdc_altctrl = (UBYTE)((f & 2) ? 1 : 0);
++
++        /* Down: run the D: diagnostic instead of the desktop. This
++         * build is the one that lists C:; what it will not do is open
++         * the file, and it has never had a counter in it to say why.
++         * Nothing else here is touched -- the whole point of this image
++         * is that its read path is untouched. */
++        segacd_diag = (UBYTE)((f & 4) ? 1 : 0);
++        segacd_bootflags = (UWORD)(f & 0xFF);
+     }
+ 
+     cdd_ask(CDD_CMD_INFO, 0x03);        /* something to say from the first
+@@ -1332,6 +1356,11 @@ static BOOL cd_fetch(ULONG lba)
+ 
+     if (!got) {
+         cd_errors++;
++        if (cd_lastfail == lba)
++            cd_samefail++;
++        else
++            cd_samefail = 0;
++        cd_lastfail = lba;
+         cd_cached = 0xFFFFFFFFUL;
+     }
+     cd_busy = 0;
+@@ -1922,6 +1951,15 @@ static void bram_probe(void)
+     bram_state = BRAM_OURS;
+ }
+ 
++/* 0 no backup RAM, 1 ours, 2 somebody's game saves -- and 3 if a RAM
++ * cart answered, in which case B: is the cart and none of this applies.
++ * The log has nowhere to go in states 0 and 2, and "Fcreate -2" on its
++ * own does not say which. */
++UBYTE segacd_bram_state(void)
++{
++    return cart_sectors ? 3 : bram_state;
++}
++
+ /* Read back the bytes GEMDOS's getbpb depends on, so the status line can
+  * show whether the filesystem we wrote is actually there. Expect 0x6010:
+  * 0x60 = the boot sector's first byte, 0x10 = 16 total sectors. */
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 3c72012..a04b025 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -46,6 +46,12 @@ LONG segacd_flop_mediach(WORD dev);
+ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+                    WORD side, WORD count);
+ 
++extern UBYTE segacd_diag;       /* Down held at power-on */
++extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
++UBYTE segacd_bram_state(void);
++void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs, UBYTE *state,
++                     UWORD *why, ULONG *flba, UWORD *fsame);
++
+ /* Interrupt handlers (assembler entry points in segacd2.S) */
+ void segacd_int_2(void);        /* INT2: VBL, raised by the main CPU */
+ void segacd_int_3(void);        /* INT3: gate array timer, 200 Hz */

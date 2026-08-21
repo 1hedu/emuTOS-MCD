@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 20:20:00 +0000
+Subject: [PATCH 059/184] segacd: learn how long the disc is
+
+Sub-command 3 is the disc's total length and the probe rotation has
+been asking for it twice a second since stage 2 -- catching the answer
+costs one comparison and no extra traffic.
+
+It is the one piece of the table of contents command $A actually needs:
+$10CE opens by calling $11E0, which returns this number alone and fails
+outright when it has never been read. It is also worth having on its
+own account, since knowing where the disc ends turns a read past the
+end into an error rather than a seek into the dark.
+
+And it checks the CDD path with no sector read involved: the drive says
+01:28:48, the image is 6498 sectors, and 6498 + 150 frames is exactly
+one minute twenty-eight and forty-eight.
+---
+ bios/segacd.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index e65893b..a042574 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -251,6 +251,8 @@ static UBYTE cdd_hitsub = 0xFF; /* which question the last answer named */
+ static UBYTE cdd_want;          /* the sub-command last asked for */
+ static UBYTE cdd_answered;      /* the reply named it */
+ static UBYTE cdd_alt;           /* alternates the two search questions */
++static UBYTE cdd_len_m, cdd_len_s, cdd_len_f;   /* the disc's length, BCD */
++static UBYTE cdd_len_ok;        /* ...and whether the drive has said it */
+ 
+ static void cdd_ask(UBYTE cmd, UBYTE sub);
+ 
+@@ -456,6 +458,24 @@ static void cdd_poll(void)
+      * the reply may be a packet or two behind the request. */
+     if (cdd_valid && cdd_stat[0] != 0x0F && cdd_stat[1] == cdd_want)
+         cdd_answered = 1;
++
++    /* Sub-command 3 is the disc's total length, and the probe rotation
++     * already asks for it twice a second -- so catching the answer
++     * costs one comparison and no extra traffic. It is also the one
++     * piece of the table of contents the BIOS actually needs before it
++     * can build command $A: $10CE opens by calling $11E0, which hands
++     * back this number and nothing else, and fails outright when it has
++     * not been read.
++     *
++     * Worth having on its own account, too. Knowing where the disc ends
++     * is how a read of a sector past it becomes an error rather than a
++     * seek into the dark. */
++    if (cdd_valid && cdd_stat[0] != 0x0F && cdd_stat[1] == 0x03) {
++        cdd_len_m = (UBYTE)((cdd_stat[2] << 4) | cdd_stat[3]);
++        cdd_len_s = (UBYTE)((cdd_stat[4] << 4) | cdd_stat[5]);
++        cdd_len_f = (UBYTE)((cdd_stat[6] << 4) | cdd_stat[7]);
++        cdd_len_ok = 1;
++    }
+ }
+ 
+ /* Level 4: a status packet has arrived, 75 times a second. Read it,
+@@ -1129,6 +1149,10 @@ static void cdr_report(void)
+     CDREPORT[29] = (UWORD)(((UWORD)cdd_stat[0] << 8) | cdd_stat[1]);
+     CDREPORT[30] = (UWORD)(((UWORD)cd_gone << 8) | cd_badstate);
+     CDREPORT[31] = cd_notready;
++    /* Where the disc ends, as the drive reports it. Checkable: it
++     * should be the length of the image the disc was built from. */
++    CDREPORT[32] = (UWORD)(((UWORD)cdd_len_m << 8) | cdd_len_s);
++    CDREPORT[33] = (UWORD)(((UWORD)cdd_len_f << 8) | cdd_len_ok);
+     CDREPORT[0] = CDREPORT_MAGIC;
+ }
+ 

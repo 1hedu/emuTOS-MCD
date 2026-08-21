@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 18 Aug 2026 00:33:06 +0000
+Subject: [PATCH 169/184] Sega CD: SCD_CARTSWAP, so a program can ask for a
+ cartridge change
+
+The servant had grown a watcher that noticed the memory map flipping
+and re-pointed itself. Wrong shape: nothing should be watching the
+cartridge slot under a desktop that is otherwise working, and a boot
+that decides on the owner's behalf is not how any of the rest of this
+is done. EJECT.PRG is the precedent -- a program says what is about to
+happen, the person does it, the drive comes back.
+
+SCD_CARTSWAP arms it. The request goes down the cartridge request
+channel because that is what the servant already reads every frame:
+op 3, beside op 1 read and op 2 write.
+---
+ bios/scdapi.h |  2 ++
+ bios/segacd.c | 20 ++++++++++++++++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index b984b74..8da5b32 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -156,6 +156,8 @@ struct scd_snap {
+ #define SCD_REVIVE        8             /* another chance, and a clean mask */
+ #define SCD_EJECT         9             /* open the tray (drive cmd $D) */
+ #define SCD_RELOAD        10            /* close it and remount from zero */
++#define SCD_CARTSWAP      11            /* Mode 1: expect the cartridge to
++                                         * be pulled and another put in */
+ 
+ /* Where the servant publishes the controller, for programs that have to
+  * read it directly.
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 25013af..bbc20f6 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3776,6 +3776,8 @@ static void scd_snapshot(struct scd_snap *s)
+         s->rep[i] = CDREPORT[i];
+ }
+ 
++void cart_swap_arm(void);       /* defined with cart_seq, further down */
++
+ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+ {
+     switch (op) {
+@@ -3784,6 +3786,15 @@ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+     case SCD_TS_ARM:    segacd_ts_arm((WORD)a); break;
+     case SCD_TS_REARM:  segacd_ts_rearm(); break;
+     case SCD_REVIVE:    segacd_cd_revive(); break;
++    case SCD_CARTSWAP:
++        /* Mode 1 only, and only because a program asked. The servant
++         * watches for the memory map to flip -- which is what removing
++         * a cartridge that grounds /CART does -- and probes whatever
++         * replaces it. Sent down the cartridge request channel because
++         * that is the channel the servant already reads every frame;
++         * op 3 beside op 1 read and op 2 write. */
++        cart_swap_arm();
++        break;
+     case SCD_EJECT:
+         cdd_cmd_on = 1;         /* our commander carries it, always */
+         cdd_ask_eject();
+@@ -4302,6 +4313,15 @@ void segacd_int_2_c(void)
+ 
+ static UWORD cart_sectors;
+ static UBYTE cart_seq;
++/* Tell the servant to expect the cartridge to be pulled. Sent down the
++ * cartridge request channel because that is what the servant already
++ * reads every frame: op 3, beside op 1 read and op 2 write. */
++void cart_swap_arm(void)
++{
++    cart_seq++;
++    *(volatile UWORD *)0xFF8024 = 0;                /* no LBA */
++    *(volatile UWORD *)0xFF8026 = (UWORD)(0x0300 | cart_seq);
++}
+ static UBYTE bram_state;
+ static UBYTE bram_wtest;
+ 

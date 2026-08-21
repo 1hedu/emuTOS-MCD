@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 20 Aug 2026 22:25:22 +0000
+Subject: [PATCH 183/184] Sega CD: the backup RAM file is EMUTOS, and AROS goes
+
+We built an EmuTOS port. Naming the volume AROSDISK after the operating
+system we did not build was funnier than it was useful, so it is EMUTOS
+-- which is also what the console's own Backup RAM Manager will show
+beside a game's saves, where a name that says what it is beats a joke.
+
+Measured after the rename, unchanged in every respect: footer intact,
+1 file, 5 blocks free, our FAT12 at byte 66, and no AROS string anywhere
+in the image.
+
+No fallback for the old name. A volume formatted in the few hours the
+first spelling existed reads as unformatted, and on the internal 8 KB
+there is no room to make a second file, so it needs the old save
+deleting from the manager screen first. That is one sentence in
+docs/bram-filesystem.md against a compatibility path carried forever.
+
+Also gone, and this part is a deliberate divergence from upstream rather
+than our own mess: the two "inspired by AROS" comments in bios/amiga.c
+and the matching line in doc/authors.txt.
+
+I argued against that and was wrong about the strength of it. There is
+no AROS code in EmuTOS -- bios/aros.c, bios/aros2.S and
+doc/license_aros.txt went years ago along with CONF_WITH_AROS, and what
+remained was four comment lines crediting the AROS project for hardware
+knowledge behind detect_gayle() and part of trackdisk, in Amiga-only
+code this machine never executes. Not a licence obligation, no APL file
+left to create one. So it was a choice, not a requirement, and the
+owner's to make.
+
+Desktop 26213da8979c5fbb on disc and cartridge.
+---
+ bios/amiga.c    | 6 +-----
+ bios/segacd.c   | 8 ++++----
+ doc/authors.txt | 1 -
+ 3 files changed, 5 insertions(+), 10 deletions(-)
+
+diff --git a/bios/amiga.c b/bios/amiga.c
+index 9c66058..ee95c77 100644
+--- a/bios/amiga.c
++++ b/bios/amiga.c
+@@ -226,9 +226,7 @@ static BOOL is_custom_chips_mirror(void *mirror_base)
+ 
+ int has_gayle;
+ 
+-/* Detect A600 / A1200 Gayle chip.
+- * Freely inspired by AROS ReadGayle().
+- * https://repo.or.cz/AROS.git/blob/HEAD:/arch/m68k-amiga/exec/readgayle.S */
++/* Detect A600 / A1200 Gayle chip. */
+ static void detect_gayle(void)
+ {
+     UBYTE gayle_id;
+@@ -1518,8 +1516,6 @@ BOOL amiga_can_shutdown(void)
+ /* Floppy                                                                     */
+ /******************************************************************************/
+ 
+-/* Some parts of this code have been inspired by AROS trackdisk.device.
+- * https://repo.or.cz/AROS.git/blob/HEAD:/arch/m68k-amiga/devs/trackdisk/trackdisk_hw.c */
+ 
+ static ULONG delay3ms;
+ static ULONG delay15ms;
+diff --git a/bios/segacd.c b/bios/segacd.c
+index c818d3b..776df61 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -4712,7 +4712,7 @@ static ULONG segacd_buram_info(BOOL again)
+  * The old arrangement wrote our FAT12 over the whole memory, footer and
+  * all, so a cartridge could carry our files or a game's saves and not
+  * both. This is the other way round: Sega's volume stays Sega's, and our
+- * filesystem is one file in it called AROSDISK, sitting in the console's
++ * filesystem is one file in it called EMUTOS, sitting in the console's
+  * own Backup RAM Manager beside whatever else is there.
+  *
+  * Sector i of the volume is bytes [i*512, i*512+512) of that file. The
+@@ -4722,7 +4722,7 @@ static ULONG segacd_buram_info(BOOL again)
+  * through that pointer, because a file's data takes a write in place and
+  * the manager reads back what we put there.
+  */
+-#define BFS_NAME    "AROSDISK"          /* 11 chars, zero padded */
++#define BFS_NAME    "EMUTOS"            /* up to 11 chars, zero padded */
+ 
+ static UBYTE *bfs_base;                 /* the file's data, or NULL */
+ static UBYTE  bfs_tried;                /* asked the manager once already */
+@@ -4772,7 +4772,7 @@ static BOOL bfs_init(void)
+     return brmc->cs ? FALSE : TRUE;
+ }
+ 
+-/* Find AROSDISK. Sets bfs_base and bfs_sects, or clears them. */
++/* Find our file. Sets bfs_base and bfs_sects, or clears them. */
+ static BOOL bfs_find(void)
+ {
+     bfs_base = NULL;
+@@ -5269,7 +5269,7 @@ LONG segacd_bram_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+      * FORMATI.PRG formats by writing sectors through Rwabs, so this is
+      * where "make me a filesystem here" actually arrives -- there is no
+      * other entry point to hook. If the memory holds Sega's volume and
+-     * has no AROSDISK in it yet, the file is created now and the sectors
++     * has no file of ours in it yet, one is created now and the sectors
+      * land inside it, instead of going raw and taking the volume's
+      * footer, and somebody's saves, with them.
+      *
+diff --git a/doc/authors.txt b/doc/authors.txt
+index 3996187..eb12f79 100644
+--- a/doc/authors.txt
++++ b/doc/authors.txt
+@@ -22,7 +22,6 @@ Minor borrowed stuff:
+ - the processor/FPU detection is taken from the MiNT kernel;
+ - "Bug" includes parts of the original gettext source code;
+ - some low-level hardware stuff comes from the Linux kernel;
+-- parts of Amiga floppy driver and AUTOCONFIG are inspired from AROS;
+ 
+ 
+ EmuTOS project development

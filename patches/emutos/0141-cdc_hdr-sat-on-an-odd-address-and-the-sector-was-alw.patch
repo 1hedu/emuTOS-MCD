@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 08:50:32 +0000
+Subject: [PATCH 141/184] cdc_hdr sat on an odd address, and the sector was
+ always arriving
+
+The emulator settles it. At the moment the transfer is triggered:
+
+  DTTRG dac=C0F0 dbc=0803 pt=C0F0 buf=00232501 6038456D
+  HOSTR#0 -> 0023   HOSTR#1 -> 2501   HOSTR#2 -> 6038 ...
+
+DAC equals PT, the byte count is right, and the CDC hands over 00 23 25
+01 -- the header for LBA 1600 -- followed by 60 38 45 6D, the first
+bytes of our own boot sector. The disc, the drive, the seek, the
+decoder, the ring and the transfer all work, and have been working.
+
+cdc_hdr is a UBYTE[4]. Alignment 1, and the linker duly put it at an
+odd address, where segacd_cdc_read() writes it with `move.w (a2),(a1)+`.
+The emulator's 68000 masks the low bit rather than faulting, so both
+header words land one byte low and the array reads back 23 25 01 00.
+The header check then rejects a perfectly good sector as the wrong one:
+cd_why 0x5555, four attempts, every read, for as long as there has been
+a header check.
+
+On the console it would not have been a wrong answer, it would have
+been an address error -- and the only reason it never fired is that no
+transfer has ever completed there.
+
+cdd_rawbuf and cdd_outbuf in this same file already carry this fix, on
+the line that declares them, and say why. So does progs/cdtest.c, whose
+OSBUF comment describes finding it the same way after two panics.
+Third time in one file.
+
+With four bytes moved: cd_why 0, wrong sectors 0, errors 1 instead of
+3, cdc_hdr 00 23 25 01, and cd_dtest bit 1 set for the first time --
+"a block came out of the disc and went to GEMDOS". The status line
+reads DY.
+---
+ bios/scdapi.h |  2 +-
+ bios/segacd.c | 25 ++++++++++++++++++++++++-
+ 2 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 471152f..1abab03 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  9
++#define SCD_VERSION  10
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd.c b/bios/segacd.c
+index f626036..527f502 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1187,7 +1187,30 @@ static volatile UBYTE cdc_hit;  /* it went by, and cdc_pt says where */
+ static volatile UBYTE cdc_hit_age;      /* cdc_ints when that happened, so
+                                          * the staleness test that guards a
+                                          * ring entry can guard this too */
+-static UBYTE cdc_hdr[4];        /* header that arrived with the data */
++/* Aligned, because segacd_cdc_read() writes it with `move.w (a2),(a1)+`.
++ *
++ * A UBYTE[4] has alignment 1 and gcc is right to give it that; the
++ * linker put this one at an odd address and has for as long as the
++ * driver has existed. Two things follow, and both were in front of us.
++ *
++ * In the emulator, whose 68000 masks the low address bit rather than
++ * faulting, the two header words land one byte low: the CDC hands over
++ * 00 23 25 01 -- the correct header for LBA 1600, with the correct
++ * sector behind it -- and this array reads back 23 25 01 00. The header
++ * check then calls a perfectly good sector the wrong sector, which is
++ * why every attempt of every read scored why nibble 5.
++ *
++ * On the console it is worse: `move.w` to an odd address is an address
++ * error, so the first transfer that ever completed would take the
++ * machine down. None has, because the drive has never delivered one.
++ * This has been waiting behind the drive problem the whole time.
++ *
++ * cdd_rawbuf and cdd_outbuf above already carry this fix and say so on
++ * the line that declares them. So does progs/cdtest.c, whose OSBUF
++ * comment describes the identical bug found the identical way. Third
++ * time, same file. */
++static ULONG cdc_hdrbuf[1];
++#define cdc_hdr ((UBYTE *)cdc_hdrbuf)   /* header that arrived with the data */
+ static UBYTE cdc_fail;          /* why the read did not finish */
+ static UWORD cdc_spill;         /* words drained while waiting for the end
+                                  * of a transfer; kept in a variable so the

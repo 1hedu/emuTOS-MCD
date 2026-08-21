@@ -1,0 +1,219 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 03:52:46 +0000
+Subject: [PATCH 028/184] segacd: instruments that cannot survive their own
+ failure
+
+The console reported a perfect link score with a frozen status packet
+and one command ever sent, and I read the score and called the stage
+done. The score was only ever written by the CDD interrupt, so when
+that interrupt stopped, the last good value stayed on screen for ever.
+An instrument that goes quiet when the thing it measures fails is
+worse than none, because it reads as a pass.
+
+Each instrument moves somewhere the failure it watches for cannot
+reach. The score is watched from the VBL and forced to zero when the
+interrupt goes quiet. The sub publishes its own heartbeat beside the
+drive's, because the servant's frame counter runs on the other 68000
+and keeps climbing with this CPU dead. A runaway level 4 masks itself
+off and latches a flag instead of hanging the console -- only the
+storming handler is in a position to notice, since nothing below level
+4 would ever run again.
+
+That guard caught itself out at once: sixteen arrivals between VBLs is
+a fifth of a second, which boot legitimately exceeds with interrupts
+off, and it switched the drive off before a single command went out. A
+storm passes a thousand in milliseconds and an honest gap would need
+thirteen seconds, so the threshold is 1000.
+
+Hardware answered 0xF -- "invalid" -- to both clock queries, while
+still reporting a position alongside the refusal. The single
+alternating query becomes a sweep of seven, including get-status,
+which asks for nothing and cannot be out of range, and the request for
+the drive's own account of its last error. Both cores echo all seven.
+---
+ bios/segacd.c | 125 ++++++++++++++++++++++++++++++++++++++------------
+ 1 file changed, 96 insertions(+), 29 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 47bffde..d147df6 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -108,9 +108,8 @@ const UBYTE *segacd_physbase(void)
+  * about the disc, selected by nibble 3; sub-command 0 is "where is the
+  * head now", which touches nothing and is therefore the safe way to
+  * prove a command round-trip on real hardware. */
++#define CDD_CMD_STAT    0x00
+ #define CDD_CMD_INFO    0x02
+-#define CDD_INFO_ABSMSF 0x00
+-#define CDD_INFO_RELMSF 0x01
+ 
+ static UBYTE cdd_stat[10];
+ static UBYTE cdd_valid;         /* last packet checksummed */
+@@ -121,6 +120,13 @@ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
+ static UBYTE cdd_pending;       /* a command is queued for the next INT4 */
+ static UBYTE cdd_queued[9];
+ static UBYTE cdd_sent;          /* commands actually handed to the drive */
++static UBYTE cdd_irqs;          /* level-4 arrivals, for the watchdog */
++static UBYTE cdd_seen;          /* last count the watchdog looked at */
++static UBYTE cdd_quiet;         /* VBLs since the interrupt last fired */
++static UWORD cdd_burst;         /* level-4 arrivals since the VBL last ran */
++static UBYTE cdd_stormed;       /* level 4 was masked off to save the machine */
++static UBYTE cdd_probe;         /* which question we are asking */
++static UBYTE subvbl;            /* the sub CPU's own heartbeat */
+ 
+ void segacd_cdd_init(void)
+ {
+@@ -176,26 +182,41 @@ static void cdd_command(const UBYTE *nib)       /* nine nibbles */
+     w[4] = (UWORD)((nib[8] << 8) | ((~sum) & 0x0F));    /* this sends it */
+ }
+ 
+-/* Ask the drive where its head is. Status comes back as the command
+- * echo, the sub-command, then MM:SS:FF in BCD, two nibbles each.
++/* Ask the drive something, cycling through the questions.
+  *
+- * Which of the two clocks we ask for alternates, and the reply names
+- * the one it answered in nibble 1. A position on its own proves
+- * nothing -- the drive volunteers one anyway -- but a reply that
+- * changes in step with the question can only have come from the
+- * question, so this is what tells a working command apart from a
+- * coincidence. Queued, not written: see cdd_command. */
+-static void cdd_ask_position(void)
++ * A reported position proves nothing on its own -- the drive volunteers
++ * one unasked -- so what matters is whether the reply names the
++ * question. Nibble 1 of the status carries that. Hardware answered 0xF,
++ * "invalid", to both of the clock queries this used to alternate
++ * between, so the sweep is wider now and includes the one question a
++ * refusing drive is guaranteed to be able to answer: 0x00, get status,
++ * which asks for nothing and cannot be out of range. If that comes back
++ * invalid too, the problem is our packet and not the request; if it
++ * alone succeeds, the drive is idle with no TOC to report and needs
++ * waking rather than interrogating. None of these move the drive. */
++static const UBYTE cdd_probes[][2] = {
++    { CDD_CMD_STAT, 0x00 },     /* control: always answerable */
++    { CDD_CMD_INFO, 0x00 },     /* absolute clock */
++    { CDD_CMD_INFO, 0x01 },     /* track-relative clock */
++    { CDD_CMD_INFO, 0x02 },     /* current track number */
++    { CDD_CMD_INFO, 0x03 },     /* total disc length */
++    { CDD_CMD_INFO, 0x04 },     /* first and last track */
++    { CDD_CMD_INFO, 0x06 },     /* the drive's own last error */
++};
++#define CDD_NPROBES (sizeof(cdd_probes) / sizeof(cdd_probes[0]))
++
++static void cdd_ask_next(void)
+ {
+-    static UBYTE cmd[9] = {
+-        CDD_CMD_INFO, 0, 0, CDD_INFO_ABSMSF, 0, 0, 0, 0, 0
+-    };
+     int i;
+ 
+-    cmd[3] = (UBYTE)(cmd[3] ^ (CDD_INFO_ABSMSF ^ CDD_INFO_RELMSF));
+     for (i = 0; i < 9; i++)
+-        cdd_queued[i] = cmd[i];
++        cdd_queued[i] = 0;
++    cdd_queued[0] = cdd_probes[cdd_probe][0];
++    cdd_queued[3] = cdd_probes[cdd_probe][1];
+     cdd_pending = 1;
++
++    if (++cdd_probe >= CDD_NPROBES)
++        cdd_probe = 0;
+ }
+ 
+ /* Latch one status packet and check it. */
+@@ -217,6 +238,29 @@ static void cdd_poll(void)
+  * in cdd_queued for this handler to post. */
+ void segacd_int_4_c(void)
+ {
++    /* The VBL is a lower level than this one, so it cannot preempt a
++     * handler that keeps being re-entered: if the gate array holds the
++     * request asserted, nothing below level 4 ever runs again and the
++     * machine is gone with no way to say so. Only the storming handler
++     * is in a position to notice, so it counts its own arrivals
++     * between VBLs and masks itself off rather than take the console
++     * down. A frozen desktop is not a diagnosis; "level 4 stormed" is.
++     *
++     * The threshold is high because the two cases are not close
++     * together. A storm re-enters as fast as the CPU can take an
++     * exception, so it passes a thousand in milliseconds; an honest
++     * gap between VBLs would have to last thirteen seconds to get
++     * there. Set at sixteen -- a fifth of a second -- this tripped
++     * during boot, where EmuTOS legitimately runs with interrupts off
++     * for longer than that, and switched the drive off before a single
++     * command had been sent. */
++    if (++cdd_burst > 1000) {
++        GA_INTMASK &= (UBYTE)~0x10;
++        cdd_stormed = 1;
++        return;
++    }
++
++    cdd_irqs++;
+     cdd_poll();
+ 
+     if (cdd_pending) {
+@@ -432,22 +476,44 @@ void segacd_int_2_c(void)
+      * rare enough that a wrong guess is not hammering the drive. */
+     if (cdd_cmd_on && ++cdd_tick >= 32) {
+         cdd_tick = 0;
+-        cdd_ask_position();
++        cdd_ask_next();
++    }
++
++    /* Let the storm detector know a VBL got through. */
++    cdd_burst = 0;
++
++    /* A score that is only ever written by the CDD interrupt cannot
++     * report the interrupt stopping: the last good value simply stays
++     * on screen. That is how a link that froze at the first command
++     * spent a hardware test looking perfect. Watch the interrupt from
++     * out here, where the failure cannot hide the evidence of itself,
++     * and force the score to zero once it goes quiet. */
++    if (cdd_irqs != cdd_seen) {
++        cdd_seen = cdd_irqs;
++        cdd_quiet = 0;
++    } else if (cdd_quiet < 255 && ++cdd_quiet >= 8) {
++        cdd_score = 0;          /* eight VBLs is six missed packets */
+     }
+ 
+-    /* status nibble and the minutes in one word, seconds and frames in
+-     * the other: no comm register is free enough to carry all seven.
+-     * Nibble 1 -- which clock the drive says it is answering -- earns
+-     * its place ahead of the tens of minutes, which no test disc of
+-     * ours will ever reach. */
++    /* Two counters that must both be spinning, because between them
++     * they say which CPU stopped. The servant's own frame counter
++     * cannot: it runs on the other 68000, so it keeps climbing happily
++     * with this one dead, and reading it as proof of life is how a
++     * frozen sub spent a hardware test looking healthy. This nibble is
++     * the sub's heartbeat and the one beside it is the drive's. */
++    subvbl++;
+     *(volatile UWORD *)0xFF8022 = (UWORD)(((UWORD)cdd_score << 12)
+-        | ((UWORD)cdd_stat[0] << 8)
+-        | ((UWORD)cdd_stat[1] << 4)
++        | ((UWORD)(cdd_irqs & 0x0F) << 8)
++        | ((UWORD)(subvbl & 0x0F) << 4)
++        |  (UWORD)(cdd_probe & 0x0F));
++
++    /* What the drive last said: its state, whether it accepted the
++     * question (nibble 1, 0xF meaning it did not), its track flags,
++     * and the minutes of whatever position it reported. */
++    *(volatile UWORD *)0xFF8028 = (UWORD)(((UWORD)cdd_stat[0] << 12)
++        | ((UWORD)cdd_stat[1] << 8)
++        | ((UWORD)cdd_stat[8] << 4)
+         |  (UWORD)cdd_stat[3]);
+-    *(volatile UWORD *)0xFF8028 = (UWORD)(((UWORD)cdd_stat[4] << 12)
+-        | ((UWORD)cdd_stat[5] << 8)
+-        | ((UWORD)cdd_stat[6] << 4)
+-        |  (UWORD)cdd_stat[7]);
+ 
+     /* Sound telemetry, packed into the spare bits of the drive status
+      * word: no comm register is free, and this answers the only
+@@ -464,7 +530,8 @@ void segacd_int_2_c(void)
+         | (pcm_ready ? 0x20 : 0)
+         | ((conterm & 1) ? 0x40 : 0)
+         | (cdd_cmd_on ? 0x80 : 0)
+-        | ((UWORD)(pcm_clicks & 0x0F) << 8)
++        | ((UWORD)(cdd_stormed ? 1 : 0) << 8)
++        | ((UWORD)(pcm_clicks & 0x07) << 9)
+         | ((UWORD)(cdd_sent & 0x0F) << 12));
+ 
+     if (pcm_countdown) {                /* silence the bell when it is due */

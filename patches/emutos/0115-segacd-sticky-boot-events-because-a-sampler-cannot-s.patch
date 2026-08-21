@@ -1,0 +1,191 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 10:01:18 +0000
+Subject: [PATCH 115/184] segacd: sticky boot events, because a sampler cannot
+ see the past
+
+The live trace says where EmuTOS is now, and the servant does not
+start sampling until 300 frames after handover -- by which time the
+whole of bios_init is history. Two conclusions were drawn off that
+sampler and both were wrong, including 'vdi_v_clrwk never runs',
+which was read from an instrument that also reported NO for a line
+that provably executes.
+
+A bitmask that is only ever ORed does not have that problem. What it
+says, with a CD boot beside it, is that the two boots are identical:
+events 2D on both -- framebuffer cleared at screen init, gem_main
+entered, the desktop program launched, A: present. phystop is 060000
+on both.
+---
+ aes/geminit.c     |  8 ++++++--
+ bios/screen.c     |  5 +++--
+ bios/segacd.c     | 42 ++++++++++++++++++++++++++++++++++++------
+ bios/segacd.h     |  1 +
+ vdi/vdi_control.c | 11 ++++++-----
+ 5 files changed, 52 insertions(+), 15 deletions(-)
+
+diff --git a/aes/geminit.c b/aes/geminit.c
+index 0c3b165..a218b3e 100644
+--- a/aes/geminit.c
++++ b/aes/geminit.c
+@@ -753,12 +753,16 @@ void run_accs_and_desktop(void)
+ }
+ 
+ 
++#ifdef MACHINE_SEGACD
++void segacd_event(UWORD bit);   /* bios/segacd.h is not on the AES's path */
++#endif
++
+ void gem_main(void)
+ {
+ #ifdef MACHINE_SEGACD
+     /* The AES is entered on both boots and paints on only one of them,
+      * so the traces follow it in. E1A0 is "gem_main entered". */
+-    *(volatile UWORD *)0xFF802E = 0xE1A0;
++    segacd_event(2);
+ #endif
+     LONG    n;
+     WORD    i;
+@@ -915,7 +919,7 @@ void gem_main(void)
+      * (for shutdown or resolution change)
+      */
+ #ifdef MACHINE_SEGACD
+-    *(volatile UWORD *)0xFF802E = 0xE1A7;
++    segacd_event(3);
+ #endif
+     aes_run_rom_program(accdesk_start);
+ 
+diff --git a/bios/screen.c b/bios/screen.c
+index b4cdde1..1d1aba3 100644
+--- a/bios/screen.c
++++ b/bios/screen.c
+@@ -679,9 +679,10 @@ void screen_init_address(void)
+          * the latter is deliberately 0 for "unspecified", so guarding
+          * on it skips the clear on exactly the machine that needs it. */
+         LONG n = calc_vram_size();
+-        *(volatile UWORD *)0xFF802E = (UWORD)(0xD000u | (UWORD)(n >> 4));
+-        if (n > 0)
++        if (n > 0) {
+             memset(screen_start, 0, n);
++            segacd_event(0);
++        }
+     }
+ #endif
+     /* correct physical address */
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 31016a8..285ba30 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -284,6 +284,29 @@ static UWORD cd_why;            /* nibble per attempt of the last
+  * rather than believed: cd_badmode says how often, cd_lasth3 says
+  * what the byte actually is. */
+ static BOOL adisk_present;      /* forward: the level 4 handler publishes it */
++
++/* Sticky boot events, ORed and never cleared.
++ *
++ * The live trace register says where EmuTOS is now, which is useless
++ * for anything that happened and finished before the servant started
++ * looking -- and the servant does not start looking until 300 frames
++ * after handover, by which time the whole of bios_init is history. A
++ * capture that only samples cannot see the past; a bitmask that is
++ * only ever ORed can. Two conclusions have already been drawn from
++ * the wrong one of those.
++ *
++ *   bit 0  screen_init_address cleared the framebuffer
++ *   bit 1  vdi_v_clrwk ran
++ *   bit 2  gem_main entered
++ *   bit 3  the desktop program was launched
++ *   bit 4  the VT52 cleared the screen
++ */
++static UBYTE cd_events;
++
++void segacd_event(UWORD bit)
++{
++    cd_events |= (UBYTE)(1u << bit);
++}
+ static UWORD cd_badmode;        /* decoded, mode byte neither 1 nor 2 */
+ static UBYTE cd_lasth3;         /* the last such byte, verbatim */
+ /* Everything else a console cannot currently say out loud.
+@@ -813,12 +836,17 @@ void segacd_int_4_c(void)
+      * something else owns and read back somebody else's value. The tick
+      * count has done its job, so its byte is free.
+      *
+-     * On a CD boot the SP reads that ramdisk off the disc; on a Mode 1
+-     * boot the cartridge copies it into PRG bank 3. Same destination,
+-     * different writer, and a wrong bank would leave A: absent with no
+-     * other symptom. */
+-    *(volatile UWORD *)0xFF802C = (UWORD)(((UWORD)cdd_stat[0] << 8)
+-                                        | (adisk_present ? 0xA1 : 0xA0));
++     * The A: check that used to live here is retired: it came back
++     * present on both boots, so the cartridge's copy into PRG bank 3
++     * lands exactly where the SP's copy off the disc does. */
++    /* phystop's page number in the high byte, the sticky events in the
++     * low. The framebuffer is reserved just below phystop, and it is
++     * being cleared and then written over with what disassembles as
++     * 68000 code -- so the question is whether the memory the allocator
++     * thinks is free reaches into it. The drive state that used to sit
++     * here has been read; this has not. */
++    *(volatile UWORD *)0xFF802C = (UWORD)(((((ULONG)phystop) >> 12) << 8)
++                                        | cd_events);
+ 
+     /* Wait for DRS to go *low*. It reads as "a status packet is on its
+      * way in", so the BIOS spins until the incoming transfer is over
+@@ -3578,6 +3606,8 @@ void segacd_floppy_init(void)
+     /* the builder stamps "EmuTOSMD" as the OEM field at offset 2 */
+     adisk_present = (ADISK_BASE[2] == 'E' && ADISK_BASE[3] == 'm'
+                   && ADISK_BASE[4] == 'u' && ADISK_BASE[5] == 'T');
++    if (adisk_present)
++        segacd_event(5);
+     cart_sectors = CART_CNT;    /* published by the servant at startup */
+ 
+     /* A backup RAM cart wins when present (bigger, and the console can
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 43d355d..226f2fa 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -34,6 +34,7 @@ void segacd_keyclick(void);
+ /* D: -- a filesystem read off the disc itself, through the CDC */
+ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
+ void segacd_cd_revive(void);   /* the drive gets another chance */
++void segacd_event(UWORD bit);  /* a sticky boot event, ORed, never cleared */
+ LONG segacd_cd_ioctl(WORD op, void *arg);
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+diff --git a/vdi/vdi_control.c b/vdi/vdi_control.c
+index f2ce5b0..c1d63a0 100644
+--- a/vdi/vdi_control.c
++++ b/vdi/vdi_control.c
+@@ -596,6 +596,10 @@ void vdi_v_clswk(Vwk * vwk)
+  *
+  * Screen is cleared from the base address v_bas_ad.
+  */
++#ifdef MACHINE_SEGACD
++void segacd_event(UWORD bit);   /* bios/segacd.h is not on the VDI's path */
++#endif
++
+ void vdi_v_clrwk(Vwk * vwk)
+ {
+     ULONG size;
+@@ -616,6 +620,7 @@ void vdi_v_clrwk(Vwk * vwk)
+         fill = 0x00;
+     }
+ #ifdef MACHINE_SEGACD
++    segacd_event(1);
+     /* Which buffer this actually clears, and how much of it.
+      *
+      * On a Mode 1 boot the top 12 KB of the framebuffer keeps its
+@@ -625,13 +630,9 @@ void vdi_v_clrwk(Vwk * vwk)
+      * different v_bas_ad than the one published to the servant every
+      * VBL. High nibble B so the servant can pick it out of a register
+      * the boot traces also use. */
+-    *(volatile UWORD *)0xFF802E = (UWORD)(0xB000u
+-                    | (UWORD)((((ULONG)v_bas_ad) >> 8) & 0x0FFF));
+ #endif
+     memset(v_bas_ad, fill, size);
+-#ifdef MACHINE_SEGACD
+-    *(volatile UWORD *)0xFF802E = (UWORD)(0xC000u | (UWORD)(size >> 4));
+-#endif
++
+ }
+ 
+ 

@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 07:06:34 +0000
+Subject: [PATCH 134/184] cdc_want was never set on the path D: uses
+
+segacd_int_5_c() latches PT the moment a sector's header equals
+cdc_want -- the direct route to a sector, independent of the ring.
+cdc_want was assigned in exactly one place, cdr_start(), which belongs
+to the CDR state machine. D: reaches the drive through cd_read_block()
+-> cd_fill() -> cd_fetch(), which never goes near it.
+
+So on every read D: has ever attempted, cdc_want was {0,0,0} and the
+handler was asking whether the drive had reached 00:00:00 -- before the
+lead-in, and unreachable. The console log shows it plainly and has for
+weeks: "want 000000" on every round of every run, at every LBA. The
+direct path has never once been armed; the ring was the only way in,
+and the ring gate needs a mode byte the decoder is not producing.
+
+Set it in cd_fetch(), from lba rather than the seek target: the seek
+starts CDR_EARLY sectors short on purpose, but the header being waited
+for is the sector GEMDOS asked for.
+---
+ bios/segacd.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index e010c8a..0302dac 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2196,6 +2196,25 @@ static BOOL cd_fetch(ULONG lba)
+     cd_standing = 0;
+     cd_why = 0;
+ 
++    /* Tell the decoder's interrupt which sector this is about.
++     *
++     * cdc_want is the target header, and segacd_int_5_c() latches PT
++     * the moment a sector's header equals it -- the direct route to a
++     * sector, the one that does not depend on the ring. It was being
++     * assigned in exactly one place, cdr_start(), which belongs to the
++     * CDR state machine; this path reaches the drive through cd_fill()
++     * and never went near it. So on every read D: has ever done,
++     * cdc_want was {0,0,0} and the compare in the handler was asking
++     * whether the drive had reached 00:00:00 -- which is before the
++     * lead-in and cannot arrive. The whole direct path was dead, and
++     * the ring was the only way in.
++     *
++     * lba, not the seek target: the seek deliberately starts CDR_EARLY
++     * sectors short so the drive is tracking by the time the wanted
++     * sector goes past, and the header we are waiting for is the one
++     * we actually asked GEMDOS about. */
++    lba_to_msf(lba, cdc_want);
++
+     /* Eight, up from three, after reading Sega's sample policy: it
+      * re-seeks up to thirty times before giving up. Time is the real
+      * limiter -- the budget above bounds the whole fill -- so the cap

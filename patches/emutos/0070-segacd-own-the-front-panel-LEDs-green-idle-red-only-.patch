@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 04:32:32 +0000
+Subject: [PATCH 070/184] segacd: own the front-panel LEDs -- green idle, red
+ only while reading
+
+The CDBIOS runs the lamps and we evict it mid-access, so they freeze
+wherever that instant left them: red lit for hours over an idle drive
+on one boot, dark over a struggling one the next. A zombie indicator,
+and it got read as evidence twice.
+
+One byte at $FF8000, bit 0 red, bit 1 green; reset and version bits
+live in other bytes, so the write can touch nothing else. Green from
+cdd_init on, red bracketing cd_fetch -- the meaning the lamp has on
+every shipped Sega CD game: lit means reading, now including reading
+and failing.
+---
+ bios/segacd.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 2ff9ceb..92f5b9c 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -330,6 +330,25 @@ static UBYTE cdd_len_ok;        /* ...and whether the drive has said it */
+ 
+ static void cdd_ask(UBYTE cmd, UBYTE sub);
+ 
++/* The front-panel LEDs. The CDBIOS runs these -- green steady for
++ * disc-in, red added while accessing -- and we evict the CDBIOS in the
++ * middle of an access, so the lights freeze wherever that instant left
++ * them. A console then shows the red lamp lit for hours over a drive
++ * doing nothing, or dark over one that is struggling: a zombie
++ * indicator, worse than none, and it was read as evidence twice.
++ *
++ * One byte at $FF8000, bit 0 red, bit 1 green; the reset and version
++ * bits live in other bytes, so this write can touch nothing else.
++ * Green always -- the disc is in and the machine is alive -- and red
++ * exactly while this driver is working the disc, which restores the
++ * meaning the lamp has on every Sega CD game ever shipped. */
++#define GA_LEDS ((volatile UBYTE *)0xFF8000)
++
++static void cd_led(UBYTE busy)
++{
++    *GA_LEDS = (UBYTE)(0x02 | (busy ? 0x01 : 0x00));
++}
++
+ void segacd_cdd_init(void)
+ {
+     /* Holding A at power-on keeps the link passive. A malformed command
+@@ -379,6 +398,8 @@ void segacd_cdd_init(void)
+         segacd_bootflags = (UWORD)(f & 0xFF);
+     }
+ 
++    cd_led(0);                  /* green: alive, disc in, not reading */
++
+     cdd_ask(CDD_CMD_INFO, 0x03);        /* something to say from the first
+                                          * exchange onwards */
+ 
+@@ -1588,6 +1609,7 @@ static BOOL cd_fetch(ULONG lba)
+      * other: queued while a read is in flight it replaces the read, or
+      * interrupts the streaming that read is waiting on. */
+     cd_busy = 1;
++    cd_led(1);
+     cd_why = 0;
+ 
+     /* Eight, up from three, after reading Sega's sample policy: it
+@@ -1777,6 +1799,7 @@ done:
+         cd_errors++;
+         cd_cached = 0xFFFFFFFFUL;
+     }
++    cd_led(0);
+     cd_busy = 0;
+     return got;
+ }

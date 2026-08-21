@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 10:55:19 +0000
+Subject: [PATCH 119/184] segacd: the boot stops paying Sega's eight seconds
+ per failed block
+
+A Mode 1 boot took 57 seconds of emulated time between the version
+banner and the desktop, against under 15 with the drive latched dead
+from the first instruction.  Measured in gpgx with no disc in the tray;
+the console reports the same shape.
+
+The cost is a leash meant for a machine that is up being charged to a
+machine that is coming up.  CD_XCHG_BUDGET is 8 s -- Sega's own number,
+and right for real file I/O -- and cd_read_block spends it twice on a
+failed block, once at full and once doubled.  The boot reads several
+blocks: disk_init_all probes the unit, pun_info_setup follows, and the
+desktop asks Dfree of every drive before it draws anything.
+
+The mount probe already had the answer, applied to one block: two
+seconds, one try, and a desktop without a C: icon beats a desktop a
+minute later.  Now the whole boot gets it, and so does any read taken
+while the last thing this drive did was fail.
+
+  cd_booting    every read before deskmain(): 150 exchanges, one fill
+  cd_deadrun    the drive just failed: 300, one fill.  A single
+                success clears it and Sega's patience is back
+  cd_dead       three consecutive failures: answer EREADF at once
+
+deskmain() ends the boot leash and deliberately does not revive the
+drive -- the first build of this reviving there put every saved second
+straight back into an hourglass, because Dfree comes before the first
+redraw.  Instead the dead latch expires on its own after ten seconds,
+and the next request gets one more attempt on the short leash.  It had
+to expire: this comment used to claim the latch cleared on media
+change, and nothing in the system has ever called segacd_cd_revive().
+
+CD boot re-verified: desktop with A, B and C, zero CD errors.
+---
+ bios/segacd.c | 113 +++++++++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 93 insertions(+), 20 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index ceafbbe..194136b 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -230,9 +230,47 @@ static UBYTE cd_quiet;          /* the read command has been withdrawn */
+                                  * thirty retries. A 1992 lens gets a
+                                  * long leash from its own maker. */
+ #define CD_XCHG_AHEAD   120     /* stop reading ahead with this much left */
+-static UWORD cd_leash = CD_XCHG_BUDGET; /* the budget in force; the mount
+-                                         * probe shortens it, once */
+-static UBYTE cd_first = 1;      /* no block has been read yet */
++static UWORD cd_leash = CD_XCHG_BUDGET; /* the budget in force; the boot
++                                         * shortens it */
++/* Sega's eight seconds are for a machine that is up. They are not for a
++ * machine that is coming up.
++ *
++ * This was already the reasoning behind the mount probe's short leash,
++ * and the reasoning was right -- it was just applied to one block. The
++ * boot reads several: disk_init_all probes the unit, pun_info_setup
++ * follows it, and the desktop asks Dfree of every drive it can see. A
++ * drive with nothing to give charges the full leash for each of them,
++ * twice over, because cd_read_block retries a failed fill with double
++ * the budget. Measured in gpgx with no disc in the tray: 42 seconds
++ * between the version banner and the desktop, against under 5 with the
++ * drive latched dead from the first instruction.
++ *
++ * Mode 1 is where it hurts, since nothing about reaching a desktop
++ * depends on the disc there -- EmuTOS, IOFW and the A: ramdisk all come
++ * out of the cartridge -- but the principle holds on a CD boot too. A
++ * drive that cannot be read should cost an icon, not a minute.
++ *
++ * So the whole boot gets the probe's two seconds and one try.
++ *
++ * The dead-drive latch has to survive the end of the boot, which is
++ * the part the first build of this change got wrong. deskmain() calls
++ * Dfree on every drive it can see before it draws anything; reviving
++ * the drive at the top of deskmain() handed all of the saved time
++ * straight back as an hourglass. So the boot ends the short leash and
++ * nothing else, and a drive that failed its way to cd_dead stays there
++ * until the cool-down below offers it another try. */
++#define CD_BOOT_LEASH   150     /* 2 s at 75 Hz, for the whole boot */
++/* A drive that has just failed does not get the full eight seconds for
++ * the next block either. Half, and one try -- and a single successful
++ * read puts it back on Sega's patience immediately, so this only ever
++ * shortens the reads that follow a read which already failed. */
++#define CD_HURT_LEASH   300     /* 4 s: recently failed, not yet dead */
++static UBYTE cd_booting = 1;    /* ...until deskmain() says otherwise */
++static void cd_boot_over(void); /* with the dead-drive latch, below */
++static UBYTE cd_deadrun;        /* consecutive failed blocks; see the
++                                 * latch they set, further down */
++static UBYTE cd_dead;
++static UWORD cd_deadstamp;      /* cdd_ticks when the latch went on */
+ #define CD_SPIN_BACKSTOP 130000L
+ 
+ static UWORD cd_epoch;          /* cdd_ticks when this block read began */
+@@ -300,13 +338,17 @@ static BOOL adisk_present;      /* forward: the level 4 handler publishes it */
+  *   bit 1  vdi_v_clrwk ran
+  *   bit 2  gem_main entered
+  *   bit 3  the desktop program was launched
+- *   bit 4  the VT52 cleared the screen
++ *   bit 4  deskmain() entered
+  */
+ static UBYTE cd_events;
+ 
+ void segacd_event(UWORD bit)
+ {
+     cd_events |= (UBYTE)(1u << bit);
++    /* deskmain() is the end of the boot, and the only place in the
++     * system that knows it. The CD's short boot leash ends here. */
++    if (bit == 4)
++        cd_boot_over();
+ }
+ 
+ static UWORD cd_wsum = 0xFFFF;  /* 0xFFFF = not computed yet */
+@@ -2618,18 +2660,25 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+ 
+         cd_blk_src = 2;
+ 
+-        /* The very first read is the mount probe, and it runs before
+-         * anything is on screen. It either works quickly -- the boot
+-         * environment is the quietest this machine ever is -- or the
+-         * user is better served by a desktop without a C: icon in two
+-         * seconds than by one with a dead icon in half a minute; the
++        /* Every read taken before the desktop runs is a boot read, and
++         * a boot read is on a clock. It either works quickly -- the
++         * boot environment is the quietest this machine ever is -- or
++         * the user is better served by a desktop without a C: icon in
++         * two seconds than by one with a dead icon a minute later; the
+          * next touch of the drive retries with the full leash anyway.
+-         * Sega's patience stays where it belongs, on real file I/O. */
+-        if (cd_first) {
+-            cd_first = 0;
++         * Sega's patience stays where it belongs, on real file I/O.
++         *
++         * One try, not two: the retry below exists for a drive that is
++         * working and having a bad moment, which is a judgement worth
++         * making about a machine that has finished starting up.
++         *
++         * The same applies to a drive that has just failed a block:
++         * cd_deadrun is nonzero for exactly as long as the last thing
++         * this drive did was fail, and a success clears it. */
++        if (cd_booting || cd_deadrun) {
+             cd_epoch = cdd_ticks;
+             cd_budget = CD_SPIN_BACKSTOP;
+-            cd_leash = 150;                     /* two seconds */
++            cd_leash = cd_booting ? CD_BOOT_LEASH : CD_HURT_LEASH;
+             go = (UBYTE)(cd_fill(lba) ? 1 : 0);
+             cd_leash = CD_XCHG_BUDGET;
+             if (!go)
+@@ -2699,12 +2748,19 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+  * an absent icon, not an absent computer.
+  *
+  * Three, because a re-seek costs one and the mispair correction can
+- * cost another, so two is inside the range of ordinary bad luck.
+- * Cleared on media change, so putting a disc in gets a fresh start. */
++ * cost another, so two is inside the range of ordinary bad luck. */
+ #define CD_DEADRUN 3
+ 
+-static UBYTE cd_deadrun;        /* consecutive failed blocks */
+-static UBYTE cd_dead;           /* ...and the latch they set */
++/* ...and it is not forever. Nothing in this system ever told the driver
++ * a disc had been swapped -- the media-change hook this comment used to
++ * claim exists was never wired to anything -- so a latch with no way
++ * out means one bad minute at boot costs C: for the rest of the
++ * session. Instead the latch expires: ten seconds after it went on, the
++ * next request gets one more attempt, on the short leash, with the
++ * counter left one failure away from latching again. Free when the
++ * drive is dead (nobody is asking) and the difference between "C: is
++ * gone" and "C: needed a moment" when it is not. */
++#define CD_DEAD_COOLDOWN 750    /* 10 s at 75 Hz */
+ 
+ void segacd_cd_revive(void)
+ {
+@@ -2712,19 +2768,36 @@ void segacd_cd_revive(void)
+     cd_dead = 0;
+ }
+ 
++/* deskmain() has been entered: the boot's short leash is over.
++ *
++ * Deliberately not a revive. See CD_BOOT_LEASH -- the desktop's first
++ * act is Dfree on every drive, and handing the full eight seconds back
++ * here spends everything the short leash saved. */
++static void cd_boot_over(void)
++{
++    cd_booting = 0;
++}
++
+ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+ {
+     if (rw & RW_WRITE)
+         return EWRPRO;
+     if (sector < 0 || (ULONG)sector + count > CD_DDISK_BLOCKS)
+         return ESECNF;
+-    if (cd_dead)                /* answer immediately, as it has been */
+-        return EREADF;
++    if (cd_dead) {
++        if ((UWORD)(cdd_ticks - cd_deadstamp) < CD_DEAD_COOLDOWN)
++            return EREADF;      /* answer immediately, as it has been */
++        cd_dead = 0;            /* one more try, and one failure from
++                                 * being right back where it was */
++        cd_deadrun = CD_DEADRUN - 1;
++    }
+ 
+     while (count--) {
+         if (!cd_read_block((ULONG)sector, buf)) {
+-            if (++cd_deadrun >= CD_DEADRUN)
++            if (++cd_deadrun >= CD_DEADRUN) {
+                 cd_dead = 1;
++                cd_deadstamp = cdd_ticks;
++            }
+             cd_park();
+             return EREADF;
+         }

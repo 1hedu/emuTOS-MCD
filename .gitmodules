@@ -1,0 +1,10 @@
+[submodule "SGDK"]
+	path = SGDK
+	url = https://github.com/Stephane-D/SGDK.git
+[submodule "emutos"]
+	path = emutos
+	url = https://github.com/emutos/emutos.git
+	ignore = all
+[submodule "vendor/megadev"]
+	path = vendor/megadev
+	url = https://github.com/drojaazu/megadev.git

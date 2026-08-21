@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 06:52:20 +0000
+Subject: [PATCH 012/184] segacd: trace getbpb's verdict on drive B:
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Hardware confirms the BRAM volume is sound — the boot sector reads
+back as 0x6010 and byte writes verify — yet GEMDOS still refuses the
+drive, and our block driver is never called. The rejection therefore
+happens inside blkdev_getbpb, so each of its early returns now stamps a
+distinct code (B001..B007) into a comm word, and success publishes the
+cluster count instead.
+---
+ bios/blkdev.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/bios/blkdev.c b/bios/blkdev.c
+index db39215..e1fe4e4 100644
+--- a/bios/blkdev.c
++++ b/bios/blkdev.c
+@@ -566,6 +566,16 @@ WORD get_shift(ULONG blocksize)
+  * implement the Mediach flush as documented in Compendium
+  */
+ 
++#ifdef MACHINE_SEGACD
++/* Trace what getbpb decides for B:, published to a sub->main comm word
++ * so the servant can show it. GEM refuses the drive before any sector
++ * I/O reaches our driver, so the verdict has to come from in here. */
++#define SCD_BPB(v) do { if (dev == 1) \
++        *(volatile UWORD *)0xFF8026 = (UWORD)(v); } while (0)
++#else
++#define SCD_BPB(v)
++#endif
++
+ LONG blkdev_getbpb(WORD dev)
+ {
+     BLKDEV *bdev = blkdev + dev;
+@@ -577,10 +587,12 @@ LONG blkdev_getbpb(WORD dev)
+     int n, unit;
+ 
+     KDEBUG(("blkdev_getbpb(%d)\n",dev));
++    SCD_BPB(0xB000);
+ 
+     if ((dev < 0 ) || (dev >= BLKDEVNUM) || !(bdev->flags&DEVICE_VALID))
+     {
+         KDEBUG(("device is invalid\n"));
++        SCD_BPB(0xB001);
+         return 0L;  /* unknown device */
+     }
+ 
+@@ -612,6 +624,7 @@ LONG blkdev_getbpb(WORD dev)
+     if (!(bdev->flags & GETBPB_ALLOWED))
+     {
+         KDEBUG(("device does not support Getbpb()\n"));
++        SCD_BPB(0xB002);
+         return 0L;              /* no can do */
+     }
+ 
+@@ -631,6 +644,7 @@ LONG blkdev_getbpb(WORD dev)
+     if (ret < 0L)
+     {
+         KDEBUG(("can't read boot sector\n"));
++        SCD_BPB(0xB003);
+         return 0L;  /* error */
+     }
+ 
+@@ -643,6 +657,7 @@ LONG blkdev_getbpb(WORD dev)
+     {
+         KDEBUG(("recsiz %u is too large (max recsiz = %u)\n",
+                 recsiz,pun_info.max_sect_siz));
++        SCD_BPB(0xB004);
+         return 0L;
+     }
+ 
+@@ -652,6 +667,7 @@ LONG blkdev_getbpb(WORD dev)
+     {
+         KDEBUG(("invalid cluster size (%lu bytes): spc=%u, recsiz=%u\n",
+                 clsizb,b->spc,recsiz));
++        SCD_BPB(0xB005);
+         return 0L;
+     }
+ 
+@@ -666,6 +682,7 @@ LONG blkdev_getbpb(WORD dev)
+     if ((b->fat < MIN_FATS) || (b->fat > MAX_FATS))
+     {
+         KDEBUG(("invalid FAT count %u\n",b->fat));
++        SCD_BPB(0xB006);
+         return 0L;
+     }
+ 
+@@ -738,9 +755,11 @@ LONG blkdev_getbpb(WORD dev)
+         /* FAT32 - unsupported */
+         KINFO(("Disk %c: is inaccessible (FAT32)\n",dev+'A'));
+         bdev->bpb.recsiz = 0;               /* mark it for XHDI */
++        SCD_BPB(0xB007);
+         return 0L;
+     }
+     bdev->bpb.numcl = tmp;
++    SCD_BPB(tmp);           /* success: the cluster count it settled on */
+ 
+     /*
+      * check for FAT12 or FAT16: according to Microsoft (who originated

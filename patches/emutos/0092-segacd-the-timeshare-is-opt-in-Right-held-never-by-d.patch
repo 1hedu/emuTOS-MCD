@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 22:21:01 +0000
+Subject: [PATCH 092/184] segacd: the timeshare is opt-in -- Right held, never
+ by default
+
+Engaging the firmware automatically put its first visit inside
+EmuTOS's boot, and that is where it took the machine: a console
+stopped at the version banner with a frozen HUD, unable to reach even
+the diagnostic. The mechanism is plain -- a visit masks the gate array
+to levels 4 and 5 and restores it on the way out, so a firmware call
+that does not return leaves levels 2 and 3 off forever, EmuTOS's 200 Hz
+clock never ticks again, and the banner waits for a tick that is never
+coming. My loops have timeouts; the BIOS's own calls do not.
+
+Default is the driver that at least boots. Hold Right to hand D: to
+the firmware.
+---
+ bios/segacd.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 54cf3d5..7e8d8a1 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -145,6 +145,7 @@ static UBYTE cdd_count, cdd_good;
+ static UBYTE cdd_tick;
+ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
+ UBYTE segacd_diag;              /* holding Down runs the D: diagnostic */
++static UBYTE cd_ts_want;        /* Right held: let the firmware drive D: */
+ static UBYTE cd_selftest;       /* holding Up runs the boot sector test */
+ UWORD segacd_bootflags;         /* the raw button word the servant sent.
+                                  * Printed by the diagnostic, because a
+@@ -451,6 +452,7 @@ void segacd_cdd_init(void)
+         segacd_diag = (UBYTE)((f & 4) ? 1 : 0);
+         cd_lead = (f & 8) ? 2UL : 20UL;
+         cd_selftest = (UBYTE)((f & 16) ? 1 : 0);
++        cd_ts_want = (UBYTE)((f & 32) ? 1 : 0);
+         segacd_bootflags = (UWORD)(f & 0xFF);
+     }
+ 
+@@ -2222,7 +2224,7 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+      * moment -- one drive, one master. */
+     if (!cd_ts_decided) {
+         cd_ts_decided = 1;
+-        if (segacd_bios_available()) {
++        if (cd_ts_want && segacd_bios_available()) {
+             cd_ts = 1;
+             cdd_cmd_on = 0;     /* our VBL stops talking to the drive */
+         }

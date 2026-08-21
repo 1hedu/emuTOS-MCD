@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 21:14:45 +0000
+Subject: [PATCH 084/184] segacd: pause the drive after a FAILED read, not only
+ a successful one
+
+The user has described the same shape three times -- boots that get
+slower run over run, a diagnostic that takes longer on its second
+pass, a console that degrades from working desktop to white screen
+over a session -- and it is not addresses, it is accumulation.
+
+cd_fill pauses the drive at the end of a successful fetch. A failed
+fetch returned early, and the last thing the drive was told was
+'read', which makes it play forward until something says otherwise.
+So every failure left the head travelling: the next read seeked back
+from further out, took longer, failed more often, left it further
+still. That is the feedback loop, and it is the head found at
+01:80:00 while a read waited for 00:02:16.
+
+docs/cdd-bios-notes.md records that Lunar's finisher -- CDC_STOP plus
+ROM_PAUSEON -- runs on every completion AND every failure. Only the
+completion half was ever transcribed. This is the other half.
+---
+ bios/segacd.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 6f6e214..8466cac 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2034,6 +2034,23 @@ collect:
+ 
+ done:
+     if (!got) {
++        /* Stop the drive running away.
++         *
++         * The last thing it was told was 'read', and a read command
++         * makes it play forward until something says otherwise. On
++         * success cd_fill pauses it; on failure nothing did, so every
++         * failed read left the head travelling, the next read seeked
++         * back from further out, took longer, failed more often --
++         * which is the deterioration reported across whole sessions
++         * and the head found at 01:80:00 while a read waited for
++         * 00:02:16.
++         *
++         * Lunar's finisher runs on every completion AND every failure;
++         * this driver had transcribed only the completion. Pausing
++         * here is the other half, and it is what stops a bad read from
++         * making the next one worse. */
++        cdd_ask_ready();
++        cd_streaming = 0;
+         cd_errors++;
+         /* Where, and is it the same where: the difference between a
+          * marginal spot on the burn and a systemic fault is whether

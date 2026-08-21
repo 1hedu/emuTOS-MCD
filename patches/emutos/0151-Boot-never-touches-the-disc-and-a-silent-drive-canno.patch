@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 19:24:19 +0000
+Subject: [PATCH 151/184] Boot never touches the disc, and a silent drive
+ cannot eat the clock
+
+"It shouldn't take as long to boot, and the failure takes forever."
+Both traced, both bounded.
+
+Boot: segacd_cd_rw() now refuses instantly while cd_booting. The boot
+probe's reads have never once succeeded on this hardware, and each one
+was expensive -- a leash that cannot expire when the drive is not
+reporting, since cd_time_left() counts cdd_ticks and cdd_ticks is
+frozen exactly then, plus disk_init_one's retries, plus the dead-drive
+latch as a parting gift (which is why the first click's dialog was
+instant while the boot crawled). D: keeps its drive letter: the unit is
+removable, so disk_init_one assigns a BGM partition without a
+successful read -- every dump with drvbits 0000000F is that path.
+
+The forever: cd_prepare()'s settle wait was outside every budget. Six
+rounds of 200,000 spins, inside up to eight attempts, and its
+cd_time_left() bound is the same frozen clock. Minutes of spinning per
+fill on a drive that is not answering. It now pays from cd_budget, the
+fill-wide spin backstop that exists for exactly this case, and gives up
+when the budget is gone.
+
+What remains long, once, and deliberately: the first D: access after
+the desktop still runs the firmware wake, and if that fails it costs
+its DRV_INIT budget before the dialog appears. It fires once per
+session -- cd_ts_decided latches -- so every click after the first
+fails in seconds, not tens.
+
+Not verified in the emulator: the click itself. I could not script a
+reliable double-click on the DISK D icon, so the emulator run proves
+booting is clean, the desktop is up, no read fires at boot, and nothing
+regressed -- not that the icon opens. The remount-offer chain it relies
+on is the one the v19 hardware run demonstrably entered (the rescans
+were the slow part), so the path is live; whether it now succeeds is a
+hardware question.
+---
+ bios/scdapi.h |  2 +-
+ bios/segacd.c | 34 ++++++++++++++++++++++++++++++++--
+ 2 files changed, 33 insertions(+), 3 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index bb5101a..7534f06 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  19
++#define SCD_VERSION  20
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd.c b/bios/segacd.c
+index fa82a97..54c51b5 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2234,9 +2234,20 @@ static UBYTE cd_prepare(void)
+             UBYTE base = cdd_irqs;
+             LONG spin = 200000L;
+ 
+-            while (spin-- > 0 && (UBYTE)(cdd_irqs - base) < 12)
+-                ;
++            /* Also bounded by the fill's own backstop. This wait was
++             * outside every budget: six rounds of 200,000 spins, inside
++             * up to eight attempts, and cd_time_left() cannot expire
++             * while the drive is not reporting because cdd_ticks is
++             * frozen exactly then. That is minutes of spinning, per
++             * fill, on a silent drive -- "it takes forever just to
++             * fail" was mostly this loop. cd_budget exists for
++             * precisely this case; make the loop pay from it. */
++            while (spin-- > 0 && cd_budget > 0
++                   && (UBYTE)(cdd_irqs - base) < 12)
++                cd_budget--;
+         }
++        if (cd_budget <= 0)
++            break;
+     }
+     return CD_NOTREADY;
+ }
+@@ -3268,6 +3279,25 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+ {
+     if (rw & RW_WRITE)
+         return EWRPRO;
++    /* Refuse everything until the desktop is up. Instantly, before any
++     * counter moves.
++     *
++     * The boot probe's reads have never once succeeded on this
++     * hardware and each one is expensive: a leash that cannot expire
++     * when the drive is not reporting (cd_time_left counts cdd_ticks,
++     * and cdd_ticks is frozen exactly then), retries on top, and then
++     * the dead-drive latch as a parting gift -- which is what made the
++     * first click's error dialog appear "immediately" while the boot
++     * itself crawled. All cost, no sector, every boot.
++     *
++     * D: still gets its drive letter -- the unit is removable, so
++     * disk_init_one() assigns a BGM partition whether or not the probe
++     * read anything; every dump with drvbits 0000000F proves that path.
++     * The volume is simply not logged yet, and the media-change offer
++     * re-runs Getbpb on the first touch after the desktop, under the
++     * only conditions a read has ever worked here. */
++    if (cd_booting)
++        return EREADF;
+     if (sector < 0 || (ULONG)sector + count > CD_DDISK_BLOCKS)
+         return ESECNF;
+     if (cd_dead) {

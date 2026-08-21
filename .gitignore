@@ -1,0 +1,37 @@
+.emu/
+build/
+vendor/bios/
+iofw/osk_font.h
+dist/*.iso
+dist/*.cue
+dist/*.zip
+dist/SHA256SUMS.txt
+vendor/games/
+vendor/stsoft/
+
+# The data disc's payload is the owner's, like vendor/. The directory and
+# its README are tracked; nothing that gets dropped into it is.
+datadisc/*
+!datadisc/README.md
+
+# Sega's own ROMs, and the Sonic Retro disassembly data the art build reads
+# out of them. Fetched or copied locally, never committed and never
+# distributed -- the pipeline is ours, the data is Sega's.
+assets/
+vendor/s1disasm/
+vendor/s2disasm/
+
+# The Pico SDK, if you fetch one to rebuild the printer bridge. The
+# firmware ships prebuilt as a .uf2, so nothing here needs it -- and a
+# third-party SDK is not this project's to carry.
+vendor/pico-sdk/
+
+# Python leaves these beside the tools.
+__pycache__/
+*.pyc
+
+# Sega's ROMs are not this project's to carry. Two were committed at the
+# start, before assets/ existed and before the rule did; they are out of
+# HEAD now, and the history still has them -- see docs/build.md. Rooted,
+# so vendor/emulator's bundle is unaffected.
+/*.zip

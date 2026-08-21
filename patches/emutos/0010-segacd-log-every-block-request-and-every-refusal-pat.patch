@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 06:11:56 +0000
+Subject: [PATCH 010/184] segacd: log every block request and every refusal
+ path
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+"Your output device is not receiving data" is GEM's alert for error
+-15, EUNDEV, which this driver returns from exactly three places. The
+telemetry now covers every floprw call — drive number included — and
+stamps a distinct code on each early exit (EE01 B: unmounted, EE03 bad
+drive, EE04 A: missing, EE05/EE06 bad sector), so the failing path
+names itself on screen instead of being inferred.
+---
+ bios/segacd.c | 29 +++++++++++++++++++++--------
+ 1 file changed, 21 insertions(+), 8 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index eb905da..dd826db 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -349,15 +349,30 @@ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+     WORD err;
+ 
+     MAYBE_UNUSED(side);
+-    if (lba < 0)
++
++    /* telemetry: every request, whatever the device.
++     * word 1: rw | dev | count | lba   word 2: error we returned */
++    *(volatile UWORD *)0xFF802C =
++        (UWORD)(((rw & 1) << 15) | ((dev & 3) << 13)
++                | ((count & 7) << 10) | (lba & 0x3FF));
++    *(volatile UWORD *)0xFF802E = 0xEE00;       /* in progress */
++
++    if (lba < 0) {
++        *(volatile UWORD *)0xFF802E = 0xEE05;
+         return ESECNF;
++    }
+ 
+     if (dev == 0) {
+         UBYTE *p;
+-        if (!adisk_present)
++        if (!adisk_present) {
++            *(volatile UWORD *)0xFF802E = 0xEE04;   /* A: not present */
+             return EUNDEV;
+-        if (lba + count > ADISK_SECTORS)
++        }
++        if (lba + count > ADISK_SECTORS) {
++            *(volatile UWORD *)0xFF802E = 0xEE06;   /* A: out of range */
+             return ESECNF;
++        }
++        *(volatile UWORD *)0xFF802E = 0;
+         p = ADISK_BASE + lba * SECTOR_SIZE;
+         if (rw & 1)
+             memcpy(p, buf, (LONG)count * SECTOR_SIZE);
+@@ -366,15 +381,13 @@ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+         return E_OK;
+     }
+ 
+-    if (dev != 1)
++    if (dev != 1) {
++        *(volatile UWORD *)0xFF802E = 0xEE03;   /* device is not 0 or 1 */
+         return EUNDEV;
++    }
+ 
+     if (!cart_sectors) {            /* internal BRAM, sub-side, direct */
+         ULONG off;
+-        /* telemetry for the hardware status line: what was asked for,
+-         * and what we answered. (rw<<12)|lba, then the error code. */
+-        *(volatile UWORD *)0xFF802C =
+-            (UWORD)(((rw & 1) << 15) | ((count & 0x7) << 12) | (lba & 0xFFF));
+         if (bram_state != BRAM_OURS) {
+             *(volatile UWORD *)0xFF802E = 0xEE01;
+             return EUNDEV;

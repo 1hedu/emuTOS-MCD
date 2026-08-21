@@ -1,0 +1,593 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 23:51:38 +0000
+Subject: [PATCH 094/184] segacd: a watchdog on level 2, and a probe that can
+ name the culprit
+
+The console answered the last build with i4 1 -- one level 4 for the
+whole visit, then silence, thirteen visits running, where emulation
+takes twenty-odd. That number has two completely different meanings and
+the counter could not separate them.
+
+So the visit runs in two phases. Phase A puts our own acknowledge in the
+level-4 vector: wait out DRS, take the ten status bytes, write $04 back
+-- the sequence EmuTOS's own handler uses, which keeps this machine's
+drive talking at 75 Hz for minutes at a time. Half a second, then the
+count is frozen. Phase B installs the firmware's handler and reads. The
+diagnostic prints own/total: equal means Sega's handler is what silences
+the drive, diverging means the path is fine and the fault is further in.
+
+The stage-1 gate is retired. It was refusing to call the one function
+whose job is to put a drifted drive back in step, on the grounds that
+the drive might have drifted. What makes that safe:
+
+  - A watchdog on level 2. Every BIOS call is a jsr with no timeout on
+    our side, which is how the console came to sit on a version banner
+    with nothing to print. The Genesis raises MDINT every frame whatever
+    the drive is doing, so the visit is bounded by a clock the CD cannot
+    stop: 300 frames and it is abandoned where it stands -- frame
+    discarded, stack reset, stage 5, out through the normal exit.
+    EmuTOS's stack pointer moved from a6 into the state block for it;
+    a6 no more survives a BIOS call than d0 does.
+
+  - Six failures with no successful read and the timeshare stands down.
+    Our own driver takes the drive back. An imperfect D: beats a machine
+    that grinds.
+
+Also: CDBCHK returns the carry, not d0, so "probe 007f" stops being a
+number that means nothing. $FF8033/$FF8037 are photographed on entry and
+printed. The gate array now passes exactly CDD, CDC and MDINT, and the
+claim that OR-ing the mask in was measurably faster is withdrawn -- that
+comparison was confounded with the $5F7C fix and was not like for like.
+
+The diagnostic engages the timeshare on its own: Right and Down together
+is a diagonal, and you cannot tell whether it registered.
+
+Both cores, Down alone: gpgx 83 reads 12 failures, PicoDrive 85/11, all
+four D: calls returning and the file's contents coming back. Watchdog
+never fires in emulation. Plain boot unchanged.
+---
+ bios/bios.c    |  19 ++--
+ bios/segacd.c  |  54 +++++++++--
+ bios/segacd.h  |   5 +-
+ bios/segacd2.S | 259 +++++++++++++++++++++++++++++++++----------------
+ 4 files changed, 236 insertions(+), 101 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 096499d..3593364 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1075,7 +1075,7 @@ void biosmain(void)
+         LONG h, rc;
+         UWORD run, arm, seeks, hits, errs, why, bad, wrong, torn, flag;
+         WORD wdelta;
+-        UWORD fix, flba, fsame, ts, tsf;
++        UWORD fix, flba, fsame, ts, tsf, tsrc;
+         UBYTE state;
+         int i;
+ 
+@@ -1111,13 +1111,13 @@ void biosmain(void)
+ 
+             segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
+                             &bad, &wrong, &torn, &flag, &wdelta, &fix,
+-                            &flba, &fsame, &ts, &tsf);
++                            &flba, &fsame, &ts, &tsf, &tsrc);
+             cprintf(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+                     state, seeks, hits, errs, why);
+             cprintf(" torn %u bcd %u wr %u l%d fx %u fl %u\r\n",
+                     torn, bad, wrong, wdelta, fix, flag);
+-            cprintf(" lastfail %u x%u  CDBIOS rd %u fail %u\r\n",
+-                    flba, fsame, ts, tsf);
++            cprintf(" lastfail %u x%u  CDBIOS rd %u fl %u %04X\r\n",
++                    flba, fsame, ts, tsf, tsrc);
+             /* Phase one of the timeshare: is the machine's own CDBIOS
+              * still up there in Word RAM, and does it execute when
+              * exchanged back into low memory? CDBCHK is the smallest
+@@ -1126,9 +1126,14 @@ void biosmain(void)
+             if (run == 0) {
+                 UWORD br = segacd_bios_probe();
+                 UWORD rr = segacd_bios_readtest();
+-                cprintf(" CDBIOS probe %04X read %04X sw %u i4 %lu\r\n",
+-                        br, rr, segacd_bios_swaps(),
+-                        segacd_bios_int4s());
++                ULONG i4, own, vec4;
++                UWORD ctrl;
++
++                segacd_bios_ipath(&i4, &own, &vec4, &ctrl);
++                cprintf(" CDBIOS probe %04X read %04X sw %u\r\n",
++                        br, rr, segacd_bios_swaps());
++                cprintf(" i4 %lu/%lu v4 %06lX ctl %04X\r\n",
++                        own, i4, vec4, ctrl);
+             }
+             cprintf("\r\n");
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index f87bb93..e95203c 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -452,7 +452,14 @@ void segacd_cdd_init(void)
+         segacd_diag = (UBYTE)((f & 4) ? 1 : 0);
+         cd_lead = (f & 8) ? 2UL : 20UL;
+         cd_selftest = (UBYTE)((f & 16) ? 1 : 0);
+-        cd_ts_want = (UBYTE)((f & 32) ? 1 : 0);
++        /* Right hands D: to the parked firmware. The diagnostic takes it
++         * as well, without being asked, because holding Right and Down
++         * together is a diagonal on a d-pad and the person holding it
++         * cannot tell whether it registered -- and the diagnostic is the
++         * one place where a failed visit is harmless and a printed
++         * counter is the entire point. An ordinary boot with nothing
++         * held is untouched: our own driver, as before. */
++        cd_ts_want = (UBYTE)(((f & 32) || segacd_diag) ? 1 : 0);
+         segacd_bootflags = (UWORD)(f & 0xFF);
+     }
+ 
+@@ -2132,6 +2139,8 @@ static UBYTE cd_cache[CD_CACHE_SECTORS][CDC_DATA_BYTES];
+ static UBYTE cd_ts;             /* the timeshare is driving */
+ static UBYTE cd_ts_decided;
+ static UWORD cd_ts_reads, cd_ts_fails;
++static UBYTE cd_ts_cmdsave;     /* our own driver's state before it stood down */
++static UWORD cd_ts_rc;          /* the last thing a visit had to say */
+ 
+ static BOOL cd_fill_bios(ULONG lba)
+ {
+@@ -2146,8 +2155,19 @@ static BOOL cd_fill_bios(ULONG lba)
+         return FALSE;
+ 
+     cd_seeks++;
+-    if (segacd_bios_read(lba, want)) {
++    cd_ts_rc = (UWORD)segacd_bios_read(lba, want);
++    if (cd_ts_rc) {
+         cd_ts_fails++;
++        /* Give the drive back rather than grind. If the firmware has
++         * failed six times running without once delivering a sector,
++         * it is not going to start, and every further attempt costs a
++         * pair of 24 KB exchanges and up to five seconds of watchdog.
++         * Our own driver is imperfect but it is not nothing, and a
++         * machine that mounts D: badly beats one that hangs on it. */
++        if (cd_ts_reads == 0 && cd_ts_fails >= 6) {
++            cd_ts = 0;
++            cdd_cmd_on = cd_ts_cmdsave;
++        }
+         return FALSE;
+     }
+     cd_ts_reads++;
+@@ -2226,6 +2246,7 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+         cd_ts_decided = 1;
+         if (cd_ts_want && segacd_bios_available()) {
+             cd_ts = 1;
++            cd_ts_cmdsave = cdd_cmd_on;
+             cdd_cmd_on = 0;     /* our VBL stops talking to the drive */
+         }
+     }
+@@ -2364,6 +2385,9 @@ static BOOL bios_parked(void)
+ WORD segacd_bios_call(WORD fn);         /* segacd2.S */
+ extern UWORD segacd_bios_swapcnt;       /* segacd2.S */
+ extern ULONG segacd_bios_int4;          /* segacd2.S */
++extern ULONG segacd_bios_own;           /* segacd2.S */
++extern ULONG segacd_bios_vec4;          /* segacd2.S */
++extern UWORD segacd_bios_ctrl;          /* segacd2.S */
+ 
+ 
+ /* Phase two: does the parked firmware actually READ?
+@@ -2462,12 +2486,24 @@ UWORD segacd_bios_swaps(void)
+     return segacd_bios_swapcnt;
+ }
+ 
+-/* How many level-4s the parked firmware was handed during the last
+- * visit. Zero is the whole diagnosis when a read fails at stage 1: the
+- * CDD is not talking, so nothing downstream of it can ever finish. */
+-ULONG segacd_bios_int4s(void)
++/* What the last visit saw of the interrupt path.
++ *
++ *   i4   level 4s for the whole visit
++ *   own  those of them that arrived before the firmware's own handler
++ *        went in -- so i4 == own means the count stopped dead the
++ *        moment Sega's handler took over, and i4 > own means it did
++ *        not, and the two are different diagnoses entirely
++ *   vec4 where the parked firmware routes level 4. Garbage here makes
++ *        everything else meaningless
++ *   ctrl $FF8037 in the high byte, $FF8033 in the low, both read on
++ *        entry before the visit touched either
++ */
++void segacd_bios_ipath(ULONG *i4, ULONG *own, ULONG *vec4, UWORD *ctrl)
+ {
+-    return segacd_bios_int4;
++    *i4 = segacd_bios_int4;
++    *own = segacd_bios_own;
++    *vec4 = segacd_bios_vec4;
++    *ctrl = segacd_bios_ctrl;
+ }
+ 
+ /* What the D: layer has been through, for the on-screen diagnostic.
+@@ -2476,10 +2512,12 @@ ULONG segacd_bios_int4s(void)
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+                      UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
+-                     UWORD *flba, UWORD *fsame, UWORD *ts, UWORD *tsf)
++                     UWORD *flba, UWORD *fsame, UWORD *ts, UWORD *tsf,
++                     UWORD *tsrc)
+ {
+     *ts = cd_ts ? cd_ts_reads : 0xFFFF;
+     *tsf = cd_ts_fails;
++    *tsrc = cd_ts_rc;
+     *wdelta = cd_wrongdelta;
+     *fix = cd_fixups;
+     *flba = (UWORD)cd_lastfail;
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 646721b..bf02988 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -37,7 +37,8 @@ LONG segacd_cd_ioctl(WORD op, void *arg);
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+                      UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
+-                     UWORD *flba, UWORD *fsame, UWORD *ts, UWORD *tsf);
++                     UWORD *flba, UWORD *fsame, UWORD *ts, UWORD *tsf,
++                     UWORD *tsrc);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
+ UWORD segacd_bios_probe(void);  /* exchange the CDBIOS in, call it, out */
+ UWORD segacd_bios_readtest(void); /* ...and have it read a known sector */
+@@ -45,7 +46,7 @@ BOOL segacd_bios_available(void);
+ void segacd_bios_selftest(void);
+ WORD segacd_bios_read(ULONG lba, WORD count);
+ UWORD segacd_bios_swaps(void);
+-ULONG segacd_bios_int4s(void);  /* level 4s seen during the last visit */
++void segacd_bios_ipath(ULONG *i4, ULONG *own, ULONG *vec4, UWORD *ctrl);
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);
+ 
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index bec4681..74e6639 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -180,6 +180,17 @@ _segacd_bios_call:
+         bsr     bios_xchg
+         move.l  (sp)+,d0
+         jsr     0x5F22                  // the CDBIOS's own dispatch
++        // The answer is the carry flag, not d0. CDBCHK's "is the drive
++        // busy" came back 007F on hardware and 0000 in emulation, and
++        // neither number meant anything: d0 is scratch after a call, and
++        // every documented CDBIOS status is cc/cs. Return bit 8 as the
++        // carry and keep d0's low byte for whatever it turns out to be.
++        moveq   #0,d1
++        scs     d1
++        andi.w  #0x00FF,d0
++        andi.w  #0x0001,d1
++        lsl.w   #8,d1
++        or.w    d1,d0
+         move.l  d0,-(sp)
+         bsr     bios_xchg
+         move.l  (sp)+,d0
+@@ -207,38 +218,92 @@ bios_xchg:
+ 
+         .globl  _segacd_bios_swapcnt
+         .globl  _segacd_bios_int4
++        .globl  _segacd_bios_own
+         .globl  _segacd_bios_vec4
++        .globl  _segacd_bios_ctrl
+         .data
+ _segacd_bios_swapcnt:
+         .word   0
+ _bios_woken:
+         .byte   0
+         .even
+-// How many level-4s arrived during the last visit, and where the parked
+-// firmware's own vector for them points. Both live outside the exchanged
+-// region, so the stub below can find them with Sega's world in place.
+-_segacd_bios_int4:
++// What the last visit saw. All of it lives outside the exchanged region,
++// so the handlers below can reach it with Sega's world in low memory.
++_segacd_bios_int4:                      // level 4s, whole visit
++        .long   0
++_segacd_bios_own:                       // ...of which, before the
++        .long   0                       //    firmware's handler went in
++_segacd_bios_vec4:                      // where the firmware routes them
+         .long   0
+-_segacd_bios_vec4:
++_segacd_bios_frames:                    // level 2s: the dead-man's clock
+         .long   0
++_segacd_bios_ctrl:                      // $FF8037 and $FF8033 on entry
++        .word   0
+         .text
+ 
+-// Level 4, during a visit: count it, then hand it straight to the
+-// firmware's own handler.
++// Level 2, during a visit: the dead-man switch.
++//
++// Everything the firmware is asked to do is untimed from our side. A
++// BIOS call is a jsr; if it does not come back there is no loop to
++// bound, no counter to expire, and no way to print why -- the console
++// simply stops, which is what it did, twice, on a screen with nothing
++// on it but the version banner.
++//
++// So the visit is bounded from outside by the one clock the CD cannot
++// stop: the Genesis raises MDINT every frame whatever the drive is
++// doing. Five seconds of frames and the visit is abandoned where it
++// stands -- stack reset, stage 5, straight to the exit path, which
++// swaps EmuTOS back in and returns a code like any other failure.
+ //
+-// This exists because the read pipeline is not self-contained. ROMREADN
+-// arms the CDC and returns; every byte after that moves inside the
+-// BIOS's CDD (level 4) and decoder (level 5) handlers. DRVINIT is worse
+-// -- it waits for a TOC that only its own level 4 can deliver, and it
+-// has no timeout, so an unserviced CDD is not a slow read, it is a
+-// frozen console. That is what the machine did.
++// The interrupt frame is discarded rather than returned through. That
++// is the point: there is nothing to return to.
++bios_int2_watch:
++        addq.l  #1,_segacd_bios_frames
++        cmpi.l  #300,_segacd_bios_frames
++        bcs     1f
++        lea     0x7C000,a5              // abandoning: registers are ours
++        move.w  #5,32(a5)
++        move.l  #0x7C900,sp
++        jmp     brd_done
++1:      rte
++
++// Level 4, phase A: our own acknowledge, and nobody else's.
++//
++// The hardware answer to the first build that got this far was i4 1 --
++// one level 4 for the whole visit, then silence, every visit. Either
++// the interrupt never really flows with Sega's vectors in place, or it
++// flows until Sega's handler runs once and then stops. Those are very
++// different problems and the counter as it stood could not tell them
++// apart.
++//
++// This handler is the discriminator. It is the sequence EmuTOS's own
++// level 4 uses -- wait out DRS, take the ten status bytes, write $04
++// back to acknowledge -- which is known to keep this machine's drive
++// talking at 75 Hz for minutes at a time, because that is what the CD
++// driver has been doing all along. If level 4 flows under this and dies
++// under Sega's, the firmware's handler is what kills it.
++bios_int4_own:
++        movem.l d0/a0-a1,-(sp)
++        move.w  #200,d0
++2:      btst    #1,0xFF8037             // DRS: a packet is on its way in
++        dbeq    d0,2b
++        lea     0xFF8038,a0
++        lea     0x7C060,a1
++        move.l  (a0)+,(a1)+
++        move.l  (a0)+,(a1)+
++        move.w  (a0)+,(a1)+
++        move.b  #0x04,0xFF8037          // HOCK stays, DTS and DRS clear
++        addq.l  #1,_segacd_bios_int4
++        movem.l (sp)+,d0/a0-a1
++        rte
++
++// Level 4, phase B: count it, then hand it to the firmware's own
++// handler, which is the one that has to run for a read to progress.
+ //
+-// So the visit proves level 4 is arriving before it calls anything that
+-// waits on it. Counting means interposing, and interposing means not
+-// disturbing: no register is touched, and the chain is a push of the
+-// firmware's own vector followed by rts, because loading it into an
+-// address register inside an interrupt would clobber the interrupted
+-// code's a0.
++// Interposing means not disturbing: no register is touched, and the
++// chain is a push of the firmware's own vector followed by rts, because
++// loading it into an address register inside an interrupt would clobber
++// the interrupted code's a0.
+ bios_int4_stub:
+         addq.l  #1,_segacd_bios_int4
+         move.l  _segacd_bios_vec4,-(sp)
+@@ -282,7 +347,8 @@ bios_int4_stub:
+ //   a5+4   sectors left      a5+32  stage code
+ //   a5+8   destination       a5+34  drive state as last seen
+ //   a5+12  header scratch    a5+36  EmuTOS's gate-array mask
+-//   a5+40  DRV_INIT parameters
++//   a5+40  DRV_INIT params   a5+44  EmuTOS's stack pointer
++//   a5+96  status packet the phase-A handler took
+         .globl  _segacd_bios_read
+ _segacd_bios_read:
+         move.l  4(sp),d0                // lba
+@@ -295,6 +361,11 @@ _segacd_bios_read:
+         move.l  #0x7C900,sp             // scratch stack, outside the swap
+         lea     0x7C000,a5
+ 
++        move.l  a6,44(a5)               // EmuTOS's stack, in memory: the
++                                        // watchdog has to be able to find
++                                        // it, and a6 does not survive a
++                                        // BIOS call any more than d0 does
++
+         move.l  d0,(a5)                 // start sector
+         ext.l   d1
+         move.l  d1,4(a5)                // sectors to read
+@@ -308,33 +379,20 @@ _segacd_bios_read:
+ 
+         bsr     bios_xchg               // Sega's world into low memory
+ 
+-        // ---- the four things the visit must get right before it asks
+-        // the firmware for anything. Every one of them was wrong, and
+-        // the machine froze on the EmuTOS version banner with the HUD
+-        // stopped dead. ----
+-
+-        // 1. Interpose on level 4, so "is the drive talking" has a
+-        // number instead of being inferred from a hang. The stub counts
+-        // and chains; see it above.
+-        //
+-        // The three lines here are ordered, and the order is load-
+-        // bearing in a way I cannot yet explain: moving the clr below
+-        // the SR write twenty lines down -- nothing else changed, same
+-        // instructions -- hangs the console on the banner again, every
+-        // run. It is left where it verifies. Do not tidy it.
+-        move.l  0x70,_segacd_bios_vec4
+-        move.l  #bios_int4_stub,0x70
+-        clr.l   _segacd_bios_int4
++        // Photograph the two registers the visit depends on, before
++        // touching either. "$FF8037 read back as X on entry" is a fact;
++        // everything anyone has said about HOCK on this machine so far
++        // has been an inference.
++        move.b  0xFF8037,d0
++        lsl.w   #8,d0
++        move.b  0xFF8033,d0
++        move.w  d0,_segacd_bios_ctrl
+ 
+-        // 2. HOCK. Bit 2 of the CDD control byte is what makes the drive
+-        // talk at all: clear, no status packets arrive and level 4 never
+-        // fires. Written as a plain byte, not OR-ed in, because bits 0
+-        // and 1 are DTS and DRS and a read-modify-write would hand back
+-        // whatever mid-exchange values it found; #4 is the acknowledge
+-        // form the firmware itself uses.
+-        move.b  #0x04,0xFF8037
++        // ---- the things the visit must get right before it asks the
++        // firmware for anything. ----
+ 
+-        // 3. Level 2 must stop being the firmware's own.
++        // 1. Level 2 stops being the firmware's own, and becomes the
++        // watchdog's.
+         //
+         // $5F7C is where the BIOS routes MDINT, and behind it is the sub
+         // module's Int2 entry, which lived at $6000, which is EmuTOS
+@@ -342,38 +400,70 @@ _segacd_bios_read:
+         // anything lowers the interrupt mask far enough, Sega's firmware
+         // jumps into the middle of somebody else's operating system.
+         //
+-        // This is the freeze, not a precaution against one. Enabling
+-        // levels 2 and 3 with the slot as it was killed every visit; an
+-        // rte in the slot, same build, same disc, and it reads. It was
+-        // the only difference. The rte stays in the parked copy: the
+-        // routine it displaces has not existed since the loader jumped.
++        // That is the freeze, not a precaution against one: enabling
++        // levels 2 and 3 with the slot as it was killed every visit on
++        // both emulator cores, and an rte in the slot, same build and
++        // same disc, reads. The rte stays in the parked copy -- the
++        // routine it displaces has not existed since the loader jumped
++        // -- and the vector goes to the watchdog, which now needs the
++        // frame interrupt to do its job.
+         move.w  #0x4E73,0x5F7C
++        move.l  #bios_int2_watch,0x68
++        clr.l   _segacd_bios_frames
+ 
+-        // 4. OR-in CDD and CDC rather than writing 0x30 flat. The
+-        // firmware owns these enables and reprograms them, and
+-        // overwriting the byte takes away the timer it runs its own
+-        // waits on. Measured, not assumed: same disc, same test,
+-        // fifty-six reads by the nineteenth round OR-ing in against
+-        // thirty-five overwriting.
+-        move.b  0xFF8033,d0
+-        ori.b   #0x30,d0
+-        move.b  d0,0xFF8033
++        // 2. HOCK. Bit 2 of the CDD control byte is what makes the drive
++        // talk. Written as a plain byte, not OR-ed in, because bits 0
++        // and 1 are DTS and DRS and a read-modify-write would hand back
++        // whatever mid-exchange values it found; #4 is the acknowledge
++        // form both drivers on this machine already use.
++        move.b  #0x04,0xFF8037
++
++        // 3. Level 4 to our own acknowledge, for now. See the handler.
++        move.l  0x70,_segacd_bios_vec4
++        move.l  #bios_int4_own,0x70
++        clr.l   _segacd_bios_int4
++
++        // 4. The gate array passes exactly three things and no more:
++        // CDD and CDC because the read is made of them, and MDINT
++        // because the watchdog is. Level 1 (graphics) and level 3
++        // (timer) are masked here rather than in the SR, so that the SR
++        // can sit low enough to admit level 2.
++        //
++        // Written flat rather than OR-ed into EmuTOS's mask. The report
++        // warns that overwriting can undo enables the firmware wants,
++        // and it is right in general -- but every visit sets these three
++        // again on the way in, and a bit whose purpose nobody here can
++        // name is not a bit to carry into somebody else's interrupt
++        // table.
++        move.b  #0x34,0xFF8033
+         andi.w  #0xF8FF,sr              // clear all three mask bits...
+-        ori.w   #0x0300,sr              // ...then allow levels 4 and 5
+-
+-        // Now prove level 4 arrives, before anything is called that
+-        // waits on it. DRVINIT below closes the tray, reads the table of
+-        // contents and pauses -- all of it driven by the CDD interrupt,
+-        // and none of it with a timeout of its own. Called into a silent
+-        // gate array it does not fail, it never returns, and a jsr that
+-        // never returns cannot be reported on. Two packets at 75 Hz is
+-        // 27 ms; the bound is about half a second of spinning.
++        ori.w   #0x0100,sr              // ...then admit 2 and up
++
++        // Does level 4 arrive at all? Two packets at 75 Hz is 27 ms; the
++        // bound is about half a second. The answer is recorded and the
++        // visit continues either way -- the gate that used to stop here
++        // was stopping the one call, DRVINIT, whose whole job is to put
++        // a drive that has drifted back in step, and a firmware that has
++        // not been told anything since eviction is exactly a firmware
++        // whose idea of the drive has drifted. It is safe to go on now
++        // because the watchdog is running: nothing past this line can
++        // take the console down, only fail slowly.
+         move.l  #200000,28(a5)
+ brd_wait_int4:
+         subq.l  #1,28(a5)
+-        beq     brd_fail_int4
++        beq     brd_own_done
+         cmpi.l  #2,_segacd_bios_int4
+         bcs     brd_wait_int4
++brd_own_done:
++        move.l  _segacd_bios_int4,_segacd_bios_own
++
++        // From here the firmware's handler has to be the one running:
++        // it is where a read makes progress. Swap the vector with the
++        // door shut, so no level 4 lands between the two writes.
++        ori.w   #0x0700,sr
++        move.l  #bios_int4_stub,0x70
++        andi.w  #0xF8FF,sr
++        ori.w   #0x0100,sr
+ 
+         // Wake firmware whose notion of the drive stopped at eviction,
+         // half an hour and several thousand of our own commands ago.
+@@ -435,13 +525,11 @@ brd_read:
+         bne     brd_stat
+         bra     brd_done                // stage stays zero: all delivered
+ 
+-        // Each stage names itself: 1 the CDD never spoke, so DRVINIT was
+-        // not called and nothing was risked, 2 the firmware never
+-        // reported ready, 3 no sector was ever announced, 4 one was
+-        // announced and never came out.
+-brd_fail_int4:
+-        move.w  #1,32(a5)
+-        bra     brd_done
++        // Each stage names itself: 2 the firmware never reported ready,
++        // 3 no sector was ever announced, 4 one was announced and never
++        // came out, 5 the watchdog gave up on a call that never
++        // returned. Stage 1 is retired: the CDD being quiet is now
++        // reported as a count, not as a refusal to try.
+ brd_fail_init:
+         move.w  #2,32(a5)
+         bra     brd_done
+@@ -451,19 +539,22 @@ brd_fail_stat:
+ brd_fail_read:
+         move.w  #4,32(a5)
+ 
++        // Reached normally, or jumped to from the watchdog with the
++        // interrupt frame thrown away. Either way a5 and the scratch
++        // stack are the only things it may assume, which is why the
++        // stack it has to go back to lives at 44(a5) and not in a6.
+ brd_done:
+         ori.w   #0x0700,sr              // shut the door before swapping back
+         move.l  _segacd_bios_vec4,0x70  // give the firmware its vector back
+         bsr     bios_xchg               // EmuTOS's world back into place
+         move.w  36(a5),d0
+         move.b  d0,0xFF8033             // EmuTOS's mask, as we found it
+-                                        // -- the enables the BIOS wants
+-                                        // are re-OR-ed at the top of the
+-                                        // next visit, so nothing is lost
+-                                        // by not leaving them on here.
+-                                        // HOCK is deliberately not
+-                                        // touched: the firmware sets it
+-                                        // once and clears it on reset.
++                                        // -- the three the visit needs
++                                        // are set again on the way into
++                                        // the next one. HOCK is
++                                        // deliberately not touched: the
++                                        // firmware sets it once and
++                                        // clears it on reset.
+ 
+         move.w  32(a5),d0               // stage
+         beq     brd_ret                 // zero means the sectors came;
+@@ -474,7 +565,7 @@ brd_done:
+         or.w    34(a5),d0               // and what the drive was saying
+ brd_ret:
+ 
+-        move.l  a6,sp
++        move.l  44(a5),sp
+         move.w  (sp)+,sr
+         movem.l (sp)+,d1-d7/a0-a6
+         rts

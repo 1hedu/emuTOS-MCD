@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 07:36:16 +0000
+Subject: [PATCH 104/184] segacd: is STAT0 bit 7 the flag that marks the chaff,
+ or is it noise
+
+The first console log from the fixed driver: 14,378 sectors rejected
+by the ring's mode gate, every one reading mode 0x60, sitting beside
+14,398 with STAT0 bit 7 clear. The same population to within twenty,
+against 420 that made it into the ring.
+
+The gate on that bit was removed because it refused 11,949 consecutive
+sectors on hardware and Sega never consults it. If these two counts
+are one set, that conclusion was wrong in an expensive way: the flag
+marks exactly the sectors whose header is meaningless, and 97% of what
+the ring sifts on this console could be dropped before it is looked
+at.
+
+Near-equal totals are not the same as the same set, so it is counted
+as a contingency table rather than argued: v11 both predicates say the
+sector is real, v00 both say it is not, v10 and v01 are the
+disagreements. Near-zero disagreements means one predicate and the
+gate goes back in.
+
+gpgx cannot answer this and says so, which is useful in itself:
+v11 127 v10 41 v01 0 v00 0. The two counts that would carry the
+information are structurally zero there because the emulator never
+clears bit 7 -- so every conclusion this project has drawn about that
+flag from emulation was drawn from a constant.
+
+Also stops printing the raw Fread bytes when Fread failed. buf still
+holds the previous round's sanitised dots at that point, and the log
+was reporting 2E2E2E2E as though it were data.
+---
+ bios/bios.c   | 12 +++++++++++-
+ bios/segacd.c | 32 +++++++++++++++++++++++++++++++-
+ bios/segacd.h |  2 +-
+ 3 files changed, 43 insertions(+), 3 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 517d0f9..5cd027f 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1161,6 +1161,7 @@ void biosmain(void)
+         UWORD ringok, dsr, edt, nz, boff, bnz, slotbad;
+         ULONG newest, blba, swant, sgot, sbase;
+         UBYTE shave, ssrc;
++        UWORD v[4];
+         UBYTE bsrc;
+         UBYTE hdr[4], st4[4];
+         UBYTE state, lasth3;
+@@ -1206,6 +1207,10 @@ void biosmain(void)
+                  * and the three wrong answers need telling apart: the
+                  * right file at the wrong offset, a different sector
+                  * altogether, and a buffer nothing was written into. */
++                /* Only when Fread wrote something: on a failure buf
++                  * still holds the previous round's sanitised dots,
++                  * and printing those reads as data. */
++                if (rc > 0)
+                 DLOG(" raw %02X%02X%02X%02X %02X%02X%02X%02X\r\n",
+                      raw[0], raw[1], raw[2], raw[3],
+                      raw[4], raw[5], raw[6], raw[7]);
+@@ -1238,7 +1243,7 @@ void biosmain(void)
+             segacd_cd_probe(&ringok, &newest, &dsr, &edt, &nz, hdr, st4,
+                             &blba, &boff, &bsrc, &bnz,
+                             &slotbad, &swant, &sgot,
+-                            &sbase, &shave, &ssrc);
++                            &sbase, &shave, &ssrc, v);
+             /* Has the ring ever taken an entry on this machine, and
+              * what is the newest sector in it. 4294967295 is empty. */
+             DLOG(" ring %u  new %ld\r\n", ringok, newest);
+@@ -1257,6 +1262,11 @@ void biosmain(void)
+              * to GEMDOS that never came off the disc. */
+             DLOG(" slot %u  want %ld got %ld\r\n", slotbad, swant, sgot);
+             DLOG(" base %ld have %u src %u\r\n", sbase, shave, ssrc);
++            /* STAT0 bit 7 against the mode byte. 11 both say real, 00
++             * both say not, 10 and 01 are where they disagree. If the
++             * disagreements are near zero the flag is the mode test. */
++            DLOG(" v11 %u v10 %u v01 %u v00 %u\r\n",
++                 v[0], v[1], v[2], v[3]);
+             DLOG(" hdr %02X%02X%02X%02X st4 %02X%02X%02X%02X\r\n",
+                  hdr[0], hdr[1], hdr[2], hdr[3],
+                  st4[0], st4[1], st4[2], st4[3]);
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 5fddb32..a1df7b9 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -284,6 +284,10 @@ static UBYTE cd_lasth3;         /* the last such byte, verbatim */
+  * one is a counter already implied by a branch that exists; none of
+  * them changes what the driver does. */
+ static UWORD cd_ring_ok;        /* sectors that made it into the ring */
++/* STAT0 bit 7 against the mode byte, as a contingency table: 11 both
++ * agree the sector is real, 00 both agree it is not, 10 and 01 are the
++ * disagreements. Near-zero disagreements means one predicate. */
++static UWORD cd_v11, cd_v10, cd_v01, cd_v00;
+ static UWORD cd_dsr_n, cd_edt_n;/* iterations the last grab spent
+                                  * waiting for data-set-ready and for
+                                  * end-of-transfer; 2048 means it gave
+@@ -1073,6 +1077,31 @@ void segacd_int_5_c(void)
+     if (!(cdc_stat4[0] & 0x80))
+         cd_flagged++;
+ 
++    /* Is STAT0 bit 7 the flag that marks the chaff?
++     *
++     * The gate on it was removed because it refused 11,949 consecutive
++     * sectors on hardware, and Sega never consults it. But the first
++     * console log from this build reports 14,378 sectors rejected by
++     * the ring's mode gate, all reading mode 0x60, beside 14,398 with
++     * bit 7 clear -- the same population to within twenty. If those
++     * are one set then the flag is not noise, it marks exactly the
++     * sectors whose header is meaningless, and 97% of what the ring
++     * sifts could be dropped before it is ever looked at.
++     *
++     * Two counts settle it. A sector is "good" if its mode byte is 1
++     * or 2, and the question is whether good and bit-7-set are the
++     * same predicate. If v10 and v01 are both near zero they are, and
++     * the gate goes back in. */
++    {
++        UBYTE valid = (UBYTE)((cdc_stat4[0] & 0x80) ? 1 : 0);
++        UBYTE good  = (UBYTE)((h3 == 0x01 || h3 == 0x02) ? 1 : 0);
++
++        if (valid && good)        cd_v11++;
++        else if (valid && !good)  cd_v10++;
++        else if (!valid && good)  cd_v01++;
++        else                      cd_v00++;
++    }
++
+     if (!cdc_hit && h0 == cdc_want[0] && h1 == cdc_want[1]
+                  && h2 == cdc_want[2]) {
+         cdc_pt = cdc_pt_last;
+@@ -2863,10 +2892,11 @@ void segacd_cd_probe(UWORD *ringok, ULONG *newest, UWORD *dsr, UWORD *edt,
+                      UWORD *nz, UBYTE *hdr, UBYTE *st4,
+                      ULONG *blba, UWORD *boff, UBYTE *bsrc, UWORD *bnz,
+                      UWORD *slotbad, ULONG *swant, ULONG *sgot,
+-                     ULONG *sbase, UBYTE *shave, UBYTE *ssrc)
++                     ULONG *sbase, UBYTE *shave, UBYTE *ssrc, UWORD *v)
+ {
+     int i;
+ 
++    v[0] = cd_v11; v[1] = cd_v10; v[2] = cd_v01; v[3] = cd_v00;
+     *slotbad = cd_slotbad;
+     *sbase = cd_slot_base;
+     *shave = cd_slot_have;
+diff --git a/bios/segacd.h b/bios/segacd.h
+index b478cff..20ab9ab 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -44,7 +44,7 @@ void segacd_cd_probe(UWORD *ringok, ULONG *newest, UWORD *dsr, UWORD *edt,
+                      UWORD *nz, UBYTE *hdr, UBYTE *st4,
+                      ULONG *blba, UWORD *boff, UBYTE *bsrc, UWORD *bnz,
+                      UWORD *slotbad, ULONG *swant, ULONG *sgot,
+-                     ULONG *sbase, UBYTE *shave, UBYTE *ssrc);
++                     ULONG *sbase, UBYTE *shave, UBYTE *ssrc, UWORD *v);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
+ UBYTE segacd_bram_state(void);  /* 0 none 1 ours 2 Sega saves 3 RAM cart */
+ UWORD segacd_bios_probe(void);  /* exchange the CDBIOS in, call it, out */

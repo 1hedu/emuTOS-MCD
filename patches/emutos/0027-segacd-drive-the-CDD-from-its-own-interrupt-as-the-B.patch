@@ -1,0 +1,333 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 03:26:46 +0000
+Subject: [PATCH 027/184] segacd: drive the CDD from its own interrupt, as the
+ BIOS does
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The CDD link died at the first command on real hardware and never
+recovered: `CD F` at boot, `CD 0` a moment later, permanently. Rate
+limiting did not help, which ruled out the race I had assumed — one
+command was enough.
+
+The gate array runs the CDD exchange on its own clock. Those registers
+are a window onto a transfer already in progress, not a mailbox, so a
+write at any other moment sends the drive half of one packet and half
+of another. The evicted CDBIOS wrote commands inside the drive's 75 Hz
+interrupt; so do we now. Level 4 reads the status packet, checksums
+it, then posts whatever command is queued, and nothing else touches
+the registers. Commands also go down as five 16-bit writes rather than
+ten byte writes: Genesis Plus GX has no byte-write cases for this
+block at all and marks the trigger register word-access-only.
+
+A reported position proves nothing on its own, because the drive
+volunteers one unasked. So the request alternates between the absolute
+and relative clocks and the reply names which it answered, in status
+nibble 1. Under both cores that nibble tracks the command counter
+exactly (5->1, 6->0, 7->1): an answer that changes in step with the
+question can only have come from the question.
+
+Holding A at power-on keeps the link passive, so a wrong guess costs a
+power cycle rather than another disc. That switch did nothing at
+first, silently: a comm register reads zero before anyone writes it,
+so the sub could not tell "A not held" from "the servant has not
+looked yet". It now waits, bounded, for a stamped answer.
+
+The sound telemetry's top nibble counted how far the PCM chip's
+address counter got. That question is answered, so it counts CD
+commands handed to the drive instead.
+---
+ bios/segacd.c  | 159 ++++++++++++++++++++++++++++++++++++-------------
+ bios/segacd.h  |   2 +
+ bios/segacd2.S |  12 ++++
+ 3 files changed, 132 insertions(+), 41 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index f10d86f..47bffde 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -87,7 +87,16 @@ const UBYTE *segacd_physbase(void)
+  * Setting HOCK makes the drive publish its status every 1/75 s whether
+  * or not anything was asked of it, so simply reading a well-formed
+  * packet proves the link works before any command is ever sent. That is
+- * the first thing worth knowing and it costs one control bit. */
++ * the first thing worth knowing and it costs one control bit.
++ *
++ * The exchange is serial and the gate array runs it on its own clock:
++ * the registers are a window onto a transfer already in progress, not a
++ * mailbox. Touching the command registers at any other moment sends the
++ * drive half of one packet and half of another, which is why the link
++ * here died at the first command and never recovered. The gate array
++ * raises level 4 when a status packet has landed, and that interrupt is
++ * the one moment the window is quiet -- so all CDD work happens there,
++ * which is exactly what the CDBIOS we evicted was doing. */
+ #define CDD_CTRL    ((volatile UBYTE *)0xFF8037)
+ #define CDD_STATUS  ((const volatile UBYTE *)0xFF8038)
+ #define CDD_CMD     ((volatile UBYTE *)0xFF8042)
+@@ -101,41 +110,95 @@ const UBYTE *segacd_physbase(void)
+  * prove a command round-trip on real hardware. */
+ #define CDD_CMD_INFO    0x02
+ #define CDD_INFO_ABSMSF 0x00
++#define CDD_INFO_RELMSF 0x01
+ 
+ static UBYTE cdd_stat[10];
+ static UBYTE cdd_valid;         /* last packet checksummed */
+ static UBYTE cdd_score;         /* valid packets in the last 16, latched */
+ static UBYTE cdd_count, cdd_good;
+ static UBYTE cdd_tick;
++static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
++static UBYTE cdd_pending;       /* a command is queued for the next INT4 */
++static UBYTE cdd_queued[9];
++static UBYTE cdd_sent;          /* commands actually handed to the drive */
+ 
+ void segacd_cdd_init(void)
+ {
++    /* Holding A at power-on keeps the link passive. A malformed command
++     * leaves the drive posting status that never checksums again until
++     * the console is power-cycled, so there has to be a way to get the
++     * known-good baseline back without a second disc. The servant
++     * reports the button; commands are on unless it is held.
++     *
++     * Wait for the answer rather than assume it has arrived. Both CPUs
++     * are running and a comm register reads zero until it is written,
++     * so an early read cannot tell "not held" from "not asked yet" --
++     * which is exactly how this switch failed to do anything the first
++     * time. The servant stamps 0x5A in the high byte once the low bit
++     * means something. Bounded, because a servant that never answers
++     * must not hang the boot. */
++    {
++        ULONG spin = 200000UL;
++        UWORD f;
++
++        do {
++            f = *(volatile UWORD *)0xFF8012;
++        } while ((f & 0xFF00) != 0x5A00 && --spin);
++
++        cdd_cmd_on = (UBYTE)((f & 1) ? 0 : 1);
++    }
++
++    /* Vector first, then unmask, then start the clock: the first packet
++     * must not arrive before there is something to catch it. */
++    VEC_LEVEL4 = segacd_int_4;
++    GA_INTMASK |= 0x10;
+     *CDD_CTRL |= CDD_HOCK;      /* start the 75 Hz status reports */
+ }
+ 
++/* Written as five 16-bit registers, two nibbles to a word, rather than
++ * ten byte writes. The gate array documents this block as words and
++ * hardware behaves as though it means it: byte writes leave the drive
++ * posting status that no longer checksums, permanently, from the very
++ * first command. Both emulators accept either. */
+ static void cdd_command(const UBYTE *nib)       /* nine nibbles */
+ {
++    volatile UWORD *w = (volatile UWORD *)0xFF8042;
+     UBYTE sum = 0;
+     int i;
+ 
+-    for (i = 0; i < 9; i++) {
+-        CDD_CMD[i] = nib[i];
++    for (i = 0; i < 9; i++)
+         sum = (UBYTE)(sum + nib[i]);
+-    }
+-    CDD_CMD[9] = (UBYTE)((~sum) & 0x0F);        /* this sends it */
++
++    w[0] = (UWORD)((nib[0] << 8) | nib[1]);
++    w[1] = (UWORD)((nib[2] << 8) | nib[3]);
++    w[2] = (UWORD)((nib[4] << 8) | nib[5]);
++    w[3] = (UWORD)((nib[6] << 8) | nib[7]);
++    w[4] = (UWORD)((nib[8] << 8) | ((~sum) & 0x0F));    /* this sends it */
+ }
+ 
+ /* Ask the drive where its head is. Status comes back as the command
+- * echo, the sub-command, then MM:SS:FF in BCD, two nibbles each. */
++ * echo, the sub-command, then MM:SS:FF in BCD, two nibbles each.
++ *
++ * Which of the two clocks we ask for alternates, and the reply names
++ * the one it answered in nibble 1. A position on its own proves
++ * nothing -- the drive volunteers one anyway -- but a reply that
++ * changes in step with the question can only have come from the
++ * question, so this is what tells a working command apart from a
++ * coincidence. Queued, not written: see cdd_command. */
+ static void cdd_ask_position(void)
+ {
+-    static const UBYTE cmd[9] = {
++    static UBYTE cmd[9] = {
+         CDD_CMD_INFO, 0, 0, CDD_INFO_ABSMSF, 0, 0, 0, 0, 0
+     };
+-    cdd_command(cmd);
++    int i;
++
++    cmd[3] = (UBYTE)(cmd[3] ^ (CDD_INFO_ABSMSF ^ CDD_INFO_RELMSF));
++    for (i = 0; i < 9; i++)
++        cdd_queued[i] = cmd[i];
++    cdd_pending = 1;
+ }
+ 
+-/* Latch one status packet and check it. Cheap enough for the VBL. */
++/* Latch one status packet and check it. */
+ static void cdd_poll(void)
+ {
+     UBYTE sum = 0;
+@@ -148,6 +211,34 @@ static void cdd_poll(void)
+     cdd_valid = (UBYTE)((((~sum) & 0x0F) == cdd_stat[9]) ? 1 : 0);
+ }
+ 
++/* Level 4: a status packet has arrived, 75 times a second. Read it,
++ * then hand over whatever command is waiting -- in that order, and only
++ * here. Everything else about the drive is decided elsewhere and left
++ * in cdd_queued for this handler to post. */
++void segacd_int_4_c(void)
++{
++    cdd_poll();
++
++    if (cdd_pending) {
++        cdd_pending = 0;
++        cdd_command(cdd_queued);
++        if (cdd_sent < 0xFF)
++            cdd_sent++;
++    }
++
++    /* A boolean cannot tell a dead link from a flaky one. Count how
++     * many of the last sixteen packets checksummed and report that:
++     * F is a clean link, 0 is nothing, anything between is a race. */
++    if (cdd_valid)
++        cdd_good++;
++    if (++cdd_count >= 16) {
++        /* sixteen does not fit in the nibble we report it in */
++        cdd_score = (UBYTE)((cdd_good > 15) ? 15 : cdd_good);
++        cdd_count = 0;
++        cdd_good = 0;
++    }
++}
++
+ /******************************************************************************/
+ /* Sound: RF5C164 PCM                                                         */
+ /******************************************************************************/
+@@ -198,7 +289,6 @@ static void pcm_reg(volatile UBYTE *reg, UBYTE v)
+ 
+ static UBYTE pcm_countdown;             /* VBLs left before we silence it */
+ static UBYTE pcm_clicks;                /* keyclicks actually requested */
+-static UBYTE pcm_seen;                  /* furthest the channel ever got */
+ static UBYTE pcm_ready;                 /* segacd_sound_init() completed */
+ static UWORD bram_status;               /* base value of the status word */
+ 
+@@ -337,32 +427,22 @@ void segacd_int_2_c(void)
+         }
+     }
+ 
+-    /* The drive publishes status every 1/75 s and we run at 60 Hz, so
+-     * writing a command every frame lands in the middle of an exchange
+-     * sooner or later. Real hardware notices; the emulators do not.
+-     * Ask a couple of times a second instead. */
+-    if (++cdd_tick >= 32) {
++    /* Only queue the question here; the interrupt asks it. Twice a
++     * second is often enough to watch the reply follow the request and
++     * rare enough that a wrong guess is not hammering the drive. */
++    if (cdd_cmd_on && ++cdd_tick >= 32) {
+         cdd_tick = 0;
+         cdd_ask_position();
+     }
+-    cdd_poll();
+ 
+-    /* A boolean cannot tell a dead link from a flaky one. Count how
+-     * many of the last sixteen packets checksummed and report that:
+-     * F is a clean link, 0 is nothing, anything between is a race. */
+-    if (cdd_valid)
+-        cdd_good++;
+-    if (++cdd_count >= 16) {
+-        /* sixteen does not fit in the nibble we report it in */
+-        cdd_score = (UBYTE)((cdd_good > 15) ? 15 : cdd_good);
+-        cdd_count = 0;
+-        cdd_good = 0;
+-    }
+     /* status nibble and the minutes in one word, seconds and frames in
+-     * the other: no comm register is free enough to carry all seven */
++     * the other: no comm register is free enough to carry all seven.
++     * Nibble 1 -- which clock the drive says it is answering -- earns
++     * its place ahead of the tens of minutes, which no test disc of
++     * ours will ever reach. */
+     *(volatile UWORD *)0xFF8022 = (UWORD)(((UWORD)cdd_score << 12)
+         | ((UWORD)cdd_stat[0] << 8)
+-        | ((UWORD)cdd_stat[2] << 4)
++        | ((UWORD)cdd_stat[1] << 4)
+         |  (UWORD)cdd_stat[3]);
+     *(volatile UWORD *)0xFF8028 = (UWORD)(((UWORD)cdd_stat[4] << 12)
+         | ((UWORD)cdd_stat[5] << 8)
+@@ -373,22 +453,19 @@ void segacd_int_2_c(void)
+      * word: no comm register is free, and this answers the only
+      * question a silent console cannot -- whether the keyclick chain
+      * reaches the machine layer at all. If the count moves when you
+-     * press keys, the software is fine and the silence is analogue. */
++     * press keys, the software is fine and the silence is analogue.
++     *
++     * The top nibble used to carry how far the PCM chip's own address
++     * counter ever got. That found the chip switched off and is now
++     * spent, so it counts CD commands handed to the drive instead --
++     * which separates "the CDD interrupt never fired" from "it fired,
++     * we sent a command, and the link died anyway". */
+     *(volatile UWORD *)0xFF802A = (UWORD)(bram_status
+         | (pcm_ready ? 0x20 : 0)
+         | ((conterm & 1) ? 0x40 : 0)
++        | (cdd_cmd_on ? 0x80 : 0)
+         | ((UWORD)(pcm_clicks & 0x0F) << 8)
+-        | ((UWORD)(pcm_seen & 0x0F) << 12));
+-
+-    /* Watch the channel's own address counter while a note is sounding.
+-     * It only moves if the chip is genuinely playing, so this is the
+-     * one reading that separates "the driver is broken" from "the
+-     * audio never reaches a speaker" without anyone having to listen. */
+-    if (pcm_countdown) {
+-        UBYTE hi = *(volatile UBYTE *)0xFF0023;   /* channel 0 addr high */
+-        if (hi > pcm_seen)
+-            pcm_seen = hi;
+-    }
++        | ((UWORD)(cdd_sent & 0x0F) << 12));
+ 
+     if (pcm_countdown) {                /* silence the bell when it is due */
+         if (--pcm_countdown == 0)
+diff --git a/bios/segacd.h b/bios/segacd.h
+index f3a8d52..5fdc193 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -45,7 +45,9 @@ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+ /* Interrupt handlers (assembler entry points in segacd2.S) */
+ void segacd_int_2(void);        /* INT2: VBL, raised by the main CPU */
+ void segacd_int_3(void);        /* INT3: gate array timer, 200 Hz */
++void segacd_int_4(void);        /* INT4: CDD status packet, 75 Hz */
+ void segacd_int_2_c(void);
++void segacd_int_4_c(void);
+ void segacd_call_5ms(void);
+ 
+ #endif /* MACHINE_SEGACD */
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 1406fce..7136337 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -12,6 +12,7 @@
+ #ifdef MACHINE_SEGACD
+ 
+         .extern _segacd_int_2_c
++        .extern _segacd_int_4_c
+         .extern _vector_5ms
+ 
+ /******************************************************************************/
+@@ -27,6 +28,17 @@ _segacd_int_2:
+         movem.l (sp)+,d0-d1/a0-a1
+         rte
+ 
++// Level 4: CDD status packet ready, 75 Hz. The one window in which the
++// drive's command registers may be touched, so it is also where any
++// queued command goes out.
++        .globl  _segacd_int_4
++_segacd_int_4:
++        move.w  #0x2700,sr              // Forbid higher level interrupts
++        movem.l d0-d1/a0-a1,-(sp)
++        jbsr    _segacd_int_4_c         // Delegate to C implementation
++        movem.l (sp)+,d0-d1/a0-a1
++        rte
++
+ // Level 3: gate array timer, 200 Hz system tick
+         .globl  _segacd_int_3
+ _segacd_int_3:

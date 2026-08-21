@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 06:29:51 +0000
+Subject: [PATCH 011/184] segacd: publish the BRAM filesystem signature, off
+ the timer register
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Hardware showed the B: driver was never called — the last block request
+was a clean read of A: — so GEMDOS is refusing the drive before any
+sector I/O, which is what a failed BPB parse looks like (and explains
+"0 bytes"). The driver now reads the boot sector back out of the BRAM
+after formatting and publishes it, so the screen can show whether the
+filesystem is really there: 0x6010 is correct.
+
+The first attempt put that word at 0xFF8030, which is past the eight
+sub->main comm registers and lands on the gate array's timer; all eight
+words were already spoken for, so it shares 0xFF8022 with the old
+engine status instead.
+---
+ bios/segacd.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index dd826db..4c9c672 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -275,6 +275,14 @@ static void bram_probe(void)
+     bram_state = BRAM_OURS;
+ }
+ 
++/* Read back the bytes GEMDOS's getbpb depends on, so the status line can
++ * show whether the filesystem we wrote is actually there. Expect 0x6010:
++ * 0x60 = the boot sector's first byte, 0x10 = 16 total sectors. */
++static UWORD bram_fs_signature(void)
++{
++    return (UWORD)((bram_rd(0) << 8) | bram_rd(19));
++}
++
+ void segacd_floppy_init(void)
+ {
+     /* the builder stamps "EmuTOSMD" as the OEM field at offset 2 */
+@@ -307,6 +315,8 @@ void segacd_floppy_init(void)
+     /* low nibble: state; bit 4: writes verified */
+     *(volatile UWORD *)0xFF802A =
+         (UWORD)(bram_state | (bram_wtest ? 0x10 : 0));
++    *(volatile UWORD *)0xFF8022 =
++        (bram_state == BRAM_NONE) ? 0 : bram_fs_signature();
+ }
+ 
+ BOOL segacd_flop_detect_drive(WORD dev)

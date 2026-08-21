@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 08:51:21 +0000
+Subject: [PATCH 106/184] segacd: the diagnostic is Down again, not the default
+
+It was briefly the default because a disc cost a CD-R and a boot that
+reached a desktop instead of the test wasted one. Mode 1 kills that
+reasoning: EmuTOS rides in the cartridge now and the image can be
+rebuilt as often as anyone likes.
+
+It was also the fault behind the white screen on hardware. Nothing
+held ran the diagnostic, the diagnostic cleared the screen and then
+blocked on Dfree, and the escape hatch needed a direction held for
+thirty seconds. With the default gone, a CD boot with nothing held
+reaches a full desktop again under gpgx -- verified by looking at the
+frame this time, not by counting its colours.
+---
+ bios/segacd.c | 26 ++++++++++----------------
+ 1 file changed, 10 insertions(+), 16 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index a1df7b9..69d1785 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -515,24 +515,18 @@ void segacd_cdd_init(void)
+         segacd_diag = (UBYTE)((f & 4) ? 1 : 0);
+         cd_lead = (f & 8) ? 2UL : 20UL;
+         cd_selftest = (UBYTE)((f & 16) ? 1 : 0);
+-        /* ...and by default, on this image.
++        /* The diagnostic is Down, and only Down.
+          *
+-         * The diagnostic is what this disc is burned to run, so a
+-         * direction is the way out of it rather than the way in.
+-         * Which direction registers at power-on has cost two runs
+-         * already: Left never fired, and the only log this port has
+-         * came off Up, which on this build is a different lever
+-         * entirely. Any of Left, Up or Right skips to the desktop, so
+-         * the escape does not rest on one button working.
++         * It was briefly the default, because a disc cost a CD-R and a
++         * boot that reached a desktop instead of the test wasted the
++         * disc. That reasoning is dead: a Mode 1 boot carries EmuTOS in
++         * the cartridge, so the image can be rebuilt as often as anyone
++         * likes and the ordinary boot should be the ordinary thing.
+          *
+-         * Set here rather than at the test in biosmain, so that a
+-         * default run and a Down run are the same run. They were not
+-         * when this was an || at the use site: segacd_diag also hands
+-         * D: to the parked firmware two lines below, so "nothing held"
+-         * quietly read the disc with a different driver and the two
+-         * were not comparable. */
+-        if (!(f & 0x3C))
+-            segacd_diag = 1;
++         * It also could not work there. Nothing is held on a cart boot,
++         * so the default ran the diagnostic against an empty tray: the
++         * screen cleared and Dfree blocked on a drive with no disc in
++         * it, which looks exactly like a machine that never came up. */
+         /* Right hands D: to the parked firmware. The diagnostic takes it
+          * as well, without being asked, because holding Right and Down
+          * together is a diagonal on a d-pad and the person holding it

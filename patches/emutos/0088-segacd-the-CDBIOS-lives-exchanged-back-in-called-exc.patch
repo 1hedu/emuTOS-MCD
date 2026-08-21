@@ -1,0 +1,221 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 21:56:15 +0000
+Subject: [PATCH 088/184] segacd: the CDBIOS lives -- exchanged back in,
+ called, exchanged out
+
+Phase one of the timeshare. The loader photographs the CDBIOS into
+Word RAM at 0xBA000 on its way past eviction -- the machine's own
+firmware, still inside the machine it shipped in, parked above the end
+of EmuTOS's code where the Atari memory map has no opinion about it.
+When a sector is wanted, low memory and the park exchange contents,
+Sega's code runs, and they exchange back.
+
+Two crashes on the way, both instructive, both now in the comments:
+
+Interrupts must stay masked across the WHOLE visit, not each exchange.
+Between them the vector table at 0 is Sega's while every variable
+EmuTOS's handlers would touch is parked, so one tick in that window
+runs one OS's handler against the other's state.
+
+And the visit needs its own stack. EmuTOS's supervisor stack lives at
+0x800, inside the 24 KB being exchanged, so the first swap turned the
+exchanging code's own return address into BIOS bytes. You cannot
+exchange the ground you are standing on; the scratch stack sits in
+Word RAM between EmuTOS's code and the parked firmware.
+
+Result in emulation: CDBIOS probe 0000 swaps 2 -- CDBCHK executed and
+answered 'drive not busy' -- with EmuTOS surviving the round trip and
+the diagnostic running on through TEST 8 afterwards.
+---
+ bios/bios.c    | 13 ++++++++++-
+ bios/segacd.c  | 63 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ bios/segacd.h  |  2 ++
+ bios/segacd2.S | 63 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 140 insertions(+), 1 deletion(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index ccabd39..c688091 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1116,7 +1116,18 @@ void biosmain(void)
+                     state, seeks, hits, errs, why);
+             cprintf(" torn %u bcd %u wr %u l%d fx %u fl %u\r\n",
+                     torn, bad, wrong, wdelta, fix, flag);
+-            cprintf(" lastfail %u x%u\r\n\r\n", flba, fsame);
++            cprintf(" lastfail %u x%u\r\n", flba, fsame);
++            /* Phase one of the timeshare: is the machine's own CDBIOS
++             * still up there in Word RAM, and does it execute when
++             * exchanged back into low memory? CDBCHK is the smallest
++             * call that proves it -- no interrupt, no drive command,
++             * immediate return. 0xFFFF means nothing is parked. */
++            if (run == 0) {
++                UWORD br = segacd_bios_probe();
++                cprintf(" CDBIOS probe %04X swaps %u\r\n",
++                        br, segacd_bios_swaps());
++            }
++            cprintf("\r\n");
+ 
+             /* Long enough to read a round before the next scrolls it
+              * away, and long enough that the drive is not being flogged
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 25b093c..b264600 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2252,6 +2252,69 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+     return E_OK;
+ }
+ 
++/******************************************************************************/
++/* The CDBIOS, exchanged back in when a sector is wanted                      */
++/******************************************************************************/
++
++/* The loader photographs the CDBIOS into Word RAM at 0xBA000 on its way
++ * past (boot/sp.S). That copy is the machine's own firmware, still
++ * inside the machine it shipped in -- nothing is redistributed and
++ * nothing is transcribed; it is the same bytes that were in low memory
++ * a moment earlier, parked where the Atari memory map has no opinion
++ * about them.
++ *
++ * Why bother, after building a driver: because that firmware reads this
++ * disc perfectly, several times, every single boot, on the exact drive
++ * ours cannot satisfy. Weeks of tracing produced a driver that gets
++ * most sectors most of the time; Sega's gets all of them, always, and
++ * has since 1991.
++ *
++ * The exchange is an exchange rather than a save and a restore because
++ * that halves the memory: low memory and the parking space swap
++ * contents, so whichever world is not running is holding the other's
++ * bytes. 24 KB each way, about 3 ms.
++ *
++ * Interrupts are masked across it for the obvious reason -- for part of
++ * those 3 ms the vector table at address 0 belongs to neither OS -- and
++ * because the vector table itself is being exchanged, the SR must be
++ * restored by the same code that lowered it. */
++#define BIOS_PARK   ((volatile ULONG *)0xBA000UL)
++#define BIOS_LOW    ((volatile ULONG *)0x0UL)
++#define BIOS_LONGS  (0x6000UL / 4)
++
++
++/* Is there actually a BIOS parked up there? The loader writes it before
++ * it evicts; a disc built before that change, or a boot that took some
++ * other path, would leave whatever was in Word RAM. The BIOS begins
++ * with its own exception vectors, and vector 1 -- the initial PC -- is
++ * the one value that must point into the BIOS's own code. */
++static BOOL bios_parked(void)
++{
++    ULONG pc = BIOS_PARK[1];
++
++    return (pc >= 0x200UL && pc < 0x6000UL) ? TRUE : FALSE;
++}
++
++WORD segacd_bios_call(WORD fn);         /* segacd2.S */
++extern UWORD segacd_bios_swapcnt;       /* segacd2.S */
++
++UWORD segacd_bios_probe(void)
++{
++    if (!bios_parked())
++        return 0xFFFF;          /* nothing there to call */
++
++    /* CDBCHK, function 0x80: "is the drive busy?" It touches no
++     * interrupt, needs no drive command in flight, and returns
++     * immediately -- the smallest possible proof that resurrected
++     * firmware actually executes. */
++    return (UWORD)segacd_bios_call(0x80);
++}
++
++UWORD segacd_bios_swaps(void)
++{
++    return segacd_bios_swapcnt;
++}
++
+ /* What the D: layer has been through, for the on-screen diagnostic.
+  * The counters are the diagnosis: a read that fails and a read that
+  * never happened look identical from GEMDOS's side of the call. */
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 1a756ec..7dc67ee 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -39,6 +39,8 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
+                      UWORD *flba, UWORD *fsame);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
++UWORD segacd_bios_probe(void);  /* exchange the CDBIOS in, call it, out */
++UWORD segacd_bios_swaps(void);
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);
+ 
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index b682bbc..9dac982 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -148,6 +148,69 @@ _segacd_cdc_read:
+         move.l  (sp)+,a2
+         rts
+ 
++// WORD segacd_bios_call(WORD fn)
++//
++// One visit to the machine's own CDBIOS, parked in Word RAM at 0xBA000
++// by the loader on its way past.
++//
++// The whole visit runs on a stack of its own, and that is not a
++// refinement -- it is the reason the first two attempts hung the
++// machine. EmuTOS's supervisor stack lives at 0x800, inside the 24 KB
++// being exchanged, so the instant the swap ran, the return address
++// under the exchanging code turned into BIOS bytes. You cannot
++// exchange the ground you are standing on. The scratch stack sits in
++// Word RAM between the end of EmuTOS's code and the parked firmware,
++// which neither world touches.
++//
++// Interrupts stay masked for the entire visit: between the exchanges
++// the vector table at 0 is Sega's while every variable EmuTOS's
++// handlers would touch is parked, so any tick landing in that window
++// runs one OS's handler against the other's state.
++        .globl  _segacd_bios_call
++_segacd_bios_call:
++        move.w  4(sp),d0                // function number
++        movem.l d1-d7/a0-a6,-(sp)
++        move.w  sr,-(sp)
++        ori.w   #0x0700,sr
++
++        move.l  sp,a6                   // remember the real stack
++        move.l  #0xB9F00,sp             // scratch stack, outside the swap
++
++        move.l  d0,-(sp)                // fn survives the exchange
++        bsr     bios_xchg
++        move.l  (sp)+,d0
++        jsr     0x5F22                  // the CDBIOS's own dispatch
++        move.l  d0,-(sp)
++        bsr     bios_xchg
++        move.l  (sp)+,d0
++
++        move.l  a6,sp                   // back to EmuTOS's stack
++        move.w  (sp)+,sr
++        movem.l (sp)+,d1-d7/a0-a6
++        rts
++
++// Exchange low memory with the park. Uses only registers and the
++// scratch stack; touches nothing in the region it is moving.
++bios_xchg:
++        movem.l d1-d3/a0-a1,-(sp)
++        lea     0,a0
++        lea     0xBA000,a1
++        move.w  #0x17FF,d3              // 0x1800 longs = 0x6000 bytes
++1:      move.l  (a0),d1
++        move.l  (a1),d2
++        move.l  d2,(a0)+
++        move.l  d1,(a1)+
++        dbra    d3,1b
++        addq.w  #1,_segacd_bios_swapcnt
++        movem.l (sp)+,d1-d3/a0-a1
++        rts
++
++        .globl  _segacd_bios_swapcnt
++        .data
++_segacd_bios_swapcnt:
++        .word   0
++        .text
++
+ // Level 3: gate array timer, 200 Hz system tick
+         .globl  _segacd_int_3
+ _segacd_int_3:

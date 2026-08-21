@@ -1,0 +1,503 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 19:01:58 +0000
+Subject: [PATCH 053/184] segacd: read ahead, so D: survives the calls the
+ desktop makes
+
+Dfree walks the whole file allocation table -- eight CD sectors -- and
+the desktop calls Dfree before it opens a window. Every one of those
+eight cost a seek, because between one GEMDOS block and the next the
+head moves on and the stream is lost. Eight seeks is eight seconds when
+it works and eight chances to fail when it does not, so the window
+stayed shut with no error shown.
+
+A visit to the drive now takes eight sectors, not one: the sector after
+the one just read arrives thirteen milliseconds later for free, because
+the drive is already reading forward. Read-ahead never seeks -- one
+attempt, and if the stream has moved on we stop -- so it costs nothing
+when it misses.
+
+Two smaller things the diagnostic found. Only the first attempt of a
+fetch resets the decoder; doing it on every retry tore down the lock
+the previous one had just got. And a fill that fails is tried once more
+from scratch, because the first read after the drive has been doing
+something else is the one that fails and only that one -- written down
+as a mitigation, because why a fresh start succeeds where three retries
+did not is not yet understood.
+
+CONF_SEGACD_CTEST is the instrument: the GEMDOS calls EmuDesk makes on
+a drive icon, printed with their return codes, needing no input. It is
+how -11 turned from a mystery into 'Dfree walks the FAT'.
+---
+ bios/bios.c      |  59 ++++++++++
+ bios/segacd.c    | 283 +++++++++++++++++++++++++++++++++--------------
+ include/config.h |   6 +
+ 3 files changed, 263 insertions(+), 85 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index d0ae39a..7a9eabb 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1028,6 +1028,65 @@ void biosmain(void)
+     }
+ #endif
+ 
++#if defined(MACHINE_SEGACD) && defined(CONF_SEGACD_CTEST)
++    /*
++     * Diagnostic build only: the calls EmuDesk makes when a drive icon
++     * is double-clicked, against the disc. Opening a window is
++     * Dfree/Dsetpath/Fsfirst underneath, and if any of them fails the
++     * desktop does nothing at all -- no window, no alert -- which is
++     * exactly what a console reported. This says which one.
++     */
++    {
++        static char buf[512];
++        static DTA dta;
++        LONG h, rc;
++        int i;
++
++        cprintf("\033E");
++        cprintf("C: read test\r\n");
++
++        rc = Dfree((LONG *)buf, 1);             /* control: A: */
++        cprintf("DfreeA   = %ld free %ld of %ld\r\n",
++                rc, *(LONG *)buf, *((LONG *)buf + 1));
++        rc = Dfree((LONG *)buf, 3);             /* 3 = C: */
++        cprintf("DfreeC   = %ld free %ld of %ld\r\n",
++                rc, *(LONG *)buf, *((LONG *)buf + 1));
++
++        rc = Dsetdrv(2);                        /* 2 = C: */
++        cprintf("Dsetdrv  = %ld\r\n", rc);
++        rc = Dsetpath("C:\\");
++        cprintf("Dsetpath = %ld\r\n", rc);
++
++        Fsetdta(&dta);
++        rc = Fsfirst("C:\\*.*", 0x17);
++        cprintf("Fsfirst  = %ld  [%s]\r\n", rc, dta.d_fname);
++        while (rc == 0L) {
++            rc = Fsnext();
++            if (rc == 0L)
++                cprintf("Fsnext   = 0  [%s]\r\n", dta.d_fname);
++        }
++        cprintf("Fsnext   = %ld (end)\r\n", rc);
++
++        h = Fopen("C:\\READCD.TXT", 0);
++        cprintf("Fopen    = %ld\r\n", h);
++        if (h >= 0L) {
++            rc = Fread((WORD)h, 64L, buf);
++            cprintf("Fread    = %ld\r\n", rc);
++            Fclose((WORD)h);
++            for (i = 0; i < 32; i++)
++                if (buf[i] < 32 || buf[i] > 126)
++                    buf[i] = '.';
++            buf[32] = 0;
++            cprintf("[%s]\r\n", buf);
++        }
++        rc = Dfree((LONG *)buf, 3);             /* again, now warm */
++        cprintf("DfreeC2  = %ld free %ld of %ld\r\n",
++                rc, *(LONG *)buf, *((LONG *)buf + 1));
++        for (;;)
++            ;
++    }
++#endif
++
+ #if defined(MACHINE_SEGACD) && defined(CONF_SEGACD_CONSOLE_SOAK)
+     /*
+      * Diagnostic build only: hammer the VT52 console the way EmuDesk's
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 8b404cd..27e1394 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -144,12 +144,28 @@ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
+  * is written before the code that keeps it, and a forward declaration
+  * for four counters is less to get wrong than moving either. */
+ static ULONG cd_cached = 0xFFFFFFFFUL;  /* which CD sector is in CDSECT */
++static ULONG cd_cache_base;
++static UBYTE cd_cache_have;
+ static ULONG cd_next;           /* the one the drive will deliver next */
+ static UBYTE cd_streaming;
+ static UWORD cd_errors;         /* reads that gave up */
++static UBYTE cd_quiet;          /* the read command has been withdrawn */
++static volatile UBYTE cd_busy;  /* a foreground read owns the drive */
++static UWORD cd_why;            /* nibble per attempt of the last
++                                 * failed fetch: 1 timed out, 2 the
++                                 * head was already past, 3 the
++                                 * transfer itself failed */
+ static UWORD cd_seeks, cd_hits; /* seeks against sectors simply waited for */
+-static UBYTE cd_dtest;          /* the filesystem check: bit 0 ran, bit 1 passed */
+-static void cd_selftest(void);
++/* Whether D: has ever been read: bit 0 tried, bit 1 succeeded.
++ *
++ * This used to be a set of deliberate probes at boot, and it was a bad
++ * trade. Each one is a seek, a seek is most of a second, and they
++ * happened before anything was on screen -- so the console sat dark for
++ * long enough that it looked dead. The mount itself is the better
++ * evidence anyway: a drive letter only appears if block 0 came off the
++ * disc through this exact path, and every read after that either works
++ * or shows up in the error count beside it. */
++static UBYTE cd_dtest;
+ 
+ static UBYTE cdc_altctrl;       /* holding B picks the other CDC control pair;
+                                  * declared here because the init that reads
+@@ -591,6 +607,8 @@ static void cdc_setup(void)
+      * means the sector self-test and the filesystem cannot mislead each
+      * other -- and they share one buffer, so they would. */
+     cd_cached = 0xFFFFFFFFUL;
++    cd_cache_base = 0xFFFFFFFFUL;
++    cd_cache_have = 0;
+     cd_streaming = 0;
+ 
+     *CDC_AR = 0x0F; *CDC_DATA = 0x00;                   /* RESET */
+@@ -993,6 +1011,7 @@ static void cdr_report(void)
+     CDREPORT[25] = cd_hits;
+     CDREPORT[26] = cd_errors;
+     CDREPORT[27] = cd_dtest;
++    CDREPORT[28] = cd_why;
+     CDREPORT[0] = CDREPORT_MAGIC;
+ }
+ 
+@@ -1169,14 +1188,63 @@ static BOOL cd_wait_hit(void)
+ {
+     ULONG spin;
+ 
+-    /* Bounded by a count rather than by the 200 Hz tick, because a
+-     * mount can happen before that tick exists. Long enough for a seek
+-     * and a spin-up -- a couple of seconds -- and irrelevant to the
+-     * common case, where the sector is already on its way and arrives
+-     * within thirteen milliseconds. */
+-    for (spin = 0; spin < 6000000UL; spin++) {
++    /* Bounded by a count rather than by the 200 Hz tick, because the
++     * first read happens during BIOS init and that tick may not exist
++     * yet.
++     *
++     * The count is worked out rather than picked, because picking it is
++     * what went wrong: "a couple of seconds" was six million, and six
++     * million is nearly half a minute. The loop is an increment, a
++     * compare, a branch, a byte test on an absolute address and another
++     * branch -- call it sixty cycles at 12.5 MHz, so about five
++     * microseconds an iteration. Three seconds is six hundred thousand,
++     * and three seconds is a slow seek plus a spin-up.
++     *
++     * Eight seconds, not three. The first read after the drive has sat
++     * idle has to wake it, and three was not enough -- Dfree failed,
++     * and a desktop window that calls Dfree before it opens simply did
++     * not open. What made boot feel dead was never this number: it was
++     * three deliberate probe seeks before anything reached the screen,
++     * and those are gone. A read that succeeds still costs only as long
++     * as it takes. */
++    for (spin = 0; spin < 1600000UL; spin++) {
+         if (cdc_hit)
+             return TRUE;
++        if (cdc_ints) {
++            /* Sectors are arriving, so the drive has done as it was
++             * told. Stop telling it.
++             *
++             * This is the same mistake twice, and the second time it
++             * cost a mounted drive that would not open. A queued
++             * command goes out on every exchange -- seventy-five times
++             * a second -- so leaving "start reading at this position"
++             * in the queue while waiting for a sector twenty frames
++             * further on means the drive is asked to start over before
++             * it ever gets there. It never arrives, the read times out,
++             * and GEMDOS turns that into a Dfree failure and a desktop
++             * window that silently does nothing.
++             *
++             * Stage 3's state machine has always done this correctly:
++             * it leaves the command state the moment the decoder
++             * reports anything. This is that, in a spin loop. */
++            if (!cd_quiet) {
++                cd_quiet = 1;
++                cdd_ask_idle();
++            }
++            /* And if the head is already beyond the sector we want,
++             * waiting cannot help: the drive reads forward and is not
++             * coming back. Say so now rather than spend the timeout
++             * learning it. */
++            if (cdr_past_target())
++                return FALSE;
++        }
++        /* The drive interrupt's storm guard counts arrivals between
++         * VBLs and switches level 4 off past a thousand. Its premise is
++         * that the VBL keeps running; here we are deliberately blocking
++         * in foreground and it does not. Without this the guard trips
++         * after thirteen seconds of honest waiting and takes the drive
++         * down with it. */
++        cdd_burst = 0;
+     }
+     return FALSE;
+ }
+@@ -1187,17 +1255,55 @@ static BOOL cd_fetch(ULONG lba)
+ {
+     UBYTE start[3];
+     int attempt;
++    BOOL got = FALSE;
++    /* Read-ahead asks for the sector immediately behind the head and
++     * must never seek for it: the whole point is that it is nearly
++     * free. One attempt, and if the stream has moved on, so have we. */
++    int tries = (cd_streaming && lba == cd_next) ? 1 : 3;
++
++    /* Take the drive. The VBL rotates a status question at the CDD
++     * every thirty-two frames, and a question is a command like any
++     * other: queued while a read is in flight it replaces the read, or
++     * interrupts the streaming that read is waiting on. Stage 3's state
++     * machine holds the rotation off for exactly this reason and the
++     * gate names its states; a foreground read needs the same
++     * protection and could not be named that way. */
++    cd_busy = 1;
+ 
+     lba_to_msf(lba, cdc_want);
+ 
+-    for (attempt = 0; attempt < 3; attempt++) {
+-        if (!cd_streaming || lba < cd_next || lba > cd_next + CD_STREAM_AHEAD) {
+-            /* Out of reach of the stream: seek. */
++    /* Three goes, and the third is not the same as the second.
++     *
++     * Waiting for a sector the drive is about to deliver is the fast
++     * path and it misses often: between one GEMDOS block and the next
++     * the head keeps moving, so by the time we are looking, the sector
++     * we wanted has gone past. That costs a seek, which is fine.
++     *
++     * What is not fine is a seek that also lands past the target, which
++     * is why the last attempt asks the drive to start much further
++     * back. Reading forward over sixty extra sectors costs most of a
++     * second; failing costs a read error, and GEMDOS turns a read error
++     * on Dfree into a desktop window that silently does not open. */
++    static const ULONG leadin[3] = { CDR_LEADIN, CDR_LEADIN, CDR_LEADIN * 3 };
++
++    for (attempt = 0; attempt < tries; attempt++) {
++        if (attempt > 0 || !cd_streaming
++                || lba < cd_next || lba > cd_next + CD_STREAM_AHEAD) {
++            ULONG back = leadin[attempt];
++
+             cdc_hit = 0;
+             cdc_ints = 0;
+-            cdc_setup();
+-            lba_to_msf(lba >= CDR_LEADIN ? lba - CDR_LEADIN : 0, start);
++            /* Only the first attempt resets the decoder. Doing it on
++             * every retry tears down whatever lock the last one had
++             * just achieved, which turns three tries into three cold
++             * starts -- and the first read after the drive has been
++             * doing something else is exactly the one that needs the
++             * lock to survive. */
++            if (attempt == 0)
++                cdc_setup();
++            lba_to_msf(lba >= back ? lba - back : 0, start);
+             cdd_ask_read(start);
++            cd_quiet = 0;
+             cd_streaming = 1;
+             cd_seeks++;
+         } else {
+@@ -1205,18 +1311,18 @@ static BOOL cd_fetch(ULONG lba)
+             cd_hits++;
+         }
+ 
++        cd_why = (UWORD)((cd_why << 4)
++                       | ((cdc_ints && cdr_past_target()) ? 2 : 1));
+         if (cd_wait_hit()) {
+-            /* The drive is reading. Stop telling it to start, or the
+-             * same "begin at this position" command goes out seventy-five
+-             * times a second for as long as D: is mounted -- which is
+-             * the stage 2 lesson upside down: the conversation needs a
+-             * turn every exchange, but it needs the *right* turn, and
+-             * repeating a seek for ever is not it. */
+-            cdd_ask_idle();
++            /* The command was withdrawn inside the wait, as soon as the
++             * decoder reported anything -- see cd_wait_hit(). */
++            cd_why = (UWORD)((cd_why & ~0x0F) | 3);
+             if (cdc_grab()) {
++                cd_why >>= 4;           /* it worked; forget this attempt */
+                 cd_cached = lba;
+                 cd_next = lba + 1;
+-                return TRUE;
++                got = TRUE;
++                break;
+             }
+         }
+ 
+@@ -1224,9 +1330,58 @@ static BOOL cd_fetch(ULONG lba)
+         cd_streaming = 0;
+     }
+ 
+-    cd_errors++;
+-    cd_cached = 0xFFFFFFFFUL;
+-    return FALSE;
++    if (!got) {
++        cd_errors++;
++        cd_cached = 0xFFFFFFFFUL;
++    }
++    cd_busy = 0;
++    return got;
++}
++
++/* Sectors kept from one visit to the drive.
++ *
++ * A seek is most of a second; the sector after the one just read
++ * arrives thirteen milliseconds later, free, because the drive is
++ * already reading forward. So take several while we are there.
++ *
++ * Without this, D: worked for small reads and fell over on the one
++ * operation that matters most: Dfree walks the whole file allocation
++ * table -- eight CD sectors -- and the desktop calls Dfree before it
++ * opens a window. Each of those eight cost a seek, because between one
++ * GEMDOS block and the next the head moves on and the stream is lost.
++ * Eight seeks is eight seconds when it works, and eight chances to
++ * fail when it does not: the window stayed shut. */
++#define CD_CACHE_SECTORS 8
++
++static UBYTE cd_cache[CD_CACHE_SECTORS][CDC_DATA_BYTES];
++
++/* Fill the cache starting at lba: one seek, then as many more as the
++ * drive hands over while we are still listening. */
++static BOOL cd_fill(ULONG lba)
++{
++    UBYTE i;
++
++    cd_cache_base = 0xFFFFFFFFUL;
++    cd_cache_have = 0;
++
++    if (!cd_fetch(lba))
++        return FALSE;
++    memcpy(cd_cache[0], CDSECT, CDC_DATA_BYTES);
++    cd_cache_base = lba;
++    cd_cache_have = 1;
++
++    /* The rest are whatever the stream gives us without complaint. A
++     * failure here is not an error -- we have what was asked for -- so
++     * it stops the read-ahead and nothing else. */
++    for (i = 1; i < CD_CACHE_SECTORS; i++) {
++        if (lba + i >= CD_DDISK_LBA + (CD_DDISK_BLOCKS >> CD_BPS_SHIFT))
++            break;
++        if (!cd_fetch(lba + i))
++            break;
++        memcpy(cd_cache[i], CDSECT, CDC_DATA_BYTES);
++        cd_cache_have = (UBYTE)(i + 1);
++    }
++    return TRUE;
+ }
+ 
+ /* One 512-byte block of D:, from the CD sector that contains it. */
+@@ -1235,9 +1390,23 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+     ULONG lba = CD_DDISK_LBA + (block >> CD_BPS_SHIFT);
+     UWORD off = (UWORD)((block & ((1U << CD_BPS_SHIFT) - 1)) * SECTOR_SIZE);
+ 
+-    if (cd_cached != lba && !cd_fetch(lba))
+-        return FALSE;
+-    memcpy(buf, CDSECT + off, SECTOR_SIZE);
++    cd_dtest |= 1;
++    if (lba < cd_cache_base || lba >= cd_cache_base + cd_cache_have) {
++        /* Twice, because the evidence says so: a fill that has just
++         * failed three times over succeeds immediately when started
++         * again from scratch. The first read after the drive has been
++         * doing something else is the one that fails, and only that
++         * one -- the desktop's very first act on a drive is Dfree, so
++         * the cost of not retrying here is a window that never opens.
++         *
++         * Why a fresh fill works where the retries inside one did not
++         * is not yet understood. Written down as a mitigation, not as
++         * a fix, so that it is not mistaken for one later. */
++        if (!cd_fill(lba) && !cd_fill(lba))
++            return FALSE;
++    }
++    memcpy(buf, cd_cache[lba - cd_cache_base] + off, SECTOR_SIZE);
++    cd_dtest |= 2;
+     return TRUE;
+ }
+ 
+@@ -1258,52 +1427,6 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+     return E_OK;
+ }
+ 
+-/* Does the mounted filesystem actually read?
+- *
+- * The icon appearing on the desktop proves block 0 came off the disc,
+- * and no more than that. This reads the two ends of the image and a
+- * block in the middle, through the same path GEMDOS uses -- so it
+- * exercises the sector cache, the four-blocks-per-sector arithmetic and
+- * the seek-versus-wait decision, none of which block 0 alone touches.
+- *
+- * What it checks is what the builder guarantees: block 0 is a FAT16
+- * boot sector with our OEM name and the 0x55AA signature, and the
+- * blocks past the end of the FAT are the zeroes mkfat.py left there.
+- * Weak evidence on its own; strong beside a pattern sector that already
+- * matched byte for byte. */
+-static void cd_selftest(void)
+-{
+-    static UBYTE buf[SECTOR_SIZE];
+-    ULONG probe[3];
+-    UBYTE ok = 1;
+-    int i;
+-
+-    probe[0] = 0;
+-    probe[1] = CD_DDISK_BLOCKS / 2;
+-    probe[2] = CD_DDISK_BLOCKS - 1;
+-
+-    cd_dtest = 1;
+-    for (i = 0; i < 3; i++) {
+-        if (!cd_read_block(probe[i], buf)) {
+-            ok = 0;
+-            break;
+-        }
+-        if (i == 0) {
+-            /* the boot sector the disc builder wrote */
+-            if (buf[510] != 0x55 || buf[511] != 0xAA
+-                    || buf[2] != 'E' || buf[3] != 'm' || buf[4] != 'u')
+-                ok = 0;
+-        } else {
+-            UWORD k;
+-            for (k = 0; k < SECTOR_SIZE; k++)
+-                if (buf[k])
+-                    ok = 0;
+-        }
+-    }
+-    if (ok)
+-        cd_dtest |= 2;
+-}
+-
+ LONG segacd_cd_ioctl(WORD op, void *arg)
+ {
+     ULONG *info = (ULONG *)arg;
+@@ -1519,7 +1642,8 @@ void segacd_int_2_c(void)
+      * Suspended while a sector read is outstanding: the drive gets one
+      * command at a time, and rotating a status query into the middle of
+      * a read would end it. */
+-    if (cdd_cmd_on && cdr_state != CDR_COMMAND && cdr_state != CDR_STREAM
++    if (cdd_cmd_on && !cd_busy
++            && cdr_state != CDR_COMMAND && cdr_state != CDR_STREAM
+             && ++cdd_tick >= 32) {
+         cdd_tick = 0;
+         cdd_ask_next();
+@@ -1810,17 +1934,6 @@ void segacd_floppy_init(void)
+ {
+     segacd_cdd_init();
+ 
+-    /* Check the filesystem on the disc, here, in foreground.
+-     *
+-     * It was in the VBL to begin with and that was wrong twice over.
+-     * The VBL runs at interrupt level 3, so blocking in it for the
+-     * seconds a seek takes locks out the 200 Hz tick as well; and the
+-     * CDD's storm guard counts drive interrupts between VBLs and
+-     * switches level 4 off when it sees too many -- so a VBL that
+-     * blocks for thirteen seconds trips a guard designed to catch
+-     * runaway re-entry. The console said so: the link score read 'S'. */
+-    cd_selftest();
+-
+     /* the builder stamps "EmuTOSMD" as the OEM field at offset 2 */
+     adisk_present = (ADISK_BASE[2] == 'E' && ADISK_BASE[3] == 'm'
+                   && ADISK_BASE[4] == 'u' && ADISK_BASE[5] == 'T');
+diff --git a/include/config.h b/include/config.h
+index 9079d46..b465e0f 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -608,6 +608,12 @@
+ # ifndef CONF_ATARI_HARDWARE
+ #  define CONF_ATARI_HARDWARE 0
+ # endif
++# ifndef INITINFO_DURATION
++   /* The welcome screen stays, and stays on screen long enough to read
++    * on a television: it lists what the machine found, which now
++    * includes a drive letter for the compact disc itself. */
++#  define INITINFO_DURATION 4
++# endif
+ # ifndef CONF_WITH_SEGACD_CD
+    /* D: -- a filesystem on the compact disc itself, read through the CDC
+     * with the Sega CDBIOS evicted. It hangs off the block layer as its

@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 08:59:15 +0000
+Subject: [PATCH 142/184] Clear the drive-state mask per round, and what round
+ 1 says
+
+The patience change landed. Round 1 with DRV_INIT on came back "bad 4
+0302" -- stage 3, where the last two hardware runs gave stage 2 at
+state 8. Stage 3 is past brd_wait_init, and that gate only opens on
+drive state 1, 2 or 4. So DRV_INIT does revive this drive; it needed
+twenty seconds and was being given three and a third.
+
+What still fails is the read after it: ROMREADN announces no sector
+inside its own fresh 200 frames, with the drive sitting at state 2 the
+whole time.
+
+Meanwhile cdd_statemask cannot answer the one question left, because
+it accumulates over the session: the 0, 6 and 7 the boot probe
+collected are still in it an hour later, so no later round can ever
+show a clean sheet no matter what the drive is doing. Clear it in
+segacd_cd_revive(), which already means "this round starts fresh".
+cdd_first stays session-wide -- the first state EmuTOS ever heard is a
+fact about the handover, not about a round.
+---
+ bios/scdapi.h |  4 ++--
+ bios/segacd.c | 12 ++++++++++++
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 1abab03..174683a 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  10
++#define SCD_VERSION  11
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -145,7 +145,7 @@ struct scd_snap {
+ #define SCD_BIOS_READTEST 5             /* -> 0 if the firmware read a sector */
+ #define SCD_BIOS_NEARREAD 6             /* -> ...one it read at boot */
+ #define SCD_BIOS_SWAPS    7             /* -> how many exchanges have run */
+-#define SCD_REVIVE        8             /* the drive gets another chance */
++#define SCD_REVIVE        8             /* another chance, and a clean mask */
+ 
+ struct scd_api {
+     unsigned short size;                /* sizeof(struct scd_api) */
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 527f502..8990254 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3071,6 +3071,18 @@ void segacd_cd_revive(void)
+ {
+     cd_deadrun = 0;
+     cd_dead = 0;
++
++    /* And forget which drive states have been seen.
++     *
++     * cdd_statemask accumulates over the whole session, so the 0, 6 and
++     * 7 the boot probe collected are still in it an hour later and no
++     * later round can ever report a clean sheet. That made the mask
++     * useless for the question it was added to answer -- whether our
++     * own CDD conversation can see a live drive once something else has
++     * woken it. Per round, it can. cdd_first is deliberately left
++     * alone: "the first state EmuTOS ever heard" is a fact about the
++     * handover and belongs to the session. */
++    cdd_statemask = 0;
+ }
+ 
+ /* deskmain() has been entered: the boot's short leash is over.

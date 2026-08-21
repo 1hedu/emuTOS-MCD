@@ -1,0 +1,228 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 20:32:17 +0000
+Subject: [PATCH 060/184] segacd: command $A, the long-seek assist -- no gaps
+ left
+
+The last thing Sega does that this driver did not. It carries how far
+the head must travel, in turns of the disc's spiral, banded.
+
+The spiral is Red Book geometry: constant linear velocity over a
+constant pitch gives r(t) = sqrt(r0^2 + v*p*t/pi), and turns are
+(r - r0)/p. At 25 mm, 1.6 um and 1.25 m/s that is
+
+    turns(T) = sqrt(15625^2 + 3316*T) - 15625,  T in frames
+
+which reproduces the BIOS's own per-minute table to within one turn on
+every entry. The bands are $1C0, $380 and $700, which is what $E38
+computes when there is no calibration -- and there is none, because
+$CB2 reads that out of the console's backup RAM and returns zero when
+it is absent. Nothing here came from the ROM; there was nothing in the
+ROM worth taking.
+
+$EB0's banding and $10CE's packing are reproduced as written, including
+the part that matters most: when the distance falls under the smallest
+band, no command is sent at all. That path is the one this driver has
+always taken, and it is why its reads worked.
+
+Sent before the read and given the exchange it needs, because level 4
+posts one command per exchange and a second queued on top replaces the
+first.
+---
+ bios/segacd.c | 155 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 155 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index a042574..ec78d85 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -158,6 +158,7 @@ static UBYTE cd_gone;           /* the drive said the disc changed */
+ static UBYTE cd_badrun;         /* consecutive packets saying "nothing" */
+ static UBYTE cd_badstate;       /* ...and the state that said it */
+ static UWORD cd_notready;       /* reads that found the drive unfit */
++static UWORD cd_seekcmds;       /* long seeks that earned command $A */
+ static UWORD cd_why;            /* nibble per attempt of the last
+                                  * failed fetch: 1 timed out, 2 the
+                                  * head was already past, 3 the
+@@ -928,6 +929,11 @@ static BOOL cdr_check(UBYTE slot)
+     return TRUE;
+ }
+ 
++static UWORD frombcd(UBYTE v)
++{
++    return (UWORD)((v >> 4) * 10 + (v & 0x0F));
++}
++
+ static UBYTE tobcd(UWORD v)
+ {
+     return (UBYTE)(((v / 10) << 4) | (v % 10));
+@@ -1064,6 +1070,140 @@ static void cdr_reissue(void)
+     cdr_state = CDR_COMMAND;
+ }
+ 
++/* Command $A: the long-seek assist.
++ *
++ * Sega sends this between preparing the drive and asking it to read,
++ * and it is the last thing this driver did not do. It carries how far
++ * the head has to travel, in turns of the disc's spiral, banded.
++ *
++ * The spiral is Red Book geometry and nothing else: constant linear
++ * velocity over a constant track pitch, so after t seconds
++ *
++ *      r(t) = sqrt(r0^2 + v*p*t/pi)      turns = (r - r0) / p
++ *
++ * With the programme area starting at 25 mm, a pitch of 1.6 um and
++ * 1.25 m/s, that is turns(T) = sqrt(15625^2 + 3316*T) - 15625 for T in
++ * frames -- and it reproduces the BIOS's own table to within one turn
++ * on every entry. See docs/cdd-bios-notes.md; nothing here was copied
++ * out of the ROM, because there was nothing in the ROM worth copying.
++ */
++#define CD_R0       15625UL     /* 25 mm at a 1.6 um pitch, in turns */
++#define CD_K        3316UL      /* v / (pi * p), per frame */
++
++/* The bands $E38 computes when there is no calibration -- and there is
++ * none, because $CB2 reads it out of the console's own backup RAM and
++ * returns zero when it is absent, which is the case we are in and the
++ * only one we would ever want to be in. */
++#define CD_BAND_LO  0x01C0
++#define CD_BAND_MID 0x0380
++#define CD_BAND_HI  0x0700
++#define CD_NEAR     0x0514
++
++static UWORD cd_isqrt(ULONG n)
++{
++    ULONG root = 0, bit = 0x8000UL;
++
++    while (bit) {
++        ULONG t = root | bit;
++
++        if (t * t <= n)
++            root = t;
++        bit >>= 1;
++    }
++    return (UWORD)root;
++}
++
++static UWORD cd_turns(ULONG frames)
++{
++    return (UWORD)(cd_isqrt(CD_R0 * CD_R0 + CD_K * frames) - CD_R0);
++}
++
++/* $EB0. Returns the banded distance, or zero for "near enough that
++ * Sega would not bother" -- in which case $10CE never sets its post
++ * flag and no command goes out at all. That path is what this driver
++ * has always taken, which is why its reads work. */
++static UWORD cd_seek_dist(ULONG target, UBYTE *dir)
++{
++    ULONG len;
++    UWORD tl, tt, d;
++
++    if (!cdd_len_ok)
++        return 0;               /* $11E0 fails and $10CE bails at $1124 */
++
++    len = (ULONG)frombcd(cdd_len_m) * 4500UL
++        + (ULONG)frombcd(cdd_len_s) * 75UL
++        + (ULONG)frombcd(cdd_len_f);
++    tl = cd_turns(len);
++    tt = cd_turns(target + 150UL);
++
++    if (tl > tt) {
++        *dir = 0xFF;
++        d = (UWORD)(tl - tt);
++    } else {
++        *dir = 0x00;
++        d = (UWORD)(tt - tl);
++    }
++
++    if (d <= CD_BAND_LO)
++        return 0;
++    else if (d <= CD_BAND_MID)
++        d = (UWORD)(d - CD_BAND_LO);
++    else if (d <= CD_BAND_HI)
++        d >>= 1;
++    else
++        d = (UWORD)(d - CD_BAND_MID);
++
++    /* The tails differ by which end the target is nearer. */
++    if (*dir) {
++        if (tt < CD_NEAR) {
++            if (d < (CD_BAND_LO >> 4))
++                return 0;
++            d = (UWORD)(d - (CD_BAND_LO >> 4));
++        }
++    } else {
++        UWORD far = (tl > CD_NEAR) ? (UWORD)(tl - CD_NEAR) : 0;
++
++        if (far < tt) {
++            if (d < (CD_BAND_LO >> 4))
++                return 0;
++            d = (UWORD)(d - (CD_BAND_LO >> 4));
++        }
++    }
++    return d;
++}
++
++/* $10CE's packing: the command, a zero, the direction as two bytes,
++ * then the distance a nibble at a time. */
++static void cdd_ask_seek(UBYTE dir, UWORD dist)
++{
++    int i;
++
++    for (i = 0; i < 9; i++)
++        cdd_next[i] = 0;
++    cdd_next[0] = 0x0A;
++    cdd_next[2] = 0;
++    cdd_next[3] = (UBYTE)(dir & 0x0F);
++    cdd_next[4] = (UBYTE)((dist >> 12) & 0x0F);
++    cdd_next[5] = (UBYTE)((dist >> 8) & 0x0F);
++    cdd_next[6] = (UBYTE)((dist >> 4) & 0x0F);
++    cdd_next[7] = (UBYTE)(dist & 0x0F);
++    cdd_want = 0xFF;
++    cdd_answered = 0;
++    cdd_handover = 1;
++}
++
++/* Give a queued command time to actually go out: level 4 posts one per
++ * exchange, so two commands queued back to back means the second
++ * replaces the first. */
++static void cdd_let_go(UBYTE packets)
++{
++    UBYTE base = cdd_irqs;
++    LONG spin = 200000L;
++
++    while (spin-- > 0 && (UBYTE)(cdd_irqs - base) < packets)
++        ;
++}
++
+ static void cdr_start(ULONG lba)
+ {
+     lba_to_msf(lba, cdc_want);
+@@ -1153,6 +1293,7 @@ static void cdr_report(void)
+      * should be the length of the image the disc was built from. */
+     CDREPORT[32] = (UWORD)(((UWORD)cdd_len_m << 8) | cdd_len_s);
+     CDREPORT[33] = (UWORD)(((UWORD)cdd_len_f << 8) | cdd_len_ok);
++    CDREPORT[34] = cd_seekcmds;
+     CDREPORT[0] = CDREPORT_MAGIC;
+ }
+ 
+@@ -1454,6 +1595,20 @@ static BOOL cd_fetch(ULONG lba)
+             cdc_hit = 0;
+             if (attempt == 0)
+                 cdc_setup();
++            {
++                /* The long-seek assist, when the distance earns it.
++                 * Sent first and given the exchange it needs, because
++                 * a command queued on top of another replaces it. */
++                UBYTE dir = 0;
++                UWORD dist = cd_seek_dist(lba >= CDR_LEADIN
++                                          ? lba - CDR_LEADIN : 0, &dir);
++
++                if (dist) {
++                    cdd_ask_seek(dir, dist);
++                    cdd_let_go(3);
++                    cd_seekcmds++;
++                }
++            }
+             lba_to_msf(lba >= CDR_LEADIN ? lba - CDR_LEADIN : 0, start);
+             cdd_ask_read(start);
+             cd_quiet = 0;

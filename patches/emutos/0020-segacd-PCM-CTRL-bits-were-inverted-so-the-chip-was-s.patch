@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 18:46:14 +0000
+Subject: [PATCH 020/184] segacd: PCM CTRL bits were inverted, so the chip was
+ switched off
+
+Bit 7 of CTRL is the chip's master enable; bit 6 chooses whether the
+low bits address a wave RAM bank or select the channel that subsequent
+register writes land on. I had the two the other way round, so channel
+programming ran with the chip disabled: every register written to
+exactly the right place, nothing sounding, and nothing observable to
+say so.
+
+megadev settles it in two lines -- pcm_clear_ram walks CTRL through
+0x80..0x8F for sixteen 4K banks, and CHANNEL(ch) is 0xC0 | (ch-1), so
+bit 7 is set in both cases and bit 6 is the mode.
+
+The emulators had been reporting the channel address register as 0x0000
+and not advancing, which was true: the chip was off. I explained it away
+as unimplemented reads. With this fix the same probe reads 0x0800 --
+exactly the loop point -- so the channel now runs the whole one-shot.
+---
+ bios/bios.c   |  4 ++--
+ bios/segacd.c | 16 ++++++++++------
+ 2 files changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 5ed7d1d..e985501 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -904,10 +904,10 @@ void biosmain(void)
+         a0 = (UWORD)((*addr_h << 8) | *addr_l);
+         segacd_sound_init();
+         segacd_bell();
+-        for (spin = 0; spin < 200000L; spin++)
++        for (spin = 0; spin < 8000L; spin++)
+             __asm__ volatile("");       /* an empty loop gets optimised away */
+         a1 = (UWORD)((*addr_h << 8) | *addr_l);
+-        for (spin = 0; spin < 200000L; spin++)
++        for (spin = 0; spin < 8000L; spin++)
+             __asm__ volatile("");
+         a2 = (UWORD)((*addr_h << 8) | *addr_l);
+         cprintf("chan addr = %04x %04x %04x\r\n", a0, a1, a2);
+diff --git a/bios/segacd.c b/bios/segacd.c
+index b70900a..7f3e393 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -81,9 +81,13 @@ const UBYTE *segacd_physbase(void)
+  * exactly like the internal backup RAM. No BIOS call is involved, which
+  * matters here because the CDBIOS is evicted at handoff.
+  *
+- * Registers select either a channel (bit 7 clear, channel in bits 2-0)
+- * or a wave RAM bank (bit 7 set, bank in bits 3-0); bit 6 is the chip's
+- * master enable and has to stay set once we want sound at all. */
++ * CTRL: bit 7 is the chip's master enable and must be set for any
++ * sound at all; bit 6 chooses what the low bits mean -- 0 selects a
++ * wave RAM bank (bits 3-0, sixteen 4K banks), 1 selects the channel
++ * whose registers the next writes land on (bits 2-0). Getting those
++ * two bits the wrong way round writes every channel register to the
++ * right place with the chip switched off, which is silent and looks
++ * completely healthy from the outside. */
+ #define PCM_ENV     ((volatile UBYTE *)0xFF0001)
+ #define PCM_PAN     ((volatile UBYTE *)0xFF0003)
+ #define PCM_FDL     ((volatile UBYTE *)0xFF0005)
+@@ -135,7 +139,7 @@ static void pcm_load_wave(void)
+ {
+     UWORD i;
+ 
+-    pcm_reg(PCM_CTRL, 0x80);            /* chip off, wave RAM bank 0 */
++    pcm_reg(PCM_CTRL, 0x80);            /* enable, wave RAM bank 0 */
+     for (i = 0; i < PCM_LEN; i++) {
+         UWORD ph = (UWORD)(i % PCM_CYCLE);
+         WORD q = (ph < PCM_CYCLE / 2) ? ph : (PCM_CYCLE - 1 - ph);
+@@ -152,7 +156,7 @@ void segacd_sound_init(void)
+ {
+     pcm_load_wave();
+ 
+-    pcm_reg(PCM_CTRL, 0x40);            /* enable, program channel 0 */
++    pcm_reg(PCM_CTRL, 0xC0);            /* enable, program channel 0 */
+     pcm_reg(PCM_ENV, 0xC0);             /* volume */
+     pcm_reg(PCM_PAN, 0xFF);             /* both speakers */
+     pcm_reg(PCM_FDL, 0x00);             /* step 1 sample per tick: the chip */
+@@ -174,7 +178,7 @@ void segacd_sound_init(void)
+ 
+ static void pcm_beep(UBYTE frames, UBYTE volume)
+ {
+-    pcm_reg(PCM_CTRL, 0x40);            /* channel 0 registers */
++    pcm_reg(PCM_CTRL, 0xC0);            /* channel 0 registers */
+     pcm_reg(PCM_ENV, volume);
+     pcm_reg(PCM_ONOFF, 0xFE);           /* channel 0 on, the rest off */
+     pcm_countdown = frames;

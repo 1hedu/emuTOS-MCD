@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 07:51:01 +0000
+Subject: [PATCH 037/184] segacd: stop locking the CD drive out of its own
+ interrupt
+
+Keeping the Genesis off the bus was half the idea. The sub's own
+handlers were the other half: INT2 and INT3 both ran at level 7, which
+masks the drive's level-4 exchange for their whole duration. The VBL
+handler does mouse, keyboard and every status field, sixty times a
+second, and the timer fires at two hundred. That is milliseconds of a
+1/75 s window, lost -- the same failure as a bus grab, by a different
+route, and equally invisible to emulators.
+
+Both drop to level 3 so level 4 can preempt them. The telemetry store
+preserves the busy flag, since level 4 can now land in the middle of
+it.
+---
+ bios/segacd.c  | 6 +++++-
+ bios/segacd2.S | 9 +++++++--
+ 2 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index e358576..93a258d 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -651,7 +651,11 @@ void segacd_int_2_c(void)
+      * frozen sub spent a hardware test looking healthy. This nibble is
+      * the sub's heartbeat and the one beside it is the drive's. */
+     subvbl++;
+-    *(volatile UWORD *)0xFF8022 = (UWORD)(((UWORD)cdd_score << 12)
++    /* Preserve the busy flag: level 4 can now preempt this handler, so
++     * it may have raised the flag between here and the store below. */
++    *(volatile UWORD *)0xFF8022 = (UWORD)((*(volatile UWORD *)0xFF8022
++            & 0x0008)
++        | ((UWORD)cdd_score << 12)
+         | ((UWORD)(cdd_irqs & 0x0F) << 8)
+         | ((UWORD)(subvbl & 0x0F) << 4)
+         |  (UWORD)(cdd_probe & 0x0F));
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 7136337..7af1c6c 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -22,7 +22,12 @@
+ // Level 2: VBL, raised by the main CPU each vblank
+         .globl  _segacd_int_2
+ _segacd_int_2:
+-        move.w  #0x2700,sr              // Forbid higher level interrupts
++        // Level 3, not 7: the CD drive's exchange is level 4 and it is
++        // on a clock we do not control. Locking it out for the whole of
++        // this handler -- mouse, keyboard and every status field, sixty
++        // times a second -- costs the drive its window just as surely as
++        // the Genesis holding the bus does. Let level 4 through.
++        move.w  #0x2300,sr
+         movem.l d0-d1/a0-a1,-(sp)
+         jbsr    _segacd_int_2_c         // Delegate to C implementation
+         movem.l (sp)+,d0-d1/a0-a1
+@@ -42,7 +47,7 @@ _segacd_int_4:
+ // Level 3: gate array timer, 200 Hz system tick
+         .globl  _segacd_int_3
+ _segacd_int_3:
+-        move.w  #0x2700,sr              // Forbid higher level interrupts
++        move.w  #0x2300,sr              // as above: level 4 may preempt
+         movem.l d0-d1/a0-a1,-(sp)
+         jbsr    _segacd_call_5ms
+         movem.l (sp)+,d0-d1/a0-a1

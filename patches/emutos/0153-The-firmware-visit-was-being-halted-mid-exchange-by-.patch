@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 19:40:09 +0000
+Subject: [PATCH 153/184] The firmware visit was being halted mid-exchange by
+ the screen pump
+
+Why is even the working path slow? Every firmware read under the
+timeshare fails at stage 3 -- no sector announced -- and D: only comes
+up after ~6 such failures burn ~20 seconds and the fallback hands the
+drive to our own reads. The same firmware call reads LBA 1600 on the
+first try in the loader's wake, every boot. The cleanest difference
+between those two environments turned out to be uncovered:
+
+IOFW halts the sub CPU to copy the screen out of PRG-RAM. Bit 3 of
+$FF8022 is the interlock the sub raises to hold it off, and cdc_grab
+and the level-4 handler both use it -- but _segacd_bios_read never
+did. So the whole of every visit ran with the servant freezing this
+CPU every few frames, mid-exchange, against a drive whose conversation
+has one turn per 1/75 s and whose link dies when a turn is missed. The
+loader's wake has no servant running at all.
+
+The visit now holds the interlock end to end, and IOFW's forced-grab
+threshold while interlocked rises from 30 frames to 600: half a second
+of patience was a wedge-guard sized for cdc_grab's millisecond holds,
+and grabbing anyway half a second into a multi-second visit re-created
+the exact hazard the interlock exists to prevent. The wedge-guard
+remains, ten seconds out; a frozen status line during a visit is the
+cost of the drive answering.
+
+If this is the starvation, firmware reads start succeeding under the
+timeshare, the six-failure preamble never happens, and the first open
+of D: is a firmware read that works -- the same call, the same disc,
+the same console that Doom is snappy on. If stage 3 persists with the
+servant provably held off, the starvation is elsewhere and this
+eliminated the best-cited candidate.
+---
+ bios/scdapi.h  |  2 +-
+ bios/segacd2.S | 13 +++++++++++++
+ 2 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index f723c1f..a673879 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  21
++#define SCD_VERSION  22
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 5396776..2d8fec9 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -431,6 +431,18 @@ _segacd_bios_read:
+         move.l  #0x7C900,sp             // scratch stack, outside the swap
+         lea     0x7C000,a5
+ 
++        // The servant may not halt this CPU while Sega's firmware is
++        // driving the drive. Bit 3 of $FF8022 is the interlock IOFW
++        // already honours for cdc_grab's transfers; the visit never
++        // held it, so IOFW froze the sub for a screen copy every few
++        // frames of every visit -- mid-exchange, against a drive whose
++        // conversation has one turn per 1/75 s. The loader's wake has
++        // no servant running, and the same firmware call that reads
++        // LBA 1600 first-try there starves at stage 3 here. That is
++        // the cleanest environmental difference between the two, and
++        // it was simply never covered.
++        ori.w   #0x0008,0xFF8022
++
+         move.l  a6,44(a5)               // EmuTOS's stack, in memory: the
+                                         // watchdog has to be able to find
+                                         // it, and a6 does not survive a
+@@ -763,6 +775,7 @@ brd_done:
+ 
+         move.l  _segacd_bios_vec4,0x70  // give the firmware its vector back
+         bsr     bios_xchg               // EmuTOS's world back into place
++        andi.w  #0xFFF7,0xFF8022        // the servant may halt us again
+         move.w  36(a5),d0
+         move.b  d0,0xFF8033             // EmuTOS's mask, as we found it
+                                         // -- the three the visit needs

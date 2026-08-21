@@ -1,0 +1,334 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 05:44:14 +0000
+Subject: [PATCH 098/184] segacd: say which kind of timeout, and put the log
+ back on B:
+
+The first log to come off a console read `why 1111` in all six rounds:
+twenty-four attempts, every one a timeout, and not a single 2, 3 or 5
+between them. That acquits everything this driver was built to
+survive -- the head being past the target, the transfer failing, the
+decoder mispairing a header against a pointer. Nothing arrived at all.
+
+But nibble 1 covers two different faults that need opposite fixes. The
+decoder may have produced nothing, which means the read never reached
+the drive; or it may have produced sectors that never got as far as
+the one wanted, which means the drive is reading in the wrong place.
+cd_why cannot tell them apart and neither could I. So each timeout now
+photographs the two numbers that can: how many sectors the decoder
+announced during the attempt, and how far the newest one got relative
+to the target. Taken before the next attempt resets the ring, and only
+for a timeout, since the other verdicts already name themselves.
+cdc_ints is a byte, so 65535 is an unambiguous "nothing has timed out".
+
+The log itself comes back too. cdlog/DLOG were in patches/diag against
+an older graft and never made it into this tree, which is why the
+current build's diagnostics have been screen-only -- readable off a
+television, one photograph at a time, six rounds of numbers that no
+camera was going to carry. Every diagnostic line now goes to the
+screen and to B:\CDLOG.TXT, rewritten whole each round so the file is
+complete and closed at every moment the power might go off. From B:
+the Mode 1 tool ROM lifts it into cart SRAM and the flash cart writes
+it to an SD card. That round trip is proven: the log this commit is
+reacting to came back with its checksum intact.
+
+Verified under gpgx: the file is written, and the new line reads
+`timeout: int 65535 d 32767` on a run where every read succeeds.
+---
+ bios/bios.c   | 122 +++++++++++++++++++++++++++++++++++++++++++-------
+ bios/segacd.c |  47 ++++++++++++++++++-
+ bios/segacd.h |   3 +-
+ 3 files changed, 155 insertions(+), 17 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 8134fe4..72276b0 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -63,6 +63,8 @@
+ #include "amiga.h"
+ #include "lisa.h"
+ #include "segacd.h"
++#include <stdarg.h>
++#include "doprintf.h"
+ #include "coldfire.h"
+ #if WITH_CLI
+ #include "../cli/clistub.h"
+@@ -806,6 +808,76 @@ BOOL can_shutdown(void)
+  * exec the user interface (shell or AES)
+  */
+ 
++#ifdef MACHINE_SEGACD
++/* The diagnostic outgrew the tube, and now it does not need it.
++ *
++ * Ten lines a round, a round every few seconds, and the answer to
++ * "which sector does it die on" scrolls off a CRT that has no
++ * scroll-back. Worse, reading it off a television means transcribing
++ * it by hand, and the last hardware run produced six rounds of numbers
++ * that no photograph was going to carry.
++ *
++ * So every line goes to two places: the screen, and a buffer written
++ * to B:\CDLOG.TXT after each round. B: on a stock console is the 8 KB
++ * of internal backup RAM on the sub CPU's own bus -- the only
++ * persistent store the machine has, since a cartridge in the slot
++ * stops it booting from CD at all. EmuTOS will not touch that memory
++ * while it holds Sega-format game saves, so the log has nowhere to go
++ * until C is held at power-on once to claim it; that erases whatever
++ * is in there, which is why it is a deliberate act and not something
++ * this build does on its own.
++ *
++ * From there boot/m1tool.S lifts it into cart SRAM and the flash cart
++ * writes it to an SD card, so the round trip is complete without a
++ * camera. That path is proven: the first log it carried came back with
++ * its checksum intact.
++ *
++ * The buffer is written whole each round rather than appended to, so
++ * the file is complete and closed at every moment the power might go
++ * off. When it fills, it stops: the file stops changing and says so,
++ * and the screen keeps running. */
++#define CDLOG_MAX 3584
++
++static char cdlog[CDLOG_MAX];
++static UWORD cdlog_len;
++static UBYTE cdlog_full;
++
++static void cdlog_putc(int c)
++{
++    if (cdlog_len < CDLOG_MAX)
++        cdlog[cdlog_len++] = (char)c;
++    else
++        cdlog_full = 1;
++}
++
++PRINTF_STYLE static void cdlog_printf(const char *fmt, ...);
++static void cdlog_printf(const char *fmt, ...)
++{
++    va_list ap;
++
++    va_start(ap, fmt);
++    doprintf(cdlog_putc, fmt, ap);
++    va_end(ap);
++}
++
++/* Both at once. Every line the diagnostic prints is a line worth
++ * keeping, so there is no version of this where they can drift. */
++#define DLOG(...)                                                       \
++    do { cprintf(__VA_ARGS__); cdlog_printf(__VA_ARGS__); } while (0)
++
++static LONG cdlog_save(void)
++{
++    LONG h, rc;
++
++    h = Fcreate("B:\\CDLOG.TXT", 0);
++    if (h < 0L)
++        return h;
++    rc = Fwrite((WORD)h, (LONG)cdlog_len, cdlog);
++    Fclose((WORD)h);
++    return rc;
++}
++#endif
++
+ void biosmain(void)
+ {
+ #ifdef MACHINE_SEGACD
+@@ -1079,7 +1151,8 @@ void biosmain(void)
+         LONG h, rc;
+         UWORD run, arm, seeks, hits, errs, why, bad, wrong, torn, flag;
+         WORD wdelta;
+-        UWORD fix, flba, fsame, ts, tsf, tsrc;
++        UWORD fix, flba, fsame, ts, tsf, tsrc, lints;
++        WORD lshort;
+         UBYTE state;
+         int i;
+ 
+@@ -1092,22 +1165,22 @@ void biosmain(void)
+             /* Short because the line is forty columns and the last
+              * field kept falling off the edge of the tube. L lead,
+              * H hold, A late, I DRV_INIT, B the raw button word. */
+-            cprintf("D: T%u  L%u H%u A%u I%u  B%02X\r\n",
++            DLOG("D: T%u  L%u H%u A%u I%u  B%02X\r\n",
+                     run + 1, arm_lead[arm], arm_hold[arm], arm_late[arm],
+                     arm_drvi[arm], segacd_bootflags);
+ 
+             rc = Dfree((LONG *)buf, 3);         /* 3 = C: */
+-            cprintf(" Dfree    %ld   %ld of %ld free\r\n",
++            DLOG(" Dfree    %ld   %ld of %ld free\r\n",
+                     rc, *(LONG *)buf, *((LONG *)buf + 1));
+             rc = Dsetpath("C:\\");
+-            cprintf(" Dsetpath %ld\r\n", rc);
++            DLOG(" Dsetpath %ld\r\n", rc);
+ 
+             Fsetdta(&dta);
+             rc = Fsfirst("C:\\*.*", 0x17);
+-            cprintf(" Fsfirst  %ld   [%s]\r\n", rc, dta.d_fname);
++            DLOG(" Fsfirst  %ld   [%s]\r\n", rc, dta.d_fname);
+ 
+             h = Fopen("C:\\READCD.TXT", 0);
+-            cprintf(" Fopen    %ld\r\n", h);
++            DLOG(" Fopen    %ld\r\n", h);
+             if (h >= 0L) {
+                 rc = Fread((WORD)h, 32L, buf);
+                 Fclose((WORD)h);
+@@ -1115,18 +1188,27 @@ void biosmain(void)
+                     if (buf[i] < 32 || buf[i] > 126)
+                         buf[i] = '.';
+                 buf[24] = 0;
+-                cprintf(" Fread    %ld   [%s]\r\n", rc, buf);
++                DLOG(" Fread    %ld   [%s]\r\n", rc, buf);
+             }
+ 
+             segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
+                             &bad, &wrong, &torn, &flag, &wdelta, &fix,
+-                            &flba, &fsame, &ts, &tsf, &tsrc);
+-            cprintf(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
++                            &flba, &fsame, &ts, &tsf, &tsrc,
++                            &lints, &lshort);
++            DLOG(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+                     state, seeks, hits, errs, why);
+-            cprintf(" torn %u bcd %u wr %u l%d fx %u fl %u\r\n",
++            DLOG(" torn %u bcd %u wr %u l%d fx %u fl %u\r\n",
+                     torn, bad, wrong, wdelta, fix, flag);
+-            cprintf(" lastfail %u x%u  CDBIOS rd %u fl %u %04X\r\n",
++            DLOG(" lastfail %u x%u  CDBIOS rd %u fl %u %04X\r\n",
+                     flba, fsame, ts, tsf, tsrc);
++            /* What the timeout meant. int is how many sectors the
++             * decoder announced while the attempt waited; d is how far
++             * the newest one got relative to the one wanted. int 0 is a
++             * drive that never started reading. A large negative d is a
++             * drive reading well before the target. 32767 means the
++             * ring stayed empty for the whole attempt, and int 65535
++             * that no fetch has timed out at all. */
++            DLOG(" timeout: int %u  d %d\r\n", lints, lshort);
+             /* Phase one of the timeshare: is the machine's own CDBIOS
+              * still up there in Word RAM, and does it execute when
+              * exchanged back into low memory? CDBCHK is the smallest
+@@ -1139,21 +1221,31 @@ void biosmain(void)
+                 UWORD ctrl, lost;
+ 
+                 segacd_bios_ipath(&i4, &own, &vec4, &ctrl, &lost);
+-                cprintf(" CDBIOS probe %04X near %04X far %04X sw %u\r\n",
++                DLOG(" CDBIOS probe %04X near %04X far %04X sw %u\r\n",
+                         br, segacd_bios_nearread(), rr,
+                         segacd_bios_swaps());
+-                cprintf(" i4 %lu/%lu v4 %06lX ctl %04X ls %02X\r\n",
++                DLOG(" i4 %lu/%lu v4 %06lX ctl %04X ls %02X\r\n",
+                         own, i4, vec4, ctrl, lost);
+                 {   /* The one exchange that matters, in full. */
+                     ULONG st, cm;
+                     UWORD ctl2;
+ 
+                     segacd_bios_cdd(&st, &cm, &ctl2);
+-                    cprintf(" st %08lX cm %08lX x %04X\r\n",
++                    DLOG(" st %08lX cm %08lX x %04X\r\n",
+                             st, cm, ctl2);
+                 }
+             }
+-            cprintf("\r\n");
++            DLOG("\r\n");
++
++            /* Then put the round somewhere that survives a power cut.
++             * The return code goes on screen only: it changes every
++             * round and would double the size of the file. */
++            if (!cdlog_full) {
++                LONG lrc = cdlog_save();
++                cprintf(" log %ld  bram %u\r\n", lrc, segacd_bram_state());
++            } else {
++                cprintf(" LOG FULL -- safe to power off\r\n");
++            }
+ 
+             /* Long enough to read a round before the next scrolls it
+              * away, and long enough that the drive is not being flogged
+diff --git a/bios/segacd.c b/bios/segacd.c
+index d690e89..b03f763 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -251,6 +251,25 @@ static UWORD cd_why;            /* nibble per attempt of the last
+                                  * failed fetch: 1 timed out, 2 the
+                                  * head was already past, 3 the
+                                  * transfer itself failed */
++/* What nibble 1 means, which it has never said.
++ *
++ * The first log to come off a console read 1111 in every round: four
++ * attempts, four timeouts, and not one 2, 3 or 5 anywhere. That rules
++ * out everything this driver was built to survive -- the head being
++ * past, the transfer failing, the decoder mispairing a header -- and
++ * leaves two possibilities that look identical in cd_why and need
++ * opposite fixes. Either the decoder produced nothing at all, meaning
++ * the read never reached the drive; or it produced sectors that never
++ * got as far as the one wanted, meaning the drive is reading in the
++ * wrong place. These two numbers are the difference. */
++static UWORD cd_lastints = 0xFFFF;      /* decoder interrupts during the
++                                 * attempt that gave up: zero is a deaf
++                                 * drive, and 0xFFFF is no timeout yet --
++                                 * cdc_ints is a byte, so it cannot
++                                 * collide with a real count */
++static WORD cd_lastshort = 0x7FFF;      /* newest sector the ring saw,
++                                 * minus the one wanted; 0x7FFF if it
++                                 * saw none */
+ static UWORD cd_seeks, cd_hits; /* seeks against sectors simply waited for */
+ /* The sector ring.
+  *
+@@ -1957,6 +1976,21 @@ rewait:
+          * attempt, newest in the low bits. 1 timed out, 2 the stream
+          * was already past, 3 the transfer failed, 4 the drive's state
+          * said to stop asking. */
++        /* Photograph the two numbers before the next attempt resets the
++         * ring, and only for a timeout -- the other verdicts already
++         * name themselves. */
++        if (!why1) {
++            cd_lastints = cdc_ints;
++            if (cd_ring_newest == 0xFFFFFFFFUL) {
++                cd_lastshort = 0x7FFF;
++            } else {
++                LONG d = (LONG)cd_ring_newest - (LONG)lba;
++
++                if (d > 9999L) d = 9999L;
++                if (d < -9999L) d = -9999L;
++                cd_lastshort = (WORD)d;
++            }
++        }
+         cd_why = (UWORD)((cd_why << 4) | (why1 ? why1 : 1));
+         continue;
+ 
+@@ -2595,8 +2629,10 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+                      UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
+                      UWORD *flba, UWORD *fsame, UWORD *ts, UWORD *tsf,
+-                     UWORD *tsrc)
++                     UWORD *tsrc, UWORD *lints, WORD *lshort)
+ {
++    *lints = cd_lastints;
++    *lshort = cd_lastshort;
+     *ts = cd_ts ? cd_ts_reads : 0xFFFF;
+     *tsf = cd_ts_fails;
+     *tsrc = cd_ts_rc;
+@@ -3166,6 +3202,15 @@ static void bram_probe(void)
+     bram_state = BRAM_OURS;
+ }
+ 
++/* 0 no backup RAM, 1 ours, 2 somebody's game saves -- and 3 if a RAM
++ * cart answered, in which case B: is the cart and none of this applies.
++ * The diagnostic's log has nowhere to go in states 0 and 2, and
++ * "Fcreate -2" on its own does not say which. */
++UBYTE segacd_bram_state(void)
++{
++    return cart_sectors ? 3 : bram_state;
++}
++
+ /* Read back the bytes GEMDOS's getbpb depends on, so the status line can
+  * show whether the filesystem we wrote is actually there. Expect 0x6010:
+  * 0x60 = the boot sector's first byte, 0x10 = 16 total sectors. */
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 9d148c7..4db6c61 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -38,8 +38,9 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+                      UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
+                      UWORD *flba, UWORD *fsame, UWORD *ts, UWORD *tsf,
+-                     UWORD *tsrc);
++                     UWORD *tsrc, UWORD *lints, WORD *lshort);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
++UBYTE segacd_bram_state(void);  /* 0 none 1 ours 2 Sega saves 3 RAM cart */
+ UWORD segacd_bios_probe(void);  /* exchange the CDBIOS in, call it, out */
+ UWORD segacd_bios_readtest(void); /* ...and have it read a known sector */
+ UWORD segacd_bios_nearread(void); /* ...one it read at boot, near the boot files */

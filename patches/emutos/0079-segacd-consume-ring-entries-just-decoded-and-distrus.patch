@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 19:42:12 +0000
+Subject: [PATCH 079/184] segacd: consume ring entries just-decoded, and
+ distrust slow transfers
+
+Hardware named the recycler: the last wrong grab delivered wanted+5,
+and five is the write head's wrap distance -- a slot is rewritten about
+five blocks after insertion. Worse, Fsfirst -33 alongside passing
+header checks means the rewrite can land between the header words
+leaving the machine and the data behind them: right header, wrong
+bytes, a directory that reads back plausible and empty.
+
+Entries are now consumed at age one or fresher (the BIOS consumes at
+zero to one; at one the rewrite is four sector times out and the
+transfer needs half of one), and after every transfer the slot's total
+age is checked -- reaching rewrite range disqualifies the bytes no
+matter what the header said.
+
+Also: EmuTOS cprintf has no '+' flag; the diagnostic line is compacted
+to fit forty columns with the delta printed as plain %d.
+---
+ bios/bios.c   |  2 +-
+ bios/segacd.c | 15 +++++++++++++--
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index ba11692..736ffdf 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1112,7 +1112,7 @@ void biosmain(void)
+                             &bad, &wrong, &torn, &flag, &wdelta);
+             cprintf(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+                     state, seeks, hits, errs, why);
+-            cprintf(" torn %u  badbcd %u  wrong %u (last %+d)  flag %u\r\n\r\n",
++            cprintf(" torn %u bcd %u wr %u l%d fl %u\r\n\r\n",
+                     torn, bad, wrong, wdelta, flag);
+ 
+             /* Long enough to read a round before the next scrolls it
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 49fc8af..7dd8b5c 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -288,6 +288,8 @@ static volatile UBYTE cdc_ints;         /* sectors the decoder has reported;
+                                          * declared here because the ring's
+                                          * freshness is measured in it */
+ 
++static UBYTE cd_found_stamp;    /* insertion stamp of the entry returned */
++
+ static BOOL cd_ring_find(ULONG lba, UWORD *pt)
+ {
+     UBYTE i, best = 0xFF, age;
+@@ -313,9 +315,10 @@ static BOOL cd_ring_find(ULONG lba, UWORD *pt)
+              * seven deep -- at age four plus two in flight the slot is
+              * being rewritten mid-grab. The BIOS consumes its entries
+              * at age zero or one; two is already generous. */
+-            if (age <= 2 && age < best) {
++            if (age <= 1 && age < best) {
+                 best = age;
+                 *pt = cd_ring_pt[i];
++                cd_found_stamp = cd_ring_age[i];
+                 found = TRUE;
+             }
+         }
+@@ -1936,7 +1939,15 @@ static BOOL cd_fetch(ULONG lba)
+         continue;
+ 
+ collect:
+-        if (cdc_grab(pt)) {
++        if (cdc_grab(pt)
++            /* The header check can be beaten: the recycler can rewrite
++             * the slot between the header words leaving the machine and
++             * the data behind them -- right header, wrong bytes, which
++             * is how a directory reads back plausible and empty. The
++             * defense is arithmetic: if the slot's total age by the end
++             * of the transfer reaches rewrite range, the bytes are not
++             * trusted no matter what the header said. */
++            && (UBYTE)(cdc_ints - cd_found_stamp) <= 4) {
+             /* The step the recipe always had and this driver never
+              * did: "compare the header against the frame expected,
+              * else start over". The BIOS does it; megadev and Lunar

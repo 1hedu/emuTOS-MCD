@@ -1,0 +1,149 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 06:29:58 +0000
+Subject: [PATCH 101/184] segacd: the timeshare is a lever in the sweep, and
+ Fread shows its bytes
+
+Twelve rounds of hardware log came back with err 0, why 0000, lastfail
+65535 and int 65535: our own cd_fetch was never entered once. The
+diagnostic armed the timeshare at the top of every round, so all six
+reads a round went to cd_fill_bios, the firmware failed all six, stood
+down, and got re-armed for the next round. Twelve times. Meanwhile the
+build before it -- which had no timeshare at all -- opened READCD.TXT
+on that console and read the right bytes, twice.
+
+So it alternates like the other four levers: the first four rounds are
+our own driver, the last four the firmware. One disc answers both
+instead of one disc answering neither. Standing the firmware down in
+segacd_ts_arm rather than merely declining to arm it, because the arm
+is sticky across rounds.
+
+Fread now prints its first eight bytes as numbers as well as text. A
+sanitised string turns every wrong answer into the same row of dots,
+and the three wrong answers need telling apart. That paid for itself
+immediately: the emulator's round one reads 00000000 00000000, so the
+failure is not the wrong sector delivered -- which would be somebody's
+text -- but a sector that arrived empty while every counter in the
+driver reported perfect health.
+
+Also renamed the second of two fields both printed as fl. One was
+cd_flagged and the other cd_ts_fails, on consecutive lines.
+---
+ bios/bios.c   | 23 ++++++++++++++++++++---
+ bios/segacd.c | 24 ++++++++++++++++++++++++
+ bios/segacd.h |  1 +
+ 3 files changed, 45 insertions(+), 3 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 312ca10..0fe2b96 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1144,7 +1144,14 @@ void biosmain(void)
+          * DRV_INIT, or go at the drive the way Sega's own read routines
+          * do. Alternating, so consecutive rounds compare directly. */
+         static const UWORD arm_drvi[8] = {  0, 1,  0, 1,  0, 1,  0, 1 };
++        /* ...and whether the firmware gets D: at all. The first four
++         * rounds are our own driver, which is the one that has read a
++         * file on this console; the last four are the timeshare, which
++         * has not. Forcing it on for every round is how twelve rounds
++         * of hardware log came back without our cd_fetch running once. */
++        static const UWORD arm_ts[8]   = {  0, 0,  0, 0,  1, 1,  1, 1 };
+         static char buf[512];
++        static UBYTE raw[8];
+         static DTA dta;
+         LONG h, rc;
+         UWORD run, arm, seeks, hits, errs, why, bad, wrong, torn, flag;
+@@ -1159,13 +1166,14 @@ void biosmain(void)
+             arm = (UWORD)(run & 7);
+             segacd_cd_tune(arm_lead[arm], arm_hold[arm], arm_late[arm]);
+             segacd_ts_tune((WORD)arm_drvi[arm]);
++            segacd_ts_arm((WORD)arm_ts[arm]);
+             segacd_ts_rearm();
+             /* Short because the line is forty columns and the last
+              * field kept falling off the edge of the tube. L lead,
+              * H hold, A late, I DRV_INIT, B the raw button word. */
+-            DLOG("D: T%u  L%u H%u A%u I%u  B%02X\r\n",
++            DLOG("D: T%u  L%u H%u A%u I%u T%u  B%02X\r\n",
+                     run + 1, arm_lead[arm], arm_hold[arm], arm_late[arm],
+-                    arm_drvi[arm], segacd_bootflags);
++                    arm_drvi[arm], arm_ts[arm], segacd_bootflags);
+ 
+             rc = Dfree((LONG *)buf, 3);         /* 3 = C: */
+             DLOG(" Dfree    %ld   %ld of %ld free\r\n",
+@@ -1182,11 +1190,20 @@ void biosmain(void)
+             if (h >= 0L) {
+                 rc = Fread((WORD)h, 32L, buf);
+                 Fclose((WORD)h);
++                memcpy(raw, buf, 8);            /* before the sanitiser */
+                 for (i = 0; i < 24; i++)
+                     if (buf[i] < 32 || buf[i] > 126)
+                         buf[i] = '.';
+                 buf[24] = 0;
+                 DLOG(" Fread    %ld   [%s]\r\n", rc, buf);
++                /* And the same bytes as numbers. A sanitised string
++                 * turns every wrong answer into the same row of dots,
++                 * and the three wrong answers need telling apart: the
++                 * right file at the wrong offset, a different sector
++                 * altogether, and a buffer nothing was written into. */
++                DLOG(" raw %02X%02X%02X%02X %02X%02X%02X%02X\r\n",
++                     raw[0], raw[1], raw[2], raw[3],
++                     raw[4], raw[5], raw[6], raw[7]);
+             }
+ 
+             segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
+@@ -1197,7 +1214,7 @@ void biosmain(void)
+                     state, seeks, hits, errs, why);
+             DLOG(" torn %u bcd %u wr %u l%d fx %u fl %u\r\n",
+                     torn, bad, wrong, wdelta, fix, flag);
+-            DLOG(" lastfail %u x%u  CDBIOS rd %u fl %u %04X\r\n",
++            DLOG(" lastfail %u x%u  CDBIOS rd %u bad %u %04X\r\n",
+                     flba, fsame, ts, tsf, tsrc);
+             /* What the timeout meant. int is how many sectors the
+              * decoder announced while the attempt waited; d is how far
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 311e7fa..038ab34 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2626,6 +2626,30 @@ void segacd_ts_rearm(void)
+     cd_ts_fails = 0;
+ }
+ 
++/* Whether the firmware gets D: at all, as a lever the sweep can pull.
++ *
++ * It had been forced on for the whole diagnostic, and that turned out
++ * to hide the only thing on this console that has ever worked. Every
++ * read goes to cd_fill_bios when the timeshare is armed, so twelve
++ * rounds of a hardware log came back with err 0, why 0000 and lastfail
++ * 65535 -- our own cd_fetch was never entered once, while the firmware
++ * failed all six reads a round and stood down, twelve times over. The
++ * build before it, which had no timeshare, opened READCD.TXT and read
++ * the right bytes. Twice.
++ *
++ * So it alternates like the other four levers, and one disc answers
++ * both instead of one disc answering neither. Standing the firmware
++ * down here rather than merely declining to arm it, because the arm is
++ * sticky across rounds. */
++void segacd_ts_arm(WORD on)
++{
++    cd_ts_want = (UBYTE)(on ? 1 : 0);
++    if (!cd_ts_want && cd_ts) {
++        cd_ts = 0;
++        cdd_cmd_on = cd_ts_cmdsave;
++    }
++}
++
+ /* Wake with DRV_INIT, or go straight at the drive the way every Sega
+  * read routine does. The diagnostic alternates it round by round; a
+  * change has to un-wake the firmware or the second setting never gets
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 4db6c61..c5301d8 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -53,6 +53,7 @@ void segacd_bios_ipath(ULONG *i4, ULONG *own, ULONG *vec4, UWORD *ctrl,
+ void segacd_bios_unwake(void);  /* segacd2.S */
+ void segacd_ts_tune(WORD drvinit);
+ void segacd_ts_rearm(void);
++void segacd_ts_arm(WORD on);   /* hand D: to the firmware, or take it back */
+ void segacd_bios_cdd(ULONG *st, ULONG *cm, UWORD *ctl2);
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);

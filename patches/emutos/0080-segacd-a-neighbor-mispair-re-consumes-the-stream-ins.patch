@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 19:57:06 +0000
+Subject: [PATCH 080/184] segacd: a neighbor mispair re-consumes the stream
+ instead of reseeking
+
+Two hardware runs measured the wrong-grab distance directly: -1 and
++5. Not constant, so not pointer arithmetic -- phase noise. On silicon
+the header registers and the block pointer do not update at the same
+instant, and an unlucky interrupt inside the 13 ms window records one
+sector's header against its neighbor's pointer. Emulators latch the
+pair atomically and cannot see it.
+
+When the caught wrong sector is a neighbor (within seven blocks), the
+stream is exactly where it should be and every lap re-inserts the
+wanted sector with a freshly paired pointer -- so the fetch now goes
+back to consuming the stream, bounded at eight tries, instead of
+burning an attempt on a pause-and-reseek that arrives back in the same
+phase trap.
+
+The early ring-hit path jumps past the per-attempt setup, so the wait
+loop's state is now initialised at entry -- the goto made a latent
+uninitialised-read reachable.
+---
+ bios/segacd.c | 28 +++++++++++++++++++++++++++-
+ 1 file changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 7dd8b5c..423e22a 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1726,9 +1726,16 @@ static BOOL cd_fetch(ULONG lba)
+     UWORD pt;
+     int attempt;
+     UBYTE settle, seen;
+-    UBYTE why1;
++    UBYTE why1, wrongs;
+     BOOL got = FALSE;
+ 
++    /* The early ring-hit path jumps straight to the transfer, past the
++     * per-attempt setup -- so everything the wait loop reads must hold
++     * sane values from here. */
++    settle = seen = cdd_irqs;
++    why1 = 0;
++    wrongs = 0;
++
+     /* Take the drive. The VBL rotates a status question at the CDD
+      * every thirty-two frames, and a question is a command like any
+      * other: queued while a read is in flight it replaces the read, or
+@@ -1841,6 +1848,8 @@ static BOOL cd_fetch(ULONG lba)
+         seen = settle;
+         cd_badrun = 0;
+         why1 = 0;
++        wrongs = 0;
++rewait:
+         while (cd_budget > 0 && cd_time_left()) {
+             cd_budget--;
+             if (cd_ring_find(lba, &pt))
+@@ -1983,6 +1992,23 @@ collect:
+                 cd_wrongdelta = (WORD)got;
+                 cd_wrongsec++;
+                 cd_why = (UWORD)((cd_why << 4) | 5);
++
++                /* A wrong grab that delivered a NEIGHBOR is not a lost
++                 * drive, it is a mispaired pointer: on silicon the
++                 * header registers and the block pointer do not update
++                 * at the same instant, so an unlucky read inside the
++                 * 13 ms window records sector N's header with N-1's
++                 * pointer -- the last two hardware runs measured the
++                 * mispair directly, -1 and +5. The stream is still
++                 * exactly where it should be, and every lap re-inserts
++                 * the wanted sector with a freshly paired pointer. So
++                 * go back to consuming the stream instead of burning an
++                 * attempt on a pause-and-reseek that arrives back in
++                 * the same phase trap. Bounded, then the attempt loop
++                 * takes over as before. */
++                if (got >= -7L && got <= 7L && ++wrongs <= 8
++                        && cd_time_left())
++                    goto rewait;
+             }
+         } else {
+             cd_streaming = 0;           /* the transfer is what failed */

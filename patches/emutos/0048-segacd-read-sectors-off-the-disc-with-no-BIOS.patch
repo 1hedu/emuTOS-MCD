@@ -1,0 +1,597 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 10:44:43 +0000
+Subject: [PATCH 048/184] segacd: read sectors off the disc with no BIOS
+
+The CDC driver, written after the whole path was read out of the
+console's own CDBIOS rather than during. docs/cdd-bios-notes.md has the
+derivation, function by function.
+
+Level 5 records each decoded sector's header and buffer pointer and
+returns; the VBL does the 2K transfer once the header is the one asked
+for. The drive is started with CDD command 3 sub 0 at the target MSF --
+recovered from $F70, which is where a BIOS request code becomes a
+command, and not guessable from the CDC code at all.
+
+Four deliberate departures from Sega's version: no sector ring, the
+transfer in the VBL rather than the interrupt, level 4 masking level 5,
+and two target sectors rather than one. The second sector is the point:
+a recognisable descriptor at LBA 16 is also the likeliest thing to be
+lying in a buffer already, so the driver also reads one a thousand
+sectors further in and hashes both.
+
+Telemetry goes in PRG-RAM below the captured sector, because all eight
+sub-to-main comm registers were already spoken for and the two that
+looked free belong to the block layer.
+---
+ bios/segacd.c  | 436 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ bios/segacd.h  |   3 +
+ bios/segacd2.S |  51 ++++++
+ 3 files changed, 487 insertions(+), 3 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index a2c9173..0f8fb04 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -201,6 +201,10 @@ void segacd_cdd_init(void)
+     /* Vector first, then unmask, then start the clock: the first packet
+      * must not arrive before there is something to catch it. */
+     VEC_LEVEL4 = segacd_int_4;
++    /* Level 5 is the CDC's. Vectored now and unmasked only when a read
++     * starts, so nothing can arrive before there is a handler and the
++     * decoder cannot interrupt us while it is switched off. */
++    VEC_LEVEL5 = segacd_int_5;
+     GA_INTMASK |= 0x10;
+     *CDD_CTRL_B = 0;            /* as the BIOS does: clear, then enable */
+     *CDD_CTRL_B = CDD_HOCK;     /* start the 75 Hz status reports */
+@@ -487,6 +491,409 @@ void segacd_int_4_c(void)
+     }
+ }
+ 
++/******************************************************************************/
++/* CDC: taking sectors off the disc                                           */
++/******************************************************************************/
++
++/* The CDD gets the drive reading; the CDC is the decoder that turns what
++ * the drive delivers into sectors, and it is a separate chip behind a
++ * separate set of gate array registers. Everything below is Sega's, read
++ * out of the sub-CPU CDBIOS -- docs/cdd-bios-notes.md gives the
++ * derivation, including which BIOS routine each constant comes from.
++ *
++ * The register file is reached through an address/data pair, and the
++ * address auto-increments after every access to the data port. That is
++ * why a five-register write is five consecutive stores rather than five
++ * select/store pairs, and it is not an optimisation: it is how the BIOS
++ * does it, and the sequence is what the hardware expects.
++ *
++ * $FF8004 is the gate array's own byte rather than a CDC register. Bit 7
++ * says the transfer has ended, bit 6 says data is ready to read, and the
++ * low three bits choose where a transfer goes -- 3 is "the sub CPU reads
++ * it from $FF8008", which is the only destination this driver uses. */
++#define CDC_MODE    ((volatile UBYTE *)0xFF8004)
++#define CDC_MODE_RD ((const volatile UBYTE *)0xFF8004)
++#define CDC_AR      ((volatile UBYTE *)0xFF8005)
++#define CDC_DATA    ((volatile UBYTE *)0xFF8007)
++#define CDC_DATA_RD ((const volatile UBYTE *)0xFF8007)
++#define CDC_EDT     0x80
++#define CDC_DSR     0x40
++#define CDC_DEST_SUB 0x03
++
++/* Mode 1 sectors are 2048 bytes of data behind a four-byte header. Both
++ * come out of the same transfer, which is why the count is 2052. */
++#define CDC_DATA_BYTES  2048
++#define CDC_XFER_BYTES  (CDC_DATA_BYTES + 4)
++
++/* The captured sector goes at a fixed address rather than into .bss, so
++ * that the servant on the other CPU can find it without being told: the
++ * last 2K of PRG-RAM, above the A: ramdisk (which ends at 0x7EFFF) and
++ * above the backup-RAM bounce buffer at 0x7F000. EmuTOS's own memory
++ * ends at 0x60000, so none of this is in anyone's way. */
++#define CDSECT      ((UBYTE *)0x7F800)
++
++static UBYTE cdc_ints;          /* sectors the decoder has reported */
++static UBYTE cdc_head[4];       /* header of the one it reported last */
++static UBYTE cdc_stat4[4];      /* STAT0-3 with it */
++static UBYTE cdc_want[3];       /* the header we are waiting for, BCD */
++static UWORD cdc_pt;            /* where in buffer RAM ours landed */
++static UBYTE cdc_hit;           /* it went by, and cdc_pt says where */
++static UBYTE cdc_hdr[4];        /* header that arrived with the data */
++static UBYTE cdc_fail;          /* why the read did not finish */
++
++/* $21C8, then $21F2, then the control pair $2132 writes for the mode we
++ * want. CDCSTART reaches $2132 only when the two mode bits in its flag
++ * byte are clear, which is the case its own entry point sets up: 2048
++ * data bytes, four-byte header, no ECC. The $A0/$F8 pair on the way
++ * there is written too, because the BIOS writes it too and the order of
++ * control-register writes is not obviously free. */
++static void cdc_setup(void)
++{
++    *CDC_AR = 0x0F; *CDC_DATA = 0x00;                   /* RESET */
++    *CDC_AR = 0x01; *CDC_DATA = 0x3A;                   /* IFCTRL */
++    *CDC_AR = 0x08; *CDC_DATA = 0x00; *CDC_DATA = 0x00; /* WA = 0 */
++    *CDC_AR = 0x0C; *CDC_DATA = 0x00; *CDC_DATA = 0x00; /* PT = 0 */
++
++    GA_INTMASK |= 0x20;         /* level 5, once per sector decoded */
++
++    *CDC_AR = 0x0A; *CDC_DATA = 0xA0; *CDC_DATA = 0xF8; /* CTRL0, CTRL1 */
++    *CDC_AR = 0x0A; *CDC_DATA = 0xA7; *CDC_DATA = 0xF0;
++}
++
++/* CDCSTOP, $1FB6: mask level 5, write IFCTRL twice, and finish by
++ * reading the gate array's mode byte and writing it straight back. */
++static void cdc_stop(void)
++{
++    UBYTE m;
++
++    GA_INTMASK &= (UBYTE)~0x20;
++    *CDC_AR = 0x01; *CDC_DATA = 0x38;
++    *CDC_AR = 0x01; *CDC_DATA = 0x3A;
++    m = *CDC_MODE_RD;
++    *CDC_MODE = m;
++}
++
++/* Level 5: a sector has been decoded. Short on purpose -- level 4 is the
++ * drive's exchange window and cannot afford to wait behind this.
++ *
++ * The reads are the BIOS's $1F0A, in its order: IFSTAT, then HEAD0-3 and
++ * PT, then STAT0-3. We look at the header and the pointer and nothing
++ * else, but the four status registers are read anyway because the BIOS
++ * reads them every time and reading status is how this family of
++ * decoders drops its interrupt request. Copied rather than derived, and
++ * flagged as such: if level 5 ever storms, this is the line to doubt. */
++void segacd_int_5_c(void)
++{
++    UBYTE h0, h1, h2, h3, ptl, pth;
++
++    cdc_ints++;
++
++    *CDC_AR = 0x01;
++    cdc_stat4[0] = *CDC_DATA_RD;        /* IFSTAT, into a slot we reuse
++                                         * below -- read for its effect */
++
++    *CDC_AR = 0x04;
++    h0  = *CDC_DATA_RD;                 /* HEAD0: minute */
++    h1  = *CDC_DATA_RD;                 /* HEAD1: second */
++    h2  = *CDC_DATA_RD;                 /* HEAD2: frame */
++    h3  = *CDC_DATA_RD;                 /* HEAD3: mode */
++    ptl = *CDC_DATA_RD;                 /* PTL */
++    pth = *CDC_DATA_RD;                 /* PTH */
++
++    *CDC_AR = 0x0C;
++    cdc_stat4[0] = *CDC_DATA_RD;
++    cdc_stat4[1] = *CDC_DATA_RD;
++    cdc_stat4[2] = *CDC_DATA_RD;
++    cdc_stat4[3] = *CDC_DATA_RD;
++
++    cdc_head[0] = h0; cdc_head[1] = h1;
++    cdc_head[2] = h2; cdc_head[3] = h3;
++
++    /* Latch the first one whose header is the sector we asked for. The
++     * pointer has to be latched with it: by the time the foreground gets
++     * round to the transfer, PT has moved on to later sectors. */
++    if (!cdc_hit && h0 == cdc_want[0] && h1 == cdc_want[1]
++                 && h2 == cdc_want[2]) {
++        cdc_pt = (UWORD)(((UWORD)pth << 8) | ptl);
++        cdc_hit = 1;
++    }
++}
++
++/* CDCREAD, CDCTRN and CDCACK in one: program the byte count and the
++ * buffer address, pull the trigger, read the sector out through the host
++ * data register, acknowledge. $1D52, $1E08, $1EB4.
++ *
++ * Interrupts stay enabled throughout, as they do in CDCTRN. What does
++ * get held off is the Genesis: the servant halts this CPU to read the
++ * screen out of PRG-RAM, and a halt in the middle of a transfer the gate
++ * array is clocking is the same hazard that cost the CDD a dozen discs.
++ * Bit 3 of $FF8022 is the interlock the servant already honours. */
++static BOOL cdc_grab(void)
++{
++    const UWORD count = CDC_XFER_BYTES - 1;
++    UWORD n;
++    BOOL ok = FALSE;
++
++    *(volatile UWORD *)0xFF8022 |= 0x0008;
++
++    *CDC_MODE = CDC_DEST_SUB;
++
++    *CDC_AR = 0x02;
++    *CDC_DATA = (UBYTE)(count & 0xFF);          /* DBCL */
++    *CDC_DATA = (UBYTE)(count >> 8);            /* DBCH */
++    *CDC_DATA = (UBYTE)(cdc_pt & 0xFF);         /* DACL */
++    *CDC_DATA = (UBYTE)(cdc_pt >> 8);           /* DACH */
++    *CDC_DATA = 0x00;                           /* DTTRG: go */
++
++    for (n = 0; n < 2048; n++)                  /* CDCTRN's own bound */
++        if (*CDC_MODE_RD & CDC_DSR)
++            break;
++
++    if (n < 2048) {
++        segacd_cdc_read((UWORD *)cdc_hdr, (UWORD *)CDSECT,
++                        CDC_DATA_BYTES / 16 - 1);
++
++        for (n = 0; n < 2048; n++)
++            if (*CDC_MODE_RD & CDC_EDT)
++                break;
++        if (n < 2048)
++            ok = TRUE;
++        else
++            cdc_fail = 2;                       /* no end of transfer */
++    } else {
++        cdc_fail = 1;                           /* never became ready */
++    }
++
++    *CDC_AR = 0x07; *CDC_DATA = 0x00;           /* DTACK */
++
++    *(volatile UWORD *)0xFF8022 &= (UWORD)~0x0008;
++    return ok;
++}
++
++/******************************************************************************/
++/* Reading one sector: the drive and the decoder together                     */
++/******************************************************************************/
++
++#define CDR_IDLE     0
++#define CDR_COMMAND  1          /* asking the drive to start reading */
++#define CDR_STREAM   2          /* it is; waiting for our sector */
++#define CDR_DONE     3
++#define CDR_FAILED   4
++
++#define CDR_PARKED   5          /* nothing left to read */
++
++/* Stage 3 reads two sectors, and the second one is the point. Sector 16
++ * of an ISO 9660 filesystem is the primary volume descriptor: it begins
++ * 01 "CD001", so a capture can be recognised without reference to
++ * anything. But a recognisable sector at a low address is also the
++ * likeliest thing to be lying around already, and "we read the disc" is
++ * a claim that has to survive that objection. So the second is far away
++ * and arbitrary -- over a thousand sectors on, well past anything the
++ * boot loader touched, and reached by a real seek. */
++#define CDR_SLOTS 2
++static const ULONG cdr_lbas[CDR_SLOTS] = { 16UL, 1225UL };
++
++static UBYTE cdr_state;
++static UBYTE cdr_tried;
++static UBYTE cdr_seen;          /* cdc_ints as of the last frame */
++static UWORD cdr_wait;
++static UWORD cdr_boot;
++static UWORD cdr_hold;          /* frames spent sitting on a finished read */
++static UBYTE cdr_slot;          /* which of the two is being read */
++static UBYTE cdr_pub = 0xFF;    /* which one is in the buffer right now */
++static ULONG cdr_sum[CDR_SLOTS];
++
++static UBYTE tobcd(UWORD v)
++{
++    return (UBYTE)(((v / 10) << 4) | (v % 10));
++}
++
++/* Frames are numbered from two seconds before sector zero, 75 to the
++ * second and 60 seconds to the minute, and the drive is addressed in
++ * BCD. $846 in the BIOS. */
++static void lba_to_msf(ULONG lba, UBYTE *msf)
++{
++    ULONG f = lba + 150;
++
++    msf[0] = tobcd((UWORD)(f / 4500));
++    msf[1] = tobcd((UWORD)((f / 75) % 60));
++    msf[2] = tobcd((UWORD)(f % 75));
++}
++
++/* CDD command 3, sub-command 0, position in nibbles 2 through 7: the one
++ * that puts the drive into data-read mode. Everything about that
++ * sentence was recovered from $F70 and $1098; none of it was guessed,
++ * and docs/cdd-bios-notes.md shows the working. */
++static void cdd_ask_read(const UBYTE *msf)
++{
++    int i;
++
++    for (i = 0; i < 9; i++)
++        cdd_next[i] = 0;
++    cdd_next[0] = 0x03;
++    cdd_next[2] = (UBYTE)(msf[0] >> 4);
++    cdd_next[3] = (UBYTE)(msf[0] & 0x0F);
++    cdd_next[4] = (UBYTE)(msf[1] >> 4);
++    cdd_next[5] = (UBYTE)(msf[1] & 0x0F);
++    cdd_next[6] = (UBYTE)(msf[2] >> 4);
++    cdd_next[7] = (UBYTE)(msf[2] & 0x0F);
++    cdd_want = 0xFF;            /* nothing to be echoed back at us */
++    cdd_answered = 0;
++    cdd_handover = 1;           /* last: the interrupt reads this */
++}
++
++/* All nine nibbles zero. The drive is being asked for its status and
++ * nothing else, which is what the BIOS sends between commands ($1A88)
++ * and the safest packet there is -- and something has to be sent, since
++ * going silent is what ended the conversation in stage 2. */
++static void cdd_ask_idle(void)
++{
++    int i;
++
++    for (i = 0; i < 9; i++)
++        cdd_next[i] = 0;
++    cdd_want = 0xFF;
++    cdd_answered = 0;
++    cdd_handover = 1;
++}
++
++static void cdr_start(ULONG lba)
++{
++    UBYTE start[3];
++
++    /* Ask the drive to start two frames early and keep the sector whose
++     * header matches. That is not caution, it is what the BIOS does:
++     * ROMREAD converts LBA + 148 for the drive and then compares each
++     * arriving header against the frame number of LBA + 150. */
++    lba_to_msf(lba, cdc_want);
++    lba_to_msf(lba >= 2 ? lba - 2 : 0, start);
++
++    cdc_hit = 0;
++    cdc_fail = 0;
++    cdc_ints = 0;
++    cdr_seen = 0;
++    cdr_wait = 0;
++
++    cdc_setup();
++    cdd_ask_read(start);
++    cdr_state = CDR_COMMAND;
++}
++
++/* Where the servant looks for all of this. All eight sub->main comm
++ * registers are spoken for -- screen base, the interlock and two
++ * heartbeats, two for the backup-RAM cart, two for the CDD, two for the
++ * block layer -- and a disc read needs more than the three spare bits
++ * left among them. So the report goes in PRG-RAM, sixteen bytes below
++ * the captured sector, and the servant fetches it through the same bank
++ * window it already uses. One spare bit of $FF8028 says whether there is
++ * anything to fetch, so it only pays for the bank switch when there is.
++ *
++ * The sequence number is not decoration: it is the difference between a
++ * report that is stale and a report that has stopped, which is a
++ * distinction this port has already paid for twice. */
++#define CDREPORT    ((volatile UWORD *)0x7F7E0)
++#define CDREPORT_MAGIC 0xCDC0
++
++static UWORD cdr_seq;
++
++static void cdr_report(void)
++{
++    UBYTE k;
++
++    CDREPORT[0] = CDREPORT_MAGIC;
++    CDREPORT[1] = (UWORD)(((UWORD)(cdr_state & 0x0F) << 12)
++                        | ((UWORD)cdc_ints << 4)
++                        |  (UWORD)(cdc_fail & 0x0F));
++    CDREPORT[2] = (UWORD)(((UWORD)cdc_head[0] << 8) | cdc_head[1]);
++    CDREPORT[3] = (UWORD)(((UWORD)cdc_head[2] << 8) | cdc_head[3]);
++    CDREPORT[4] = cdc_pt;
++    CDREPORT[5] = ++cdr_seq;
++    CDREPORT[6] = cdr_pub;      /* which sector the buffer holds */
++    CDREPORT[7] = (UWORD)(((UWORD)cdc_want[0] << 8) | cdc_want[2]);
++    for (k = 0; k < CDR_SLOTS; k++) {
++        CDREPORT[8 + 2 * k] = (UWORD)(cdr_sum[k] >> 16);
++        CDREPORT[9 + 2 * k] = (UWORD)cdr_sum[k];
++        CDREPORT[12 + 2 * k] = (UWORD)(cdr_lbas[k] >> 16);
++        CDREPORT[13 + 2 * k] = (UWORD)cdr_lbas[k];
++    }
++}
++
++/* Once per frame while a read is outstanding. Ten seconds is generous
++ * for either step; a drive that has to spin up and seek takes a couple. */
++#define CDR_TIMEOUT 600
++
++static void cdr_step(void)
++{
++    switch (cdr_state) {
++    case CDR_COMMAND:
++        /* The read command repeats on every exchange -- level 4 resends
++         * whatever is queued -- until the decoder starts producing
++         * sectors, which is the drive saying it is reading. Then stop
++         * commanding and let it run. The BIOS does the same, down to
++         * falling back to the all-zero status packet. */
++        if (cdc_ints != cdr_seen) {
++            cdr_seen = cdc_ints;
++            cdd_ask_idle();
++            cdr_wait = 0;
++            cdr_state = CDR_STREAM;
++        } else if (++cdr_wait > CDR_TIMEOUT) {
++            cdc_stop();
++            cdc_fail = 3;               /* the drive never started */
++            cdr_state = CDR_FAILED;
++        }
++        break;
++
++    case CDR_STREAM:
++        if (cdc_hit) {
++            BOOL ok = cdc_grab();
++
++            cdc_stop();
++            if (ok) {
++                /* Multiply-and-add, with a multiplier the compiler can
++                 * turn into shifts: this runs in the VBL, and a 68000
++                 * without a 32x32 multiply would spend most of a frame
++                 * in libgcc doing it the honest way. */
++                ULONG h = 0;
++                UWORD i;
++
++                for (i = 0; i < CDC_DATA_BYTES; i++)
++                    h = (h << 5) - h + CDSECT[i];
++                cdr_sum[cdr_slot] = h;
++                cdr_pub = cdr_slot;
++                cdr_state = CDR_DONE;
++            } else {
++                cdr_state = CDR_FAILED;
++            }
++            cdr_hold = 0;
++        } else if (++cdr_wait > CDR_TIMEOUT) {
++            cdc_stop();
++            cdc_fail = 4;               /* our sector never came round */
++            cdr_state = CDR_FAILED;
++            cdr_hold = 0;
++        }
++        break;
++
++    case CDR_DONE:
++    case CDR_FAILED:
++        /* Sit on the result for two seconds before touching the buffer
++         * again. The servant fetches four times a second, so that is
++         * eight chances to copy this sector out before the next read
++         * overwrites it -- and the alternative, an acknowledgement
++         * coming back the other way, would need a comm register there
++         * is not one of. A failed slot is held just as long, so that
++         * its report is seen too. */
++        if (++cdr_hold > 120) {
++            if (cdr_slot + 1 < CDR_SLOTS) {
++                cdr_slot++;
++                cdr_start(cdr_lbas[cdr_slot]);
++            } else {
++                cdr_state = CDR_PARKED;
++            }
++        }
++        break;
++    }
++}
++
+ /******************************************************************************/
+ /* Sound: RF5C164 PCM                                                         */
+ /******************************************************************************/
+@@ -677,12 +1084,32 @@ void segacd_int_2_c(void)
+ 
+     /* Only queue the question here; the interrupt asks it. Twice a
+      * second is often enough to watch the reply follow the request and
+-     * rare enough that a wrong guess is not hammering the drive. */
+-    if (cdd_cmd_on && ++cdd_tick >= 32) {
++     * rare enough that a wrong guess is not hammering the drive.
++     *
++     * Suspended while a sector read is outstanding: the drive gets one
++     * command at a time, and rotating a status query into the middle of
++     * a read would end it. */
++    if (cdd_cmd_on && cdr_state != CDR_COMMAND && cdr_state != CDR_STREAM
++            && ++cdd_tick >= 32) {
+         cdd_tick = 0;
+         cdd_ask_next();
+     }
+ 
++    /* Stage 3: read one known sector off the disc and prove it, once.
++     * Held back until the CDD round trip has been demonstrated, because
++     * a read command sent down a link that is not working proves
++     * nothing and is the harder failure to read afterwards. The frame
++     * count is a fallback for the case where the round-trip test never
++     * concludes -- ten seconds in, try anyway and let the result say
++     * what happened. */
++    if (cdd_cmd_on && !cdr_tried && cdr_state == CDR_IDLE
++            && (cdd_ok || ++cdr_boot > 600)) {
++        cdr_tried = 1;
++        cdr_slot = 0;
++        cdr_start(cdr_lbas[0]);
++    }
++    cdr_step();
++
+     /* Let the storm detector know a VBL got through. */
+     cdd_burst = 0;
+ 
+@@ -751,7 +1178,8 @@ void segacd_int_2_c(void)
+     *(volatile UWORD *)0xFF8028 = (UWORD)(((UWORD)cdd_stat[1] << 12)
+         | ((UWORD)cdd_want_ck << 8)
+         | ((UWORD)cdd_got_ck << 4)
+-        |  (UWORD)(cdd_ok ? 1 : 0));
++        |  (UWORD)(cdd_ok ? 1 : 0)
++        |  (UWORD)((cdr_state != CDR_IDLE) ? 2 : 0));
+ 
+     /* Sound telemetry, packed into the spare bits of the drive status
+      * word: no comm register is free, and this answers the only
+@@ -773,6 +1201,8 @@ void segacd_int_2_c(void)
+         | ((UWORD)((cdd_stalled ? cdd_wakes : cdd_sent) & 0x07) << 12)
+         | (cdd_stalled ? 0x8000 : 0));
+ 
++    cdr_report();
++
+     if (pcm_countdown) {                /* silence the bell when it is due */
+         if (--pcm_countdown == 0)
+             pcm_reg(PCM_ONOFF, 0xFF);
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 83285f5..f549cad 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -46,10 +46,13 @@ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+ void segacd_int_2(void);        /* INT2: VBL, raised by the main CPU */
+ void segacd_int_3(void);        /* INT3: gate array timer, 200 Hz */
+ void segacd_int_4(void);        /* INT4: CDD status packet, 75 Hz */
++void segacd_int_5(void);        /* INT5: CDC decoded a sector, 75 Hz */
+ void segacd_int_2_c(void);
+ void segacd_int_4_c(void);
++void segacd_int_5_c(void);
+ void segacd_cdd_fetch(UBYTE *dst);      /* ten status bytes, BIOS form */
+ void segacd_cdd_put(const UBYTE *src);  /* ten command bytes, BIOS form */
++void segacd_cdc_read(UWORD *hdr, UWORD *data, LONG groups);
+ void segacd_call_5ms(void);
+ 
+ #endif /* MACHINE_SEGACD */
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index f32f59a..98b0a7c 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -13,6 +13,7 @@
+ 
+         .extern _segacd_int_2_c
+         .extern _segacd_int_4_c
++        .extern _segacd_int_5_c
+         .extern _vector_5ms
+ 
+ /******************************************************************************/
+@@ -76,6 +77,56 @@ _segacd_cdd_put:
+         move.w  (a0)+,(a1)+
+         rts
+ 
++// Level 5: the CDC has finished decoding a sector, 75 Hz while the drive
++// is reading. No SR write: the 68000 has already masked to level 5 on
++// entry, and the BIOS's own handler at $064C does not raise it either --
++// which matters, because this must not lock out level 6 or 7.
++        .globl  _segacd_int_5
++_segacd_int_5:
++        movem.l d0-d1/a0-a1,-(sp)
++        jbsr    _segacd_int_5_c         // Delegate to C implementation
++        movem.l (sp)+,d0-d1/a0-a1
++        rte
++
++// The bulk sector read, as instructions, for the same reason the CDD
++// transfers above are: this is CDCTRN's inner loop ($1DE2 and $1E2A) and
++// the pacing is part of it. Sega puts a nop between every read of the
++// host data register and unrolls by eight, and neither is decoration --
++// the gate array is refilling a FIFO from buffer RAM between them.
++//
++// void segacd_cdc_read(UWORD *hdr, UWORD *data, LONG groups)
++//   hdr   <- two words, the sector's M/S/F/mode header
++//   data  <- (groups+1) * 8 words
++        .globl  _segacd_cdc_read
++_segacd_cdc_read:
++        move.l  4(sp),a1                // header destination
++        move.l  8(sp),a0                // data destination
++        move.w  14(sp),d1               // low word of the long count
++        move.l  a2,-(sp)
++        lea     0xFF8008,a2
++        move.w  (a2),(a1)+
++        nop
++        move.w  (a2),(a1)+
++1:      move.w  (a2),(a0)+
++        nop
++        move.w  (a2),(a0)+
++        nop
++        move.w  (a2),(a0)+
++        nop
++        move.w  (a2),(a0)+
++        nop
++        move.w  (a2),(a0)+
++        nop
++        move.w  (a2),(a0)+
++        nop
++        move.w  (a2),(a0)+
++        nop
++        move.w  (a2),(a0)+
++        nop
++        dbra    d1,1b
++        move.l  (sp)+,a2
++        rts
++
+ // Level 3: gate array timer, 200 Hz system tick
+         .globl  _segacd_int_3
+ _segacd_int_3:

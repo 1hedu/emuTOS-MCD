@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 19 Aug 2026 07:26:31 +0000
+Subject: [PATCH 172/184] Sega CD: carry a Genesis-side payload across, and
+ hand the machine over
+
+EmuTOS is on the sub 68000 and there is no path from here to the VDP,
+the pads or the sound hardware. A program that wants the machine is
+Genesis code and runs on the servant, so all this side needs is a way
+to put it there and a way to say go: SCD_PAYLOAD_BLOCK carries five
+hundred and twelve bytes at a block index, SCD_PAYLOAD_RUN hands over.
+
+Both ride the cartridge request channel, which already has a bounce
+buffer, a sequence number and an acknowledgement the servant reads
+every frame -- op 4 and op 5 beside op 1 read, op 2 write and op 3 the
+cartridge swap. Nothing new was invented to move the bytes.
+
+The servant acknowledges the run before it jumps, deliberately: a
+payload owns the machine for as long as it likes, and a caller waiting
+on the echo could not otherwise tell that from a servant that had died.
+---
+ bios/scdapi.h |  9 ++++++++-
+ bios/segacd.c | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 38 insertions(+), 1 deletion(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 8da5b32..2dc6c5c 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  30
++#define SCD_VERSION  31
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -156,6 +156,13 @@ struct scd_snap {
+ #define SCD_REVIVE        8             /* another chance, and a clean mask */
+ #define SCD_EJECT         9             /* open the tray (drive cmd $D) */
+ #define SCD_RELOAD        10            /* close it and remount from zero */
++/* Genesis-side code off a disc. The sub CPU has no path to the VDP, the
++ * pads or the sound hardware, so anything that wants the machine runs on
++ * the servant; these two put it there. BLOCK carries 512 bytes at a
++ * block index (a = index, b = the bytes), RUN hands the machine over.
++ * See docs/payload.md for what the servant does with them. */
++#define SCD_PAYLOAD_BLOCK 12
++#define SCD_PAYLOAD_RUN   13
+ #define SCD_CARTSWAP      11            /* Mode 1: expect the cartridge to
+                                          * be pulled and another put in */
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 25fcf05..ca34571 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3777,6 +3777,7 @@ static void scd_snapshot(struct scd_snap *s)
+ }
+ 
+ void cart_swap_arm(void);       /* defined with cart_seq, further down */
++static ULONG scd_payload(LONG op, LONG a, LONG b);
+ 
+ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+ {
+@@ -3795,6 +3796,9 @@ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+          * op 3 beside op 1 read and op 2 write. */
+         cart_swap_arm();
+         break;
++    case SCD_PAYLOAD_BLOCK:
++    case SCD_PAYLOAD_RUN:
++        return scd_payload(op, a, b);
+     case SCD_EJECT:
+         cdd_cmd_on = 1;         /* our commander carries it, always */
+         cdd_ask_eject();
+@@ -4600,6 +4604,32 @@ static WORD cart_xfer(UWORD op, UWORD lba)
+     return EREADF;
+ }
+ 
++/* Genesis-side payloads.
++ *
++ * This side does nothing but carry bytes. The sub CPU cannot reach the
++ * VDP, the pads or the sound hardware, so a program that wants the
++ * machine is Genesis code and runs on the servant; all that is needed
++ * here is a way to put it there and a way to say go.
++ *
++ * Both ride the cartridge request channel, which is the one the servant
++ * already reads every frame and which already has a bounce buffer and
++ * an acknowledgement. Op 4 stages five hundred and twelve bytes at a
++ * block index, op 5 hands over. docs/payload.md is the contract.
++ *
++ * The servant acknowledges op 5 before it jumps, deliberately: a
++ * payload owns the machine for as long as it likes, and a caller
++ * waiting on the echo would otherwise be unable to tell that from a
++ * servant that had died. */
++static ULONG scd_payload(LONG op, LONG a, LONG b)
++{
++    if (op == SCD_PAYLOAD_BLOCK) {
++        if (!b) return EREADF;
++        memcpy((void *)BOUNCE, (const void *)b, SECTOR_SIZE);
++        return (ULONG)cart_xfer(4, (UWORD)a);
++    }
++    return (ULONG)cart_xfer(5, 0);
++}
++
+ /******************************************************************************/
+ /* C: -- the ramdisk, and D: -- the console's own backup RAM                  */
+ /******************************************************************************/

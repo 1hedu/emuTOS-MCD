@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 19:16:19 +0000
+Subject: [PATCH 054/184] segacd: bound a block read, so a failure is an error
+ and not a wait
+
+Three attempts of eight seconds, twice over, with eight sectors of
+read-ahead behind them, is minutes. On hardware it was: the desktop
+put up an hourglass and stayed there, alive but unable to answer, and
+came back with an alert long after anyone would have given up. A
+machine that looks dead is worse than one that says no.
+
+One budget now covers every attempt and every read-ahead of a single
+block read -- about six seconds, enough to wake a drive that has been
+sitting still. Past that the answer is a read failure, which GEMDOS
+turns into an alert the user can cancel. Read-ahead stops early when
+the budget is no longer comfortable: it exists to make the next read
+free, not to make this one late. Four sectors rather than eight, since
+each is a transfer that holds the bus against the Genesis.
+---
+ bios/segacd.c | 23 +++++++++++++++++++++--
+ 1 file changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 27e1394..646ec75 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -150,6 +150,7 @@ static ULONG cd_next;           /* the one the drive will deliver next */
+ static UBYTE cd_streaming;
+ static UWORD cd_errors;         /* reads that gave up */
+ static UBYTE cd_quiet;          /* the read command has been withdrawn */
++static LONG cd_budget;          /* spin left for the whole block read */
+ static volatile UBYTE cd_busy;  /* a foreground read owns the drive */
+ static UWORD cd_why;            /* nibble per attempt of the last
+                                  * failed fetch: 1 timed out, 2 the
+@@ -1207,7 +1208,20 @@ static BOOL cd_wait_hit(void)
+      * three deliberate probe seeks before anything reached the screen,
+      * and those are gone. A read that succeeds still costs only as long
+      * as it takes. */
+-    for (spin = 0; spin < 1600000UL; spin++) {
++    MAYBE_UNUSED(spin);
++
++    /* Spend from one budget shared by every attempt and every
++     * read-ahead of a single block read, rather than each having its
++     * own. Three attempts of eight seconds, twice over, with eight
++     * sectors of read-ahead behind them, is minutes -- and on hardware
++     * it was: the desktop put up an hourglass and stayed there, alive
++     * but unable to answer, which is worse than an error.
++     *
++     * Six seconds is enough to wake a drive that has been sitting
++     * still. Past that the honest answer is a read failure, which
++     * GEMDOS turns into an alert the user can cancel. */
++    while (cd_budget > 0) {
++        cd_budget--;
+         if (cdc_hit)
+             return TRUE;
+         if (cdc_ints) {
+@@ -1351,7 +1365,7 @@ static BOOL cd_fetch(ULONG lba)
+  * GEMDOS block and the next the head moves on and the stream is lost.
+  * Eight seeks is eight seconds when it works, and eight chances to
+  * fail when it does not: the window stayed shut. */
+-#define CD_CACHE_SECTORS 8
++#define CD_CACHE_SECTORS 4
+ 
+ static UBYTE cd_cache[CD_CACHE_SECTORS][CDC_DATA_BYTES];
+ 
+@@ -1376,6 +1390,10 @@ static BOOL cd_fill(ULONG lba)
+     for (i = 1; i < CD_CACHE_SECTORS; i++) {
+         if (lba + i >= CD_DDISK_LBA + (CD_DDISK_BLOCKS >> CD_BPS_SHIFT))
+             break;
++        /* Only while the budget is comfortable. Read-ahead exists to
++         * make the next read free, not to make this one late. */
++        if (cd_budget < 400000L)
++            break;
+         if (!cd_fetch(lba + i))
+             break;
+         memcpy(cd_cache[i], CDSECT, CDC_DATA_BYTES);
+@@ -1392,6 +1410,7 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+ 
+     cd_dtest |= 1;
+     if (lba < cd_cache_base || lba >= cd_cache_base + cd_cache_have) {
++        cd_budget = 1200000L;           /* about six seconds, all in */
+         /* Twice, because the evidence says so: a fill that has just
+          * failed three times over succeeds immediately when started
+          * again from scratch. The first read after the drive has been

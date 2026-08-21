@@ -1,0 +1,343 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 05:38:35 +0000
+Subject: [PATCH 032/184] segacd: the CDD handover, read out of the BIOS
+ instead of guessed at
+
+The user asked why I was guessing at what the BIOS does rather than
+reading it. The answer is that I should have been reading it.
+
+The sub-CPU CDBIOS is compressed inside the console's BIOS ROM, so
+there is nothing to disassemble there -- but the boot process
+decompresses it into PRG-RAM $0000-$5FFF, which is exactly the region
+the E-A1 audit payload already snapshots into work RAM for the test
+harness to dump. Sega's CDD routine falls straight out of it:
+
+    btst   #1,$FF8037     wait for DRS: the packet is ready
+    lea    $FF8038,a1     read ten status bytes
+    lea    $FF8042,a1     write ten command bytes
+    move.b #4,$FF8037     hand it over and re-arm
+
+The last write is what was missing. There is no trigger among the
+command registers -- four discs went looking for one -- because the
+exchange is handed over by writing the control register back to
+HOCK-only, clearing DTS and DRS. This driver never touched that
+register after boot, so the gate array waited for an acknowledgement
+that never came, no command was ever carried, and the drive reported
+its own status while answering "invalid" to questions it had never
+been asked.
+
+The wait was also backwards: DRS set means the packet has arrived, not
+that the bus is busy, so the previous code declined to send in exactly
+the window the BIOS sends in.
+
+The six-strategy search goes with it, since there is now one known
+sequence, but its judge stays: a round trip counts only when the drive
+names the sub-command it was asked for, twice, for two different
+sub-commands.
+---
+ bios/segacd.c | 223 +++++++++++++++++++-------------------------------
+ 1 file changed, 82 insertions(+), 141 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 14c15d4..3f2aee2 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -108,7 +108,7 @@ const UBYTE *segacd_physbase(void)
+  * reads as a strobe rather than a level, so it goes down again after
+  * every command rather than once at boot. Setting it while it is
+  * already set costs nothing if it turns out to be a level. */
+-#define CDD_CTRL    ((volatile UWORD *)0xFF8036)
++#define CDD_CTRL_B  ((volatile UBYTE *)0xFF8037)
+ #define CDD_CTRL_RD ((const volatile UBYTE *)0xFF8037)
+ #define CDD_STATUS  ((const volatile UBYTE *)0xFF8038)
+ #define CDD_CMD     ((volatile UBYTE *)0xFF8042)
+@@ -122,8 +122,6 @@ const UBYTE *segacd_physbase(void)
+  * about the disc, selected by nibble 3; sub-command 0 is "where is the
+  * head now", which touches nothing and is therefore the safe way to
+  * prove a command round-trip on real hardware. */
+-#define CDD_NSTRAT  6
+-#define CDD_NOWIN   0x0F        /* nothing has worked yet */
+ 
+ #define CDD_CMD_STAT    0x00
+ #define CDD_CMD_INFO    0x02
+@@ -146,11 +144,8 @@ static UBYTE cdd_probe;         /* which question we are asking */
+ static UBYTE subvbl;            /* the sub CPU's own heartbeat */
+ static UBYTE cdd_ctrl;          /* DTS/DRS as last sampled */
+ static UBYTE cdd_ctrl_ever;     /* DTS/DRS ever seen set at all */
+-static UBYTE cdd_blocked;       /* interrupts spent waiting for DTS/DRS */
+-static UBYTE cdd_strat;         /* which way of sending we are trying */
+-static UBYTE cdd_won = CDD_NOWIN;   /* the one the drive answered */
+-static UBYTE cdd_tries;         /* attempts spent on this strategy */
+-static UBYTE cdd_hits;          /* answers it has earned */
++static UBYTE cdd_hits;          /* answers earned so far */
++static UBYTE cdd_ok;            /* the round trip is proven */
+ static UBYTE cdd_hitsub = 0xFF; /* which question the last answer named */
+ static UBYTE cdd_want;          /* the sub-command last asked for */
+ static UBYTE cdd_answered;      /* the reply named it */
+@@ -186,96 +181,55 @@ void segacd_cdd_init(void)
+      * must not arrive before there is something to catch it. */
+     VEC_LEVEL4 = segacd_int_4;
+     GA_INTMASK |= 0x10;
+-    *CDD_CTRL = CDD_HOCK;       /* start the 75 Hz status reports */
++    *CDD_CTRL_B = 0;            /* as the BIOS does: clear, then enable */
++    *CDD_CTRL_B = CDD_HOCK;     /* start the 75 Hz status reports */
+ }
+ 
+-/* Six candidate ways to hand a command to the drive.
++/* This is no longer a guess. The sub-CPU CDBIOS is compressed inside
++ * the console's BIOS ROM, but the boot process decompresses it into
++ * PRG-RAM $0000-$5FFF -- exactly the region the audit payload already
++ * snapshots -- so Sega's own CDD routine can simply be read. It does
++ * three things per exchange, and we were doing one of them:
+  *
+- * Every disc so far tested one guess of mine, and every one of them was
+- * wrong, which is a poor use of somebody else's CD-Rs. So the guessing
+- * moves into the firmware: it tries each of these in turn and keeps
+- * whichever one the drive demonstrably answers. Six wrong guesses then
+- * cost one disc instead of six -- and six failures would be worth as
+- * much as any success, because that eliminates the whole idea that the
+- * trigger is a write being done in the wrong order or the wrong width.
++ *     btst  #1,$FF8037     wait for DRS: the status packet is ready
++ *     dbeq  d0,...         (bounded, and it gives up)
++ *     lea   $FF8038,a1     read ten status bytes
++ *     move.l (a1)+,(a0)+   as long, long, word
++ *     lea   $FF8042,a1     write ten command bytes, same shape
++ *     move.b #4,$FF8037    <- hand it over and re-arm the link
+  *
+- * They differ in two things: whether the ten nibbles go down as five
+- * words or ten bytes, and what is done to HOCK afterwards. HOCK is
+- * documented as "starts communication with the CDD", which reads as a
+- * strobe -- and a strobe needs an edge, which writing an already-set
+- * bit does not produce. Taking it low also writes 0 to DTS and DRS,
+- * documented as aborting a transfer, so it only happens when the
+- * caller has just checked that neither is running. */
+-static void cdd_load_words(const UBYTE *nib, UBYTE ck)
+-{
+-    volatile UWORD *w = (volatile UWORD *)0xFF8042;
+-
+-    w[0] = (UWORD)((nib[0] << 8) | nib[1]);
+-    w[1] = (UWORD)((nib[2] << 8) | nib[3]);
+-    w[2] = (UWORD)((nib[4] << 8) | nib[5]);
+-    w[3] = (UWORD)((nib[6] << 8) | nib[7]);
+-    w[4] = (UWORD)((nib[8] << 8) | ck);
+-}
+-
+-static void cdd_load_bytes(const UBYTE *nib, UBYTE ck)
+-{
+-    int i;
+-
+-    for (i = 0; i < 9; i++)
+-        CDD_CMD[i] = nib[i];
+-    CDD_CMD[9] = ck;            /* last, in case this write is the trigger */
+-}
+-
++ * That last write is the whole answer. Four discs went looking for a
++ * trigger among writes to the command registers, and there isn't one:
++ * the transfer is handed over by writing the control register back to
++ * HOCK-only, which clears DTS and DRS. We never wrote that register
++ * again after boot, so the gate array sat waiting for an acknowledge
++ * that never came -- and the drive, hearing no command, went on
++ * reporting its own status and answering "invalid" to questions it was
++ * never asked. Every symptom, exactly.
++ *
++ * The waiting was wrong too, and backwards: DRS set does not mean the
++ * bus is busy, it means the packet has arrived. The previous driver
++ * refused to send a command in precisely the moment the BIOS chooses
++ * to send one. */
+ static void cdd_command(const UBYTE *nib)       /* nine nibbles */
+ {
+-    UBYTE ck, sum = 0;
++    volatile ULONG *l = (volatile ULONG *)0xFF8042;
++    volatile UWORD *w = (volatile UWORD *)0xFF804A;
++    UBYTE sum = 0;
+     int i;
+ 
+     for (i = 0; i < 9; i++)
+         sum = (UBYTE)(sum + nib[i]);
+-    ck = (UBYTE)((~sum) & 0x0F);
+-
+-    switch (cdd_strat) {
+-    default:
+-    case 0:                             /* words; the last write is it */
+-        cdd_load_words(nib, ck);
+-        break;
+-    case 1:                             /* words, then set HOCK again */
+-        cdd_load_words(nib, ck);
+-        *CDD_CTRL = CDD_HOCK;
+-        break;
+-    case 2:                             /* words, then a real HOCK edge */
+-        cdd_load_words(nib, ck);
+-        *CDD_CTRL = 0;
+-        *CDD_CTRL = CDD_HOCK;
+-        break;
+-    case 3:                             /* loaded with the clock stopped */
+-        *CDD_CTRL = 0;
+-        cdd_load_words(nib, ck);
+-        *CDD_CTRL = CDD_HOCK;
+-        break;
+-    case 4:                             /* bytes; the last write is it */
+-        cdd_load_bytes(nib, ck);
+-        break;
+-    case 5:                             /* bytes, then a real HOCK edge */
+-        cdd_load_bytes(nib, ck);
+-        *CDD_CTRL = 0;
+-        *CDD_CTRL = CDD_HOCK;
+-        break;
+-    }
+ 
+-    /* Watch for the transfer actually starting, here rather than at the
+-     * top of the next interrupt: sampling it there samples before the
+-     * write that would set it, so "never observed" meant nothing. */
+-    {
+-        UWORD n;
+-        for (n = 0; n < 512; n++) {
+-            UBYTE c = *CDD_CTRL_RD;
+-            cdd_ctrl_ever |= (UBYTE)(c & (CDD_DTS | CDD_DRS));
+-            if (c & CDD_DTS)
+-                break;
+-        }
+-    }
++    /* Long, long, word -- the shape the BIOS uses. Each long is two
++     * bus cycles on a 68000, so this is five word writes in the same
++     * order; it is written this way to stay recognisably the same
++     * sequence as the code it was taken from. */
++    l[0] = ((ULONG)nib[0] << 24) | ((ULONG)nib[1] << 16)
++         | ((ULONG)nib[2] << 8)  |  (ULONG)nib[3];
++    l[1] = ((ULONG)nib[4] << 24) | ((ULONG)nib[5] << 16)
++         | ((ULONG)nib[6] << 8)  |  (ULONG)nib[7];
++    w[0] = (UWORD)((nib[8] << 8) | ((~sum) & 0x0F));
+ }
+ 
+ /* Ask the drive something, cycling through the questions.
+@@ -314,36 +268,21 @@ static void cdd_ask(UBYTE cmd, UBYTE sub)
+     cdd_pending = 1;
+ }
+ 
+-/* Until something is known to work, every command is an experiment.
+- *
+- * The drive decides, not me: a strategy counts as working only when the
+- * reply names the sub-command it was asked for, and only after it has
+- * done that for two *different* sub-commands -- one match could be a
+- * default value sitting in the register. Ask for the total disc length
+- * and then the current track, since 3 and 2 are values nothing would
+- * report by accident.
+- *
+- * Eight unanswered attempts and the next strategy gets its turn. If all
+- * six go round without a single answer, that is a real result and not a
+- * blank one: it rules out the trigger being a write we are performing
+- * in the wrong order or the wrong width, and points somewhere else
+- * entirely. */
+-static void cdd_search(void)
++/* Even with the sequence taken from the BIOS itself, "it should work"
++ * is not a reading. The drive is still the judge: a round trip counts
++ * only when the reply names the sub-command it was asked for, and only
++ * after doing so for two *different* sub-commands, since a single
++ * match could be a value already sitting in the register. Ask for the
++ * total disc length and then the current track -- 3 and 2 are not
++ * values anything would report by accident. */
++static void cdd_confirm(void)
+ {
+     static const UBYTE ask[2] = { 0x03, 0x02 };
+ 
+-    if (cdd_answered) {                 /* the reply named what we asked */
+-        if (cdd_hits < 2 && cdd_want != cdd_hitsub) {
+-            cdd_hitsub = cdd_want;
+-            if (++cdd_hits >= 2)
+-                cdd_won = cdd_strat;    /* twice, on two questions: keep it */
+-        }
+-    } else if (++cdd_tries >= 8) {      /* this one has had its chance */
+-        cdd_tries = 0;
+-        cdd_hits = 0;
+-        cdd_hitsub = 0xFF;
+-        if (++cdd_strat >= CDD_NSTRAT)
+-            cdd_strat = 0;
++    if (cdd_answered && cdd_want != cdd_hitsub) {
++        cdd_hitsub = cdd_want;
++        if (++cdd_hits >= 2)
++            cdd_ok = 1;
+     }
+ 
+     cdd_ask(CDD_CMD_INFO, ask[cdd_alt ^= 1]);
+@@ -351,8 +290,8 @@ static void cdd_search(void)
+ 
+ static void cdd_ask_next(void)
+ {
+-    if (cdd_won == CDD_NOWIN) {
+-        cdd_search();
++    if (!cdd_ok) {
++        cdd_confirm();
+         return;
+     }
+ 
+@@ -412,34 +351,36 @@ void segacd_int_4_c(void)
+     }
+ 
+     cdd_irqs++;
+-    cdd_poll();
+ 
+-    /* Whether the gate array is actually carrying anything, latched as
+-     * well as sampled: these two bits are the difference between "we
+-     * wrote the command registers" and "the drive was sent a command",
+-     * and assuming the first meant the second is what left every reply
+-     * reading `invalid`. If DTS is never once seen set, nothing we
+-     * write is reaching the drive, whatever the registers say. */
+-    ctrl = *CDD_CTRL_RD;
++    /* Wait for the packet rather than assuming the interrupt means it
++     * has fully landed: the gate array raises level 4 before the last
++     * nibbles are in. Bounded, because a drive that stops talking must
++     * not take the machine with it. */
++    {
++        UWORD n;
++        for (n = 0; n < 512; n++) {
++            ctrl = *CDD_CTRL_RD;
++            cdd_ctrl_ever |= (UBYTE)(ctrl & (CDD_DTS | CDD_DRS));
++            if (ctrl & CDD_DRS)
++                break;
++        }
++    }
+     cdd_ctrl = (UBYTE)(ctrl & (CDD_DTS | CDD_DRS));
+-    cdd_ctrl_ever |= cdd_ctrl;
+-
+-    /* Hold off while the gate array is mid-transfer, but not for ever:
+-     * these bits read as a constant zero under both emulators, so if
+-     * silicon holds one high the wait would be silent and permanent,
+-     * and a test disc would come back with nothing sent and no reason
+-     * given. Eight refusals and it goes anyway -- the latch above
+-     * still records what the bits were doing. */
++
++    cdd_poll();
++
+     if (cdd_pending) {
+-        if (!(ctrl & (CDD_DTS | CDD_DRS)) || ++cdd_blocked >= 8) {
+-            cdd_blocked = 0;
+-            cdd_pending = 0;
+-            cdd_command(cdd_queued);
+-            if (cdd_sent < 0xFF)
+-                cdd_sent++;
+-        }
++        cdd_pending = 0;
++        cdd_command(cdd_queued);
++        if (cdd_sent < 0xFF)
++            cdd_sent++;
+     }
+ 
++    /* Hand the exchange over: HOCK stays set, DTS and DRS go to zero.
++     * This is the step the driver was missing entirely. */
++    *CDD_CTRL_B = CDD_HOCK;
++    cdd_ctrl_ever |= (UBYTE)(*CDD_CTRL_RD & (CDD_DTS | CDD_DRS));
++
+     /* A boolean cannot tell a dead link from a flaky one. Count how
+      * many of the last sixteen packets checksummed and report that:
+      * F is a clean link, 0 is nothing, anything between is a race. */
+@@ -684,8 +625,8 @@ void segacd_int_2_c(void)
+      * the high two. Minutes lost its place to that, and deserved to. */
+     *(volatile UWORD *)0xFF8028 = (UWORD)(((UWORD)cdd_stat[0] << 12)
+         | ((UWORD)cdd_stat[1] << 8)
+-        | ((UWORD)(cdd_strat & 0x0F) << 4)
+-        |  (UWORD)(cdd_won & 0x0F));
++        | ((UWORD)cdd_stat[8] << 4)
++        |  (UWORD)(cdd_ok ? 1 : 0));
+ 
+     /* Sound telemetry, packed into the spare bits of the drive status
+      * word: no comm register is free, and this answers the only

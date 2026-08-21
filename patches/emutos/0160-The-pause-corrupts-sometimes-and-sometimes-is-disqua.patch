@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 21:34:37 +0000
+Subject: [PATCH 160/184] The pause corrupts sometimes, and sometimes is
+ disqualifying
+
+v24 read cleanly on the console. v28 -- the same driver bytes -- listed
+21 garbage directory entries on the same console, and the headless runs
+had already shown that face. A configuration that passes one run and
+fails the next was never a high-water mark; it was a coin flip that
+landed well once, and reverting it on the emulator's evidence was the
+right instinct executed with the wrong justification.
+
+Mechanism, best supported: the firmware's command queue is one slot at
+$5AF2. CDBPAUSE drains through it over several exchanges; the next
+visit's ROMREADN posts into the same slot, and whether it lands on a
+completed pause or clobbers a draining one depends on timing nobody
+controls. Clean and garbage, from the same bytes.
+
+So the pause is out and the always-playing state is in -- light on,
+data right every time, the configuration both worlds have never once
+shown corrupt. The light returns behind a completion-verified pause,
+alone in its own build, when the baseline is settled.
+---
+ bios/scdapi.h  |  2 +-
+ bios/segacd2.S | 33 +++++++++++----------------------
+ 2 files changed, 12 insertions(+), 23 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 559db4b..2d11ee4 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  28
++#define SCD_VERSION  29
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 348d450..66402d4 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -780,29 +780,18 @@ brd_fail_read:
+         // interrupt frame thrown away. Either way a5 and the scratch
+         // stack are the only things it may assume, which is why the
+         // stack it has to go back to lives at 44(a5) and not in a6.
+-        // v24's pause, restored on the console owner's evidence.
+-        //
+-        // v24 on hardware: D: opened in one shot, files read correctly,
+-        // and the access light went out after reads -- their words,
+-        // "probably the best state yet". v25 removed the pause because
+-        // a HEADLESS gpgx run showed FAT corruption after it -- but
+-        // gpgx does not model the drive's pause hover (its own sync
+-        // and latency gaps are documented all over this port), and no
+-        // corruption was ever seen on hardware with v24. Reverting a
+-        // hardware-confirmed state on emulator-only evidence was the
+-        // wrong call, made worse by two more stacked changes on top.
+-        // The hardware is the ground truth; the emulator's pause
+-        // artifact is noted and gets to be wrong.
++        // No pause, and this time the evidence is complete. The pause
++        // corrupts SOMETIMES: v24 on the console read cleanly, v28 --
++        // the same driver bytes -- listed 21 garbage directory entries,
++        // and the headless runs showed the same garbage face. A state
++        // that passes one run and fails the next is a dice roll, and
++        // the mechanism fits the single-slot command queue at $5AF2:
++        // ROMREADN posted while the pause is still draining through
++        // that same slot clobbers it. The access light staying on is
++        // the cost of data that is right every time; the light comes
++        // back only behind a pause whose completion is verified, as
++        // its own change, alone in its own build.
+ brd_park:
+-        move.w  #0x0084,d0              // CDBPAUSE
+-        move.w  d0,50(a5)
+-        jsr     0x5F22
+-        move.l  _segacd_bios_frames,d2
+-        addq.l  #6,d2                   // ~0.1 s of exchanges
+-        move.l  #0x60000,d3             // ...bounded by spin regardless
+-1:      subq.l  #1,d3
+-        beq     brd_done
+-        cmp.l   _segacd_bios_frames,d2
+         bhi     1b
+ brd_done:
+         ori.w   #0x0700,sr              // shut the door before swapping back

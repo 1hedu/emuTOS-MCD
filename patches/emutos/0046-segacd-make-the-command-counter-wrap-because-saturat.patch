@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 09:42:06 +0000
+Subject: [PATCH 046/184] segacd: make the command counter wrap, because
+ saturated is not alive
+
+It saturated at 255 and was displayed masked to three bits. 255 masked
+to three bits is 7, so about three seconds after boot the counter
+parked on 7 and stayed there -- and I read that constant as proof the
+interrupt was still running, for several builds after it had stopped.
+
+A liveness counter that stops counting is not a liveness counter.
+---
+ bios/segacd.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 0d66577..66b9213 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -144,7 +144,12 @@ static UBYTE cdd_next[9];       /* built by the VBL, taken by level 4 */
+ static ULONG cdd_outbuf[3];     /* aligned: the write below is long-wide */
+ #define cdd_out ((UBYTE *)cdd_outbuf)
+ static UBYTE cdd_handover;
+-static UBYTE cdd_sent;          /* commands actually handed to the drive */
++static UBYTE cdd_sent;          /* commands handed to the drive. Wraps, and
++                                 * must: it used to saturate at 255, and 255
++                                 * masked to three bits is a constant 7 -- so
++                                 * the counter parked after three seconds and
++                                 * was read as proof of life for several
++                                 * builds after the interrupt had stopped */
+ static UBYTE cdd_irqs;          /* level-4 arrivals, for the watchdog */
+ static UBYTE cdd_seen;          /* last count the watchdog looked at */
+ static UBYTE cdd_quiet;         /* VBLs since the interrupt last fired */

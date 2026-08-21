@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 07:31:35 +0000
+Subject: [PATCH 035/184] segacd: hold a CDD command up until it is taken
+
+The BIOS loads a retry count of 75 and re-sends the identical command
+packet on every exchange until the drive answers it, giving up only
+when the count runs out. Every attempt here has fired a command once
+and moved on.
+
+    $1B42  move.b #75,$583D     one second of exchanges
+    $19F0  subq.b #1,$583D      spend one per exchange
+           bcc    $198A         still some left: send it again
+           bset   #0,$583B      exhausted: error
+
+Both emulators accept a single shot, which is why six discs looked
+correct and did nothing on silicon. A command is not a message posted
+once; it is a request held up until it is taken.
+
+Nothing goes out when no question is outstanding. The BIOS does send an
+idle NOP on every exchange, but the build that copied that was also the
+one whose packets stopped checksumming on hardware, so it stays out
+until the retry behaviour is proven.
+---
+ bios/segacd.c | 41 ++++++++++++++++++++++-------------------
+ 1 file changed, 22 insertions(+), 19 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 4d0ee65..669baa0 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -132,7 +132,7 @@ static UBYTE cdd_score;         /* valid packets in the last 16, latched */
+ static UBYTE cdd_count, cdd_good;
+ static UBYTE cdd_tick;
+ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
+-static UBYTE cdd_pending;       /* a command is queued for the next INT4 */
++static UBYTE cdd_repeat;        /* exchanges left to keep asking for */
+ static UBYTE cdd_queued[9];
+ static UBYTE cdd_sent;          /* commands actually handed to the drive */
+ static UBYTE cdd_irqs;          /* level-4 arrivals, for the watchdog */
+@@ -262,7 +262,7 @@ static void cdd_ask(UBYTE cmd, UBYTE sub)
+     cdd_queued[3] = sub;
+     cdd_want = sub;
+     cdd_answered = 0;
+-    cdd_pending = 1;
++    cdd_repeat = 75;    /* the BIOS's retry budget: one second */
+ }
+ 
+ /* Even with the sequence taken from the BIOS itself, "it should work"
+@@ -382,23 +382,26 @@ void segacd_int_4_c(void)
+     if (*CDD_CTRL_RD & CDD_DTS)
+         *CDD_CTRL_B = CDD_HOCK;
+ 
+-    /* Send something every single exchange, as the BIOS does: the
+-     * queued question if there is one, otherwise a NOP. The BIOS never
+-     * leaves the command registers unwritten, and a serial link that is
+-     * clocked by both ends having something to say is not one to leave
+-     * half-idle -- this driver was writing a command roughly twice a
+-     * second and letting seventy-odd exchanges go by untouched. */
+-    {
+-        static const UBYTE nop[9] = { CDD_CMD_STAT, 0, 0, 0, 0, 0, 0, 0, 0 };
+-
+-        if (cdd_pending) {
+-            cdd_pending = 0;
+-            cdd_command(cdd_queued);
+-            if (cdd_sent < 0xFF)
+-                cdd_sent++;
+-        } else {
+-            cdd_command(nop);
+-        }
++    /* Re-send the same command every exchange until the drive answers
++     * it. This is the piece every previous attempt was missing: the
++     * BIOS loads a retry count of 75 -- a full second of exchanges --
++     * and puts the identical packet out again on each one, giving up
++     * only when the count runs out. A command is not a message you
++     * post once; it is a request you hold up until it is taken.
++     *
++     * Both emulators accept a single shot, which is why six discs
++     * looked fine here and did nothing on silicon.
++     *
++     * Nothing goes out when there is no question outstanding. The BIOS
++     * does send an idle NOP every exchange, but the one build that
++     * copied that behaviour was also the one that stopped checksumming
++     * on hardware, so that stays out until the rest is working. */
++    if (cdd_repeat) {
++        cdd_command(cdd_queued);
++        if (cdd_sent < 0xFF)
++            cdd_sent++;
++        if (cdd_answered || --cdd_repeat == 0)
++            cdd_repeat = 0;
+         cdd_ctrl_ever |= (UBYTE)(*CDD_CTRL_RD & (CDD_DTS | CDD_DRS));
+     }
+ 

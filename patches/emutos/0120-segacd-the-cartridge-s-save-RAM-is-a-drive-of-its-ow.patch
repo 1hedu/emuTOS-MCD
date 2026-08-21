@@ -1,0 +1,367 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 11:33:15 +0000
+Subject: [PATCH 120/184] segacd: the cartridge's save RAM is a drive of its
+ own
+
+It used to be an alternative B:. segacd_floppy_init probed the cart
+first and only fell back to the console's internal 8 KB if none
+answered, on the reasoning that a cart is bigger and B: can only be one
+of them.
+
+On a Mode 1 boot that trade is backwards. The cartridge is the boot
+device, so it always answers, so the console's own backup RAM could
+never be a drive again -- and that memory is the interesting one: it is
+where the diagnostic writes its log and where a played console keeps
+its Sega-format game saves.
+
+So they are two drives:
+
+  B:  the internal backup RAM, always, through the sub CPU directly
+  C:  the cartridge's save RAM, through the servant, as a block device
+      on its own bus ahead of the disc
+  D:  the disc
+
+C: is a block device rather than a third floppy because EmuTOS has
+exactly two floppies, and it is probed before the CD because on a Mode
+1 boot the cartridge is the storage that is certainly present and
+certainly works.  The proxy underneath it is unchanged -- LBA and op in
+comm registers, data through a Word RAM bounce buffer, a sequence
+number echoed back -- only the drive letter and the entry point are
+new.
+
+B: is now detected whenever the memory exists, not only when it holds
+our filesystem. A Sega-format volume is still 8 KB of readable
+sectors, and a tool meant to rescue those cannot reach a drive the BIOS
+says is absent; GEMDOS declines to mount it, which is the honest
+outcome.
+
+Verified in gpgx on both boots: four drive letters, and a 512-byte
+pattern written to C: sector 10 reads back byte-exact through the
+proxy.
+---
+ bios/disk.c      |  27 ++++++++++++
+ bios/disk.h      |   1 +
+ bios/machine.h   |   5 ++-
+ bios/segacd.c    | 105 +++++++++++++++++++++++++++++++++++++----------
+ bios/segacd.h    |   4 ++
+ include/config.h |  17 ++++++++
+ 6 files changed, 137 insertions(+), 22 deletions(-)
+
+diff --git a/bios/disk.c b/bios/disk.c
+index aab7b68..c920814 100644
+--- a/bios/disk.c
++++ b/bios/disk.c
+@@ -118,6 +118,9 @@ static const int majors[] =
+ #if CONF_WITH_SDMMC
+     24, 25, 26, 27, 28, 29, 30, 31,     /* SD/MMC */
+ #endif
++#if CONF_WITH_SEGACD_CART
++    40,                                 /* the cartridge's save RAM */
++#endif
+ #if CONF_WITH_SEGACD_CD
+     32,                                 /* the Mega CD drive: one unit */
+ #endif
+@@ -432,6 +435,11 @@ LONG disk_mediach(UWORD unit)
+         ret = segacd_cd_ioctl(GET_MEDIACHANGE,NULL);
+         break;
+ #endif /* CONF_WITH_SEGACD_CD */
++#if CONF_WITH_SEGACD_CART
++    case CART_BUS:
++        ret = segacd_cart_ioctl(GET_MEDIACHANGE,NULL);
++        break;
++#endif /* CONF_WITH_SEGACD_CART */
+     default:
+         ret = EUNDEV;
+     }
+@@ -1083,6 +1091,12 @@ static LONG internal_inquire(UWORD unit, ULONG *blocksize, ULONG *deviceflags, c
+         flags = XH_TARGET_REMOVABLE;    /* it is a disc in a tray */
+         break;
+ #endif /* CONF_WITH_SEGACD_CD */
++#if CONF_WITH_SEGACD_CART
++    case CART_BUS:
++        ret = segacd_cart_ioctl(GET_DISKNAME,name);
++        flags = XH_TARGET_REMOVABLE;    /* it is a cartridge in a slot */
++        break;
++#endif /* CONF_WITH_SEGACD_CART */
+     default:
+         ret = EUNDEV;
+     }
+@@ -1190,6 +1204,13 @@ LONG disk_get_capacity(UWORD unit, ULONG *blocks, ULONG *blocksize)
+             return ret;
+         break;
+ #endif /* CONF_WITH_SEGACD_CD */
++#if CONF_WITH_SEGACD_CART
++    case CART_BUS:
++        ret = segacd_cart_ioctl(GET_DISKINFO,info);
++        if (ret < 0)
++            return ret;
++        break;
++#endif /* CONF_WITH_SEGACD_CART */
+     default:
+         return EUNDEV;
+     }
+@@ -1264,6 +1285,12 @@ LONG disk_rw(UWORD unit, UWORD rw, ULONG sector, UWORD count, UBYTE *buf)
+         KDEBUG(("segacd_cd_rw() returned %ld\n", ret));
+         break;
+ #endif /* CONF_WITH_SEGACD_CD */
++#if CONF_WITH_SEGACD_CART
++    case CART_BUS:
++        ret = segacd_cart_rw(rw, sector, count, buf);
++        KDEBUG(("segacd_cart_rw() returned %ld\n", ret));
++        break;
++#endif /* CONF_WITH_SEGACD_CART */
+     default:
+         ret = EUNDEV;
+     }
+diff --git a/bios/disk.h b/bios/disk.h
+index ea9337b..fa5b204 100644
+--- a/bios/disk.h
++++ b/bios/disk.h
+@@ -27,6 +27,7 @@
+ #define IS_IDE_DEVICE(major)    (GET_BUS(major) == IDE_BUS)
+ #define IS_SDMMC_DEVICE(major)  (GET_BUS(major) == SDMMC_BUS)
+ #define IS_CDROM_DEVICE(major)  (GET_BUS(major) == CDROM_BUS)
++#define IS_CART_DEVICE(major)   (GET_BUS(major) == CART_BUS)
+ 
+ #define GET_UNITNUM(bus,dev)    (NUMFLOPPIES+(DEVICES_PER_BUS*(bus))+dev)
+ 
+diff --git a/bios/machine.h b/bios/machine.h
+index be7326c..99e679b 100644
+--- a/bios/machine.h
++++ b/bios/machine.h
+@@ -41,8 +41,11 @@
+ #define IDE_BUS             2
+ #define SDMMC_BUS           3
+ #define CDROM_BUS           4       /* the Mega CD's own drive */
++#define CART_BUS            5       /* save RAM on the cartridge */
+ 
+-#if CONF_WITH_SEGACD_CD
++#if CONF_WITH_SEGACD_CART
++# define MAX_BUS            CART_BUS
++#elif CONF_WITH_SEGACD_CD
+ # define MAX_BUS            CDROM_BUS
+ #elif CONF_WITH_SDMMC
+ # define MAX_BUS            SDMMC_BUS
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 194136b..7db0cee 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3697,13 +3697,17 @@ static void bram_probe(void)
+     bram_state = BRAM_OURS;
+ }
+ 
+-/* 0 no backup RAM, 1 ours, 2 somebody's game saves -- and 3 if a RAM
+- * cart answered, in which case B: is the cart and none of this applies.
+- * The diagnostic's log has nowhere to go in states 0 and 2, and
+- * "Fcreate -2" on its own does not say which. */
++/* 0 no backup RAM, 1 ours, 2 somebody's game saves. The diagnostic's
++ * log has nowhere to go in states 0 and 2, and "Fcreate -2" on its own
++ * does not say which.
++ *
++ * It used to return 3 for "a RAM cart answered, so B: is the cart and
++ * none of this applies". A cartridge no longer displaces the internal
++ * memory -- it has its own drive letter -- so the two are simply
++ * different drives and this answers only about B:. */
+ UBYTE segacd_bram_state(void)
+ {
+-    return cart_sectors ? 3 : bram_state;
++    return bram_state;
+ }
+ 
+ /* Read back the bytes GEMDOS's getbpb depends on, so the status line can
+@@ -3725,12 +3729,17 @@ void segacd_floppy_init(void)
+         segacd_event(5);
+     cart_sectors = CART_CNT;    /* published by the servant at startup */
+ 
+-    /* A backup RAM cart wins when present (bigger, and the console can
+-     * only have one of the two anyway); otherwise fall back to the
+-     * always-present internal BRAM. */
++    /* Both, now, and not one or the other.
++     *
++     * A cartridge used to displace the internal backup RAM: it was
++     * bigger, and B: could only be one of them. On a Mode 1 boot that
++     * is a bad trade -- the cartridge is the boot device, so it is
++     * always there, and the console's own 8 KB would never be reachable
++     * again. So the cartridge has its own drive letter (C:, through the
++     * block layer, ahead of the disc) and B: is the internal memory,
++     * always. */
+     bram_state = BRAM_NONE;
+-    if (!cart_sectors)
+-        bram_probe();
++    bram_probe();
+ 
+     /* Non-destructive write test on the last BRAM byte, so the hardware
+      * status line can say whether this memory actually takes writes at
+@@ -3764,8 +3773,14 @@ BOOL segacd_flop_detect_drive(WORD dev)
+ {
+     if (dev == 0)
+         return adisk_present;
++    /* Present whenever the memory is, and not only when we put a
++     * filesystem on it. Somebody's Sega-format game saves are still 8 KB
++     * of readable sectors, and a tool that exists to rescue them cannot
++     * reach a drive the BIOS says is absent. GEMDOS will decline to
++     * mount the volume, which is the honest outcome: the drive is
++     * there, the filesystem is not ours. */
+     if (dev == 1)
+-        return cart_sectors != 0 || bram_state == BRAM_OURS;
++        return bram_state != BRAM_NONE;
+     return FALSE;
+ }
+ 
+@@ -3797,7 +3812,6 @@ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+                    WORD side, WORD count)
+ {
+     LONG lba = (LONG)track * 16 + (sect - 1);
+-    WORD err;
+ 
+     MAYBE_UNUSED(side);
+ 
+@@ -3837,9 +3851,9 @@ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+         return EUNDEV;
+     }
+ 
+-    if (!cart_sectors) {            /* internal BRAM, sub-side, direct */
++    {                               /* internal BRAM, sub-side, direct */
+         ULONG off;
+-        if (bram_state != BRAM_OURS) {
++        if (bram_state == BRAM_NONE) {
+             *(volatile UWORD *)0xFF802E = 0xEE01;
+             return EUNDEV;
+         }
+@@ -3860,29 +3874,78 @@ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+         }
+         return E_OK;
+     }
++}
+ 
+-    if (lba + count > cart_sectors)
++/******************************************************************************/
++/* C: -- the cartridge's save RAM                                             */
++/******************************************************************************/
++
++/* Its own drive rather than an alternative B:.
++ *
++ * The sub CPU has no path to the cartridge bus at all -- the cartridge
++ * is on the Genesis side of the machine -- so every sector goes through
++ * the servant: the LBA and an operation into comm registers, the data
++ * through a bounce buffer in Word RAM, and a sequence number echoed
++ * back so a stale answer cannot be mistaken for a fresh one. That
++ * proxy already existed for the old B:; only the drive letter and the
++ * entry point are new.
++ *
++ * It is a block device rather than a third floppy because EmuTOS has
++ * exactly two floppies, and because C: is where it belongs: probed
++ * ahead of the disc, so on a Mode 1 boot the storage that is certainly
++ * present gets the first letter and the disc gets D:.
++ */
++LONG segacd_cart_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
++{
++    WORD err;
++
++    if (!cart_sectors)
++        return EUNDEV;
++    if (sector < 0 || sector + count > cart_sectors)
+         return ESECNF;
+ 
+     while (count--) {
+-        if (rw & 1) {
++        if (rw & RW_WRITE) {
+             memcpy((void *)BOUNCE, buf, SECTOR_SIZE);
+-            err = cart_xfer(2, (UWORD)lba);
+-            *(volatile UWORD *)0xFF802C = (UWORD)lba;
++            err = cart_xfer(2, (UWORD)sector);
++            *(volatile UWORD *)0xFF802C = (UWORD)sector;
+             *(volatile UWORD *)0xFF802E = (UWORD)err;
+         } else {
+-            err = cart_xfer(1, (UWORD)lba);
++            err = cart_xfer(1, (UWORD)sector);
+             if (err == E_OK)
+                 memcpy(buf, (const void *)BOUNCE, SECTOR_SIZE);
+         }
+         if (err != E_OK)
+-            return (rw & 1) ? EWRITF : EREADF;
++            return (rw & RW_WRITE) ? EWRITF : EREADF;
+         buf += SECTOR_SIZE;
+-        lba++;
++        sector++;
+     }
+     return E_OK;
+ }
+ 
++LONG segacd_cart_ioctl(WORD op, void *arg)
++{
++    ULONG *info = (ULONG *)arg;
++
++    if (!cart_sectors)
++        return EUNDEV;
++
++    switch (op) {
++    case GET_DISKINFO:
++        info[0] = cart_sectors;
++        info[1] = SECTOR_SIZE;
++        return E_OK;
++    case GET_DISKNAME:
++        strcpy((char *)arg, "Cartridge save RAM");
++        return E_OK;
++    case GET_MEDIACHANGE:
++        /* A cartridge cannot be changed with the power on, and the
++         * power going off ends EmuTOS along with the question. */
++        return MEDIANOCHANGE;
++    }
++    return ERR;
++}
++
+ /******************************************************************************/
+ /* Keyboard                                                                   */
+ /******************************************************************************/
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 714cba3..66f84f8 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -31,6 +31,10 @@ void segacd_sound_init(void);
+ void segacd_bell(void);
+ void segacd_keyclick(void);
+ 
++/* C: -- the cartridge's save RAM, proxied by the servant */
++LONG segacd_cart_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
++LONG segacd_cart_ioctl(WORD op, void *arg);
++
+ /* D: -- a filesystem read off the disc itself, through the CDC */
+ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
+ void segacd_cd_revive(void);   /* the drive gets another chance */
+diff --git a/include/config.h b/include/config.h
+index b465e0f..aa8bcf6 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -614,6 +614,15 @@
+     * includes a drive letter for the compact disc itself. */
+ #  define INITINFO_DURATION 4
+ # endif
++# ifndef CONF_WITH_SEGACD_CART
++   /* C: -- the save RAM on whatever cartridge is in the slot, reached
++    * through the servant because the sub CPU has no path to the
++    * cartridge bus. Probed before the disc, so it takes C: and the disc
++    * takes D:: on a Mode 1 boot the cartridge is the one storage device
++    * that is certainly there and certainly works, and the drive letter
++    * ought to say so. */
++#  define CONF_WITH_SEGACD_CART 1
++# endif
+ # ifndef CONF_WITH_SEGACD_CD
+    /* D: -- a filesystem on the compact disc itself, read through the CDC
+     * with the Sega CDBIOS evicted. It hangs off the block layer as its
+@@ -1126,6 +1135,14 @@
+ # define CONF_WITH_SEGACD_CD 0
+ #endif
+ 
++/*
++ * Set CONF_WITH_SEGACD_CART to 1 to activate the cartridge's save RAM
++ * as a block device, proxied through the Genesis-side servant.
++ */
++#ifndef CONF_WITH_SEGACD_CART
++# define CONF_WITH_SEGACD_CART 0
++#endif
++
+ /*
+  * Set CONF_WITH_VAMPIRE_SPI to 1 to activate SPI on the Vampire,
+  * required for SD/MMC support on these boards

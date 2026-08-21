@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 06:57:39 +0000
+Subject: [PATCH 013/184] segacd: publish the live screen base to the servant
+ each VBL
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The servant read the framebuffer from a fixed address chosen at E2,
+which holds only while EmuTOS leaves the screen where it booted it.
+The file viewer takes the whole screen, and once the framebuffer moves
+the servant converts whatever now occupies the old address — text read
+as four bitplanes, which tiles the entire display with repeating
+letter-shaped cells and clears again when the viewer exits. The VBL
+handler now publishes v_bas_ad so the servant can follow it.
+---
+ bios/segacd.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 4c9c672..4b3f5cc 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -132,6 +132,12 @@ void segacd_int_2_c(void)
+         }
+     }
+ 
++    /* Tell the servant where the screen really is. It used to assume the
++     * boot-time address, which breaks the moment anything moves the
++     * framebuffer (the file viewer does) — the servant then converts
++     * whatever now lives there, filling the display with garbage. */
++    *(volatile UWORD *)0xFF8020 = (UWORD)(((ULONG)v_bas_ad) >> 8);
++
+     int_vbl();
+ }
+ 

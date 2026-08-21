@@ -1,0 +1,238 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 01:05:07 +0000
+Subject: [PATCH 096/184] segacd: the mask is exonerated, and one stage code
+ was the instrument lying
+
+ls CB from the console: bits 4 and 5 never switched off during a visit.
+The firmware does not disable the CDD or CDC interrupt in the gate
+array. That was the cheapest remaining explanation for i4 2/3 and it is
+now excluded rather than merely unfavoured. The watchdog keeps
+re-asserting the enables anyway -- two bus cycles a frame to keep the
+negative proven.
+
+read 058A was my own instrument lying. Stage 5 means "the watchdog
+caught a call that never returned" and 8A is CDCSTAT, but CDCSTAT had
+returned thousands of times, each saying no sector yet. The poll loop
+was bounded at 300000 dispatches, which is longer than the watchdog's
+five seconds, so the watchdog won a race it was never meant to enter and
+a plain stage-3 timeout was printed as a hang.
+
+Every bound now runs off the watchdog's frame counter rather than a
+guess about how many dispatches fit in a second -- 40 frames for the
+level-4 probe, 200 for the read, 300 for the watchdog. Same clock, no
+race, honest codes.
+
+i4 2/3 held with DRV_INIT off, so the exchange that silences the drive
+is not DRV_INIT's. What is left is its content, so the visit
+photographs it on the way out: four status bytes, four command bytes,
+both control bytes. Emulation reads st 01000000 cm 02000000 x 0434 --
+drive state 1, command 2 (read), controls as set.
+
+The diagnostic re-arms the timeshare every round. Standing down for good
+is right on an ordinary boot and wrong in a diagnostic whose purpose is
+to make the firmware try again; counts are now per-round, which also
+makes the two DRV_INIT arms comparable.
+
+gpgx and PicoDrive both read D: throughout, plain boot unchanged.
+---
+ bios/bios.c    |  9 ++++++++
+ bios/segacd.c  | 26 +++++++++++++++++++++++
+ bios/segacd.h  |  2 ++
+ bios/segacd2.S | 56 ++++++++++++++++++++++++++++++++++++++++----------
+ 4 files changed, 82 insertions(+), 11 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index b198664..d5b1973 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1088,6 +1088,7 @@ void biosmain(void)
+             arm = (UWORD)(run & 7);
+             segacd_cd_tune(arm_lead[arm], arm_hold[arm], arm_late[arm]);
+             segacd_ts_tune((WORD)arm_drvi[arm]);
++            segacd_ts_rearm();
+             /* Short because the line is forty columns and the last
+              * field kept falling off the edge of the tube. L lead,
+              * H hold, A late, I DRV_INIT, B the raw button word. */
+@@ -1142,6 +1143,14 @@ void biosmain(void)
+                         br, rr, segacd_bios_swaps());
+                 cprintf(" i4 %lu/%lu v4 %06lX ctl %04X ls %02X\r\n",
+                         own, i4, vec4, ctrl, lost);
++                {   /* The one exchange that matters, in full. */
++                    ULONG st, cm;
++                    UWORD ctl2;
++
++                    segacd_bios_cdd(&st, &cm, &ctl2);
++                    cprintf(" st %08lX cm %08lX x %04X\r\n",
++                            st, cm, ctl2);
++                }
+             }
+             cprintf("\r\n");
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 41b8ac4..c69a4c5 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2390,6 +2390,9 @@ extern ULONG segacd_bios_vec4;          /* segacd2.S */
+ extern UWORD segacd_bios_ctrl;          /* segacd2.S */
+ extern UWORD segacd_bios_lost;          /* segacd2.S */
+ extern UBYTE segacd_bios_drvinit;       /* segacd2.S */
++extern ULONG segacd_bios_st;            /* segacd2.S */
++extern ULONG segacd_bios_cm;            /* segacd2.S */
++extern UWORD segacd_bios_ctl2;          /* segacd2.S */
+ 
+ 
+ /* Phase two: does the parked firmware actually READ?
+@@ -2510,6 +2513,29 @@ void segacd_bios_ipath(ULONG *i4, ULONG *own, ULONG *vec4, UWORD *ctrl,
+     *lost = segacd_bios_lost;
+ }
+ 
++/* The last exchange, as it stood when the visit gave up: what the drive
++ * said, what the firmware wrote back, and the two control bytes. */
++void segacd_bios_cdd(ULONG *st, ULONG *cm, UWORD *ctl2)
++{
++    *st = segacd_bios_st;
++    *cm = segacd_bios_cm;
++    *ctl2 = segacd_bios_ctl2;
++}
++
++/* Put the timeshare back on the drive. The diagnostic calls this at the
++ * top of every round: standing down for good is right on an ordinary
++ * boot, where the user wants a working machine, and wrong here, where
++ * the whole purpose of the round is to make the firmware try again. */
++void segacd_ts_rearm(void)
++{
++    if (cd_ts_want && !cd_ts && segacd_bios_available()) {
++        cd_ts = 1;
++        cdd_cmd_on = 0;
++    }
++    cd_ts_reads = 0;
++    cd_ts_fails = 0;
++}
++
+ /* Wake with DRV_INIT, or go straight at the drive the way every Sega
+  * read routine does. The diagnostic alternates it round by round; a
+  * change has to un-wake the firmware or the second setting never gets
+diff --git a/bios/segacd.h b/bios/segacd.h
+index a853db9..a380b9d 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -50,6 +50,8 @@ void segacd_bios_ipath(ULONG *i4, ULONG *own, ULONG *vec4, UWORD *ctrl,
+                        UWORD *lost);
+ void segacd_bios_unwake(void);  /* segacd2.S */
+ void segacd_ts_tune(WORD drvinit);
++void segacd_ts_rearm(void);
++void segacd_bios_cdd(ULONG *st, ULONG *cm, UWORD *ctl2);
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);
+ 
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 48e987d..73caf8c 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -223,6 +223,9 @@ bios_xchg:
+         .globl  _segacd_bios_ctrl
+         .globl  _segacd_bios_lost
+         .globl  _segacd_bios_drvinit
++        .globl  _segacd_bios_st
++        .globl  _segacd_bios_cm
++        .globl  _segacd_bios_ctl2
+         .data
+ _segacd_bios_swapcnt:
+         .word   0
+@@ -246,6 +249,12 @@ _segacd_bios_lost:                      // mask bits seen switched off
+ _segacd_bios_drvinit:                   // whether to wake with DRV_INIT
+         .byte   0
+         .even
++_segacd_bios_st:                        // CDD status, first four nibbles
++        .long   0                       //    pairs, as the visit ended
++_segacd_bios_cm:                        // ...and the command written back
++        .long   0
++_segacd_bios_ctl2:                      // $FF8037/$FF8033 on the way out
++        .word   0
+         .text
+ 
+ // Level 2, during a visit: the dead-man switch.
+@@ -487,10 +496,9 @@ _segacd_bios_read:
+         // whose idea of the drive has drifted. It is safe to go on now
+         // because the watchdog is running: nothing past this line can
+         // take the console down, only fail slowly.
+-        move.l  #200000,28(a5)
+ brd_wait_int4:
+-        subq.l  #1,28(a5)
+-        beq     brd_own_done
++        cmpi.l  #40,_segacd_bios_frames // two thirds of a second
++        bcc     brd_own_done
+         cmpi.l  #2,_segacd_bios_int4
+         bcs     brd_wait_int4
+ brd_own_done:
+@@ -526,10 +534,9 @@ brd_own_done:
+         move.w  #0x0010,d0              // DRV_INIT
+         move.w  d0,50(a5)
+         jsr     0x5F22
+-        move.l  #300000,28(a5)
+ brd_wait_init:
+-        subq.l  #1,28(a5)
+-        beq     brd_fail_init
++        cmpi.l  #200,_segacd_bios_frames
++        bcc     brd_fail_init
+         move.w  #0x0081,d0              // CDB_STAT
+         move.w  d0,50(a5)
+         jsr     0x5F22
+@@ -553,17 +560,26 @@ brd_awake:
+         move.w  d0,50(a5)
+         jsr     0x5F22
+ 
+-        move.l  #300000,28(a5)          // bound: a dead link is not the clock
++        // Bounded on the watchdog's frame counter rather than on a
++        // guess about how many BIOS calls fit in a second.
++        //
++        // The guess lost: 300000 iterations of a dispatch turned out to
++        // be longer than the watchdog's five seconds, so a read that
++        // simply never produced a sector was reported as 058A -- stage
++        // 5, "CDCSTAT never returned" -- when CDCSTAT had returned
++        // perfectly well, thousands of times, each one saying no. The
++        // frame counter is the same clock the watchdog uses and cannot
++        // race it.
+ brd_stat:
+-        subq.l  #1,28(a5)
+-        beq     brd_fail_stat
++        cmpi.l  #200,_segacd_bios_frames        // 3.3 seconds
++        bcc     brd_fail_stat
+         move.w  #0x008A,d0              // CDCSTAT
+         move.w  d0,50(a5)
+         jsr     0x5F22
+         bcs     brd_stat                // no sector ready yet
+ brd_read:
+-        subq.l  #1,28(a5)
+-        beq     brd_fail_read
++        cmpi.l  #200,_segacd_bios_frames
++        bcc     brd_fail_read
+         move.w  #0x008B,d0              // CDCREAD
+         move.w  d0,50(a5)
+         jsr     0x5F22
+@@ -603,6 +619,24 @@ brd_fail_read:
+         // stack it has to go back to lives at 44(a5) and not in a6.
+ brd_done:
+         ori.w   #0x0700,sr              // shut the door before swapping back
++
++        // What the drive and the firmware last said to each other.
++        //
++        // The mask theory is dead -- ls came back CB, so neither CDD nor
++        // CDC was ever switched off -- and the interrupt path is proven
++        // by phase A. What is left is the content of the one exchange
++        // Sega's handler performs before the drive goes quiet, and these
++        // are the registers it happens in: the ten status nibbles the
++        // drive sent, and the ten command nibbles the firmware wrote
++        // back. Four of each is enough to see a command number and
++        // whether the checksum nibble is plausible.
++        move.l  0xFF8038,_segacd_bios_st
++        move.l  0xFF8042,_segacd_bios_cm
++        move.b  0xFF8037,d0
++        lsl.w   #8,d0
++        move.b  0xFF8033,d0
++        move.w  d0,_segacd_bios_ctl2
++
+         move.l  _segacd_bios_vec4,0x70  // give the firmware its vector back
+         bsr     bios_xchg               // EmuTOS's world back into place
+         move.w  36(a5),d0

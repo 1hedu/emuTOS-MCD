@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 18:53:37 +0000
+Subject: [PATCH 076/184] segacd: a command is only a command once it is on the
+ wire
+
+torn 0, badbcd 0, wrong 0-then-15, wait 0, seek 49, why 11: headers
+stable, nothing torn, and not one read ever reached its sector. The
+tearing theory dies by count, and the numbers convict a race instead.
+
+Since Lunar taught this driver to pause between reads, the drive
+hovers -- re-reading one track, streaming sectors continuously. The
+withdraw guard ('once the decoder is producing, take the queued
+command back so it is not re-sent forever') fires on the hover's very
+next sector, inside 13 ms, faster than the exchange that would carry
+the read command out. The drive never hears the read. It hovers
+forever: forty-nine seeks, zero arrivals, every attempt a timeout.
+And the hover's sectors, recorded into the ring before the command
+posts, are the wrong-sector grabs.
+
+The golden build -- the last disc that ever listed a file on C: --
+dodged this by accident. Its seek-assist formula measured distance
+from the disc's LENGTH rather than the head position (wrong, per the
+runtime trace), so it fired a spurious command $A before every read,
+which broke the hover and silenced the decoder before the read was
+queued. The user's correlation, 'no file on C: since you removed $A',
+was causal, argued from a CRT against the record, and correct.
+
+The fix is the mechanism, not the accident: the level-4 handler stamps
+when it actually posts a queued command; the withdraw guard and the
+past-target test may only act on sectors decoded at least two
+exchanges after that, and the ring is reset at the post so it speaks
+only about the world after the drive was asked. Emulators never
+showed any of it because their pause does not stream into the
+decoder.
+---
+ bios/segacd.c | 45 ++++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 40 insertions(+), 5 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 5c516e5..1e31f0a 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -325,6 +325,12 @@ static UBYTE cdd_next[9];       /* built by the VBL, taken by level 4 */
+ static ULONG cdd_outbuf[3];     /* aligned: the write below is long-wide */
+ #define cdd_out ((UBYTE *)cdd_outbuf)
+ static UBYTE cdd_handover;
++static volatile UWORD cdd_postmark;     /* cdd_ticks when the level-4
++                                         * handler last actually posted a
++                                         * queued command to the drive.
++                                         * "Queued" and "sent" are one
++                                         * exchange apart, and a hover
++                                         * fills that gap with sectors. */
+ static UBYTE cdd_sent;          /* commands handed to the drive. Wraps, and
+                                  * must: it used to saturate at 255, and 255
+                                  * masked to three bits is a constant 7 -- so
+@@ -732,6 +738,7 @@ void segacd_int_4_c(void)
+         cdd_handover = 0;
+         for (k = 0; k < 9; k++)
+             cdd_queued[k] = cdd_next[k];
++        cdd_postmark = cdd_ticks;
+     }
+ 
+     cdd_command(cdd_queued);
+@@ -1796,6 +1803,16 @@ static BOOL cd_fetch(ULONG lba)
+             cd_quiet = 0;
+             cd_streaming = 1;
+             cd_seeks++;
++
++            /* Everything the decoder produces until the command is on
++             * the wire is the hover re-reading the old spot. Wait for
++             * the post -- one exchange, bounded by the budget -- and
++             * discard it, so the ring and the past-target test speak
++             * only about the world after the drive was asked. */
++            while (cdd_handover && cd_budget > 0 && cd_time_left())
++                cd_budget--;
++            cd_ring_reset();
++            cdc_ints = 0;
+         } else {
+             cd_hits++;
+         }
+@@ -1857,11 +1874,29 @@ static BOOL cd_fetch(ULONG lba)
+                 }
+             }
+ 
+-            if (cdc_ints) {
+-                /* Sectors are arriving, so the drive has done as it was
+-                 * told. Stop telling it: a queued command goes out on
+-                 * every exchange, so leaving the seek in the queue asks
+-                 * the drive to start over before it ever arrives. */
++            if (cdc_ints && !cdd_handover
++                    && (UWORD)(cdd_ticks - cdd_postmark) >= 2) {
++                /* Sectors are arriving AND the read has actually been
++                 * on the wire for two exchanges. Both conditions,
++                 * because since the drive pauses between reads it
++                 * hovers -- re-reading one track, streaming sectors
++                 * continuously -- so "the decoder is producing" says
++                 * nothing about OUR command having been heard. On
++                 * hardware the hover's next sector lands inside 13 ms,
++                 * faster than the exchange that would carry the
++                 * command out, and withdrawing on it replaced the read
++                 * with idle before the drive ever heard it: forty-nine
++                 * seeks, zero arrivals, every attempt a timeout. The
++                 * golden build dodged this by accident -- its
++                 * disc-length seek formula fired a spurious command $A
++                 * first, which broke the hover and silenced the
++                 * decoder before the read was queued. The user's
++                 * correlation ("no file on C: since you removed $A")
++                 * was causal, and this is the mechanism.
++                 *
++                 * Stop telling it: a queued command goes out on every
++                 * exchange, so leaving the seek in the queue asks the
++                 * drive to start over before it ever arrives. */
+                 if (!cd_quiet) {
+                     cd_quiet = 1;
+                     cdd_ask_idle();

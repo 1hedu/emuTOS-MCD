@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 09:00:35 +0000
+Subject: [PATCH 042/184] segacd: close the last two gaps against the working
+ reference
+
+Rather than ship one fix per disc again, the whole CDD path was diffed
+line by line against the standalone test that goes green on hardware.
+Two differences remained.
+
+The re-read on checksum failure goes: it was added for a torn-read
+theory that a systematic failure rate has since disproved, and with the
+read now five bus cycles wide it can only catch a packet mid-arrival.
+
+The command packet is staged. cdd_ask runs in the VBL, level 4 can
+preempt it, and writing straight into the buffer the interrupt
+transmits means occasionally transmitting half of the old question and
+half of the new. Once every couple of seconds rather than systematic,
+but a real race and free to close: build into a shadow, hand it over
+with one byte.
+
+Nothing else differs.
+---
+ bios/segacd.c | 30 +++++++++++++++++++-----------
+ 1 file changed, 19 insertions(+), 11 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index fc97f91..00499f9 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -135,6 +135,8 @@ static UBYTE cdd_count, cdd_good;
+ static UBYTE cdd_tick;
+ static UBYTE cdd_cmd_on;        /* holding A at power-on turns these off */
+ static UBYTE cdd_queued[9];
++static UBYTE cdd_next[9];       /* built by the VBL, taken by level 4 */
++static UBYTE cdd_handover;
+ static UBYTE cdd_sent;          /* commands actually handed to the drive */
+ static UBYTE cdd_irqs;          /* level-4 arrivals, for the watchdog */
+ static UBYTE cdd_seen;          /* last count the watchdog looked at */
+@@ -262,12 +264,19 @@ static void cdd_ask(UBYTE cmd, UBYTE sub)
+ {
+     int i;
+ 
++    /* Staged, then handed over with a single byte. This runs in the VBL
++     * and level 4 can now preempt it, so writing straight into the
++     * packet the interrupt transmits means occasionally transmitting
++     * one that is half old question and half new. Once every couple of
++     * seconds, not systematic -- but it is a real race and it costs
++     * nothing to close. */
+     for (i = 0; i < 9; i++)
+-        cdd_queued[i] = 0;
+-    cdd_queued[0] = cmd;
+-    cdd_queued[3] = sub;
++        cdd_next[i] = 0;
++    cdd_next[0] = cmd;
++    cdd_next[3] = sub;
+     cdd_want = sub;
+     cdd_answered = 0;
++    cdd_handover = 1;           /* last: the interrupt reads this */
+ }
+ 
+ /* Even with the sequence taken from the BIOS itself, "it should work"
+@@ -414,14 +423,6 @@ void segacd_int_4_c(void)
+ 
+     cdd_poll();
+ 
+-    /* One re-read if it did not checksum. The Genesis can halt this CPU
+-     * in the middle of the ten-byte read, and a packet torn in half
+-     * fails its checksum even though the drive sent it perfectly -- so
+-     * the answers were arriving and being thrown away. The registers
+-     * hold the packet until the next exchange, so simply reading them
+-     * again once the halt is over recovers it. */
+-    if (!cdd_valid)
+-        cdd_poll();
+ 
+     /* Acknowledge -- but only if DTS says there is an outgoing transfer
+      * to acknowledge. The BIOS tests that bit first and skips the write
+@@ -447,6 +448,13 @@ void segacd_int_4_c(void)
+      * The question itself is rotated by the VBL every 32 frames, so the
+      * same packet repeats for about half a second before changing --
+      * which is also what the BIOS's retry counter amounts to. */
++    if (cdd_handover) {
++        int k;
++        cdd_handover = 0;
++        for (k = 0; k < 9; k++)
++            cdd_queued[k] = cdd_next[k];
++    }
++
+     cdd_command(cdd_queued);
+     if (cdd_sent < 0xFF)
+         cdd_sent++;

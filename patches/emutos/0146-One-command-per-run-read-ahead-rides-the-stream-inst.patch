@@ -1,0 +1,180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 09:48:07 +0000
+Subject: [PATCH 146/184] One command per run: read-ahead rides the stream
+ instead of seeking
+
+Doom's read primitive is one CDCSTOP and one ROMREADN for a run of
+COUNT sectors, then CDCSTAT/CDCREAD/CDCTRN/CDCACK per sector with no
+drive command in between. cd_fill asked for six sectors by calling
+cd_fetch six times, and every call re-ran the seek decision from
+scratch. The console's own counters: 69 seeks for 84 sectors, 15 that
+rode the stream. A seek is most of a second.
+
+cd_fetch now takes allow_seek. The first sector of a fill may move the
+drive; the other five may not. Either they come round on the stream the
+first one started, or the fill stops short -- which costs nothing,
+since a short fill is a smaller cache and not a failed read. The one
+case worth abandoning early is a stream already past the target, where
+waiting means waiting for a revolution. Read-ahead also gets one
+attempt rather than eight, because the retries all begin with a seek.
+
+And the transfer now lands where the sector is wanted. cdc_grab wrote
+CDSECT always and cd_fill memcpy'd 2048 bytes into the cache slot
+afterwards -- once per sector, in the foreground, in exactly the window
+that decides whether the next sector's ring entry is still fresh when
+it is asked for. A ring entry expires after three decoder interrupts,
+which is 40 ms, and that copy plus the transfer was eating it. Point
+the transfer at the slot instead. The self-test keeps CDSECT, which is
+why this is a pointer and not a rewrite.
+
+Emulator: unchanged, which is the most it can say -- its boot probe
+fills in four seeks either way and it does not model the sync loss that
+makes the console's ratio what it is. D: still mounts, cd_why 0, header
+00 23 25 01, woke 1, DY at the desktop.
+---
+ bios/scdapi.h |  2 +-
+ bios/segacd.c | 67 ++++++++++++++++++++++++++++++++++++++++++---------
+ 2 files changed, 56 insertions(+), 13 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index a2e9d1c..a1c9e41 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  14
++#define SCD_VERSION  15
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd.c b/bios/segacd.c
+index becf4ff..1889b34 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1518,6 +1518,17 @@ void segacd_int_5_c(void)
+  * screen out of PRG-RAM, and a halt in the middle of a transfer the gate
+  * array is clocking is the same hazard that cost the CDD a dozen discs.
+  * Bit 3 of $FF8022 is the interlock the servant already honours. */
++/* Where the next transfer should land.
++ *
++ * cdc_grab() used to write CDSECT always, and cd_fill() then memcpy'd
++ * 2048 bytes out of it into the cache slot -- once per sector, in the
++ * foreground, between one sector arriving and the next. That copy is
++ * pure latency in the window that decides whether the ring entry for
++ * the following sector is still fresh when we ask for it, and it buys
++ * nothing: the transfer can be pointed at the slot. The self-test still
++ * uses CDSECT, which is why this is a pointer and not a rewrite. */
++static UBYTE *cd_dest = CDSECT;
++
+ static BOOL cdc_grab(UWORD pt)
+ {
+     const UWORD count = CDC_XFER_BYTES - 1;
+@@ -1561,7 +1572,7 @@ static BOOL cdc_grab(UWORD pt)
+     cd_dsr_n = n;
+ 
+     if (n < 2048) {
+-        segacd_cdc_read((UWORD *)cdc_hdr, (UWORD *)CDSECT,
++        segacd_cdc_read((UWORD *)cdc_hdr, (UWORD *)cd_dest,
+                         CDC_DATA_BYTES / 16 - 1);
+ 
+         /* Wait for end-of-transfer -- and keep reading the host data
+@@ -1590,7 +1601,7 @@ static BOOL cdc_grab(UWORD pt)
+         {   /* Did any bytes actually arrive? Counted as longs so the
+              * loop is 512 iterations and not 2048; this runs once per
+              * sector in the foreground, not in an interrupt. */
+-            const ULONG *p = (const ULONG *)CDSECT;
++            const ULONG *p = (const ULONG *)cd_dest;
+             UWORD i, nz = 0;
+ 
+             for (i = 0; i < CDC_DATA_BYTES / 4; i++)
+@@ -2269,7 +2280,7 @@ static UBYTE cd_state_action(void)
+ 
+ /* Get one CD sector into CDSECT, by seeking if it is not coming and
+  * then waiting for the ring to report it. */
+-static BOOL cd_fetch(ULONG lba)
++static BOOL cd_fetch(ULONG lba, BOOL allow_seek)
+ {
+     UBYTE start[3];
+     UWORD pt;
+@@ -2319,14 +2330,43 @@ static BOOL cd_fetch(ULONG lba)
+      * re-seeks up to thirty times before giving up. Time is the real
+      * limiter -- the budget above bounds the whole fill -- so the cap
+      * exists only to put a floor under pathological thrash. */
+-    for (attempt = 0; attempt < 8 && !got && cd_time_left(); attempt++) {
++    for (attempt = 0; attempt < (allow_seek ? 8 : 1) && !got && cd_time_left();
++         attempt++) {
+         /* Already gone past, or never coming? Then seek. Otherwise the
+          * drive is heading towards it and waiting is free. */
+-        if (attempt > 0 || !cd_streaming
++        BOOL want_seek = (attempt > 0 || !cd_streaming
+                 || (cd_ring_newest != 0xFFFFFFFFUL && cd_ring_newest >= lba)
+-                || lba > cd_ring_newest + CD_STREAM_AHEAD) {
+-            if (cd_ring_find(lba, &pt))
+-                goto collect;           /* it is already sitting there */
++                || lba > cd_ring_newest + CD_STREAM_AHEAD);
++
++        if (want_seek && cd_ring_find(lba, &pt))
++            goto collect;
++
++        /* Read-ahead never moves the drive.
++         *
++         * This is the shape Doom's reader has and ours did not. Its
++         * primitive is one CDCSTOP and one ROMREADN for a run of COUNT
++         * sectors, and then CDCSTAT/CDCREAD/CDCTRN/CDCACK per sector
++         * with no drive command in between. cd_fill asked for six
++         * sectors by calling this function six times, and each call
++         * re-ran the seek decision from scratch: 69 seeks for 84
++         * sectors on the console, against 15 that rode the stream.
++         *
++         * So the first sector of a fill may seek and the other five may
++         * not. Either they come round on the stream the first one
++         * started, or the fill stops short -- which costs nothing,
++         * because a short fill is a smaller cache, not a failed read.
++         * The one case worth abandoning early is a stream that has
++         * already gone past: waiting for that is waiting for a
++         * revolution. */
++        if (want_seek && !allow_seek) {
++            if (cd_ring_newest != 0xFFFFFFFFUL && cd_ring_newest > lba) {
++                why1 = 2;
++                break;
++            }
++            want_seek = FALSE;
++        }
++
++        if (want_seek) {
+             {
+                 UBYTE rdy = cd_prepare();
+ 
+@@ -2865,9 +2905,11 @@ static BOOL cd_fill(ULONG lba)
+     }
+ 
+     CDTRACE(5);
+-    if (!cd_fetch(lba))
++    cd_dest = cd_cache[0];
++    if (!cd_fetch(lba, TRUE)) {
++        cd_dest = CDSECT;
+         return FALSE;
+-    memcpy(cd_cache[0], CDSECT, CDC_DATA_BYTES);
++    }
+     cd_cache_slot[0] = lba;
+     have = 1;
+ 
+@@ -2881,12 +2923,13 @@ static BOOL cd_fill(ULONG lba)
+          * make the next read free, not to make this one late. */
+         if ((UWORD)(cdd_ticks - cd_epoch) > cd_leash - CD_XCHG_AHEAD)
+             break;
+-        if (!cd_fetch(lba + i))
++        cd_dest = cd_cache[i];
++        if (!cd_fetch(lba + i, FALSE))
+             break;
+-        memcpy(cd_cache[i], CDSECT, CDC_DATA_BYTES);
+         cd_cache_slot[i] = lba + i;
+         have = (UBYTE)(i + 1);
+     }
++    cd_dest = CDSECT;
+ 
+     /* Published here and nowhere earlier: see the note above. */
+     cd_cache_base = lba;

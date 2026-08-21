@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 02:11:55 +0000
+Subject: [PATCH 126/184] segacd: the second CTRL writer was still spelling out
+ $A7/$F0
+
+The ladder went into cdc_setup() last commit and missed the other place
+the pair is written: the deferred write in the level 4 handler, the one
+cd_late defers until the drive reports state 1. It had the bytes
+spelled out, so with cd_late set the decoder got $A0/$F8 from setup --
+the firmware's give-up pair -- and then hardcoded rung 0 later, and
+never $A4/$D8 or $A3/$B0 at all. Half of CDTEST's matrix runs with
+cd_late set, so half the diagnostic was testing the ladder by not using
+it.
+
+Both writers share the table now. Two spelled-out copies of a constant
+is exactly how $A7/$F0 came to be in a driver whose own notes said
+$A4/$D8, and doing it twice in two days would be careless.
+---
+ bios/segacd.c | 19 ++++++++++++++-----
+ 1 file changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 6dfdce5..44f2962 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -192,7 +192,16 @@ static UBYTE cd_hold = 1;       /* pause the drive after each fill.
+  * sectors late, and a fresh setup succeeding where retries inside one
+  * did not. Neither emulator models these two registers at all, which
+  * is why emulation has never been able to see any of this. */
+-static UBYTE cd_late;           /* hold $A7/$F0 back until the drive locks */
++static UBYTE cd_late;           /* hold the ladder rung back until lock */
++/* The decoder configuration ladder, defined with cdc_setup() further
++ * down. Declared here because the deferred write below is the second
++ * place the pair gets written, and the first version of this had the
++ * bytes spelled out in both -- which is how $A7/$F0 came to be
++ * hardcoded in a driver whose own notes said $A4/$D8. Two copies of a
++ * constant is how the last one rotted; one table and two readers is
++ * the fix. */
++extern const UBYTE cdc_ladder[3][2];
++extern UBYTE cdc_rung;
+ static volatile UBYTE cd_ctrl2_wait;    /* ...and it is currently held */
+ /* D: telemetry. Declared up here because the report that publishes it
+  * is written before the code that keeps it, and a forward declaration
+@@ -980,8 +989,8 @@ void segacd_int_4_c(void)
+          * not the macros, are what this early handler needs. */
+         WORD sr = set_sr(0x2700);
+         *(volatile UBYTE *)0xFF8005 = 0x0A;
+-        *(volatile UBYTE *)0xFF8007 = 0xA7;
+-        *(volatile UBYTE *)0xFF8007 = 0xF0;
++        *(volatile UBYTE *)0xFF8007 = cdc_ladder[cdc_rung][0];
++        *(volatile UBYTE *)0xFF8007 = cdc_ladder[cdc_rung][1];
+         set_sr(sr);
+         cd_ctrl2_wait = 0;
+     }
+@@ -1140,13 +1149,13 @@ static UWORD cdc_spill;         /* words drained while waiting for the end
+  * the table: it is written unconditionally just above, exactly as
+  * CDCSTART does, and it is the firmware's give-up state rather than a
+  * configuration to try. */
+-static const UBYTE cdc_ladder[3][2] = {
++const UBYTE cdc_ladder[3][2] = {
+     { 0xA7, 0xF0 }, { 0xA4, 0xD8 }, { 0xA3, 0xB0 }
+ };
+ /* Starts at 2 so the first advance lands on rung 0, $A7/$F0 -- the pair
+  * this driver has always written. A first read attempt therefore
+  * behaves exactly as it did before, and only a failed one escalates. */
+-static UBYTE cdc_rung = 2;
++UBYTE cdc_rung = 2;
+ static UBYTE cdc_rung_ok;       /* this rung put a sector in the ring */
+ 
+ static void cdc_setup(void)

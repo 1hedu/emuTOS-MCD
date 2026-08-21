@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 09:12:44 +0000
+Subject: [PATCH 143/184] Stop resetting the decoder on every read
+
+D: reads on the console. The round that did it also says what it cost:
+71 seeks against 11 waits, and 13,018 sectors rejected by the mode gate
+against 651 accepted. Ninety-five per cent chaff, and a seek for almost
+every sector delivered.
+
+cd_fetch() called cdc_setup() at the top of every read, and cdc_setup()
+is a full CDC reset -- register $F, then IFCTRL, WA, PT and the control
+pair. Sega does not do that: CDCSTART initialises the decoder once and
+ROMREADN streams from it afterwards. A decoder that has just been reset
+has to re-acquire sync, and everything it emits while doing so is
+chaff, so 71 resets buy 71 bursts of it -- and the loop closes on
+itself, because chaff means no ring entry, which means a timeout, which
+means another seek and another reset.
+
+Initialise it when it is not up, and leave it alone when it is. A seek
+does not require the decoder to be torn down; the sectors after one are
+the same sectors from a new place. cdc_stop() clears the flag, so a
+genuine teardown still gets a genuine setup.
+
+This cannot be measured in the emulator -- gpgx does not model sync
+acquisition, so its decoder never produces chaff and its boot probe
+costs the same four seeks either way. Verified there only as no
+regression: D: still mounts, cd_why 0, cd_dtest 3. The numbers that
+decide it are seek against wait, and mode against v11, on hardware.
+
+Also retired: the STAT0 bit 7 experiment. Its own criterion was that
+v10 and v01 both come back near zero. The console says v11 651, v10
+348, v01 31 -- bit 7 predicts a good mode byte 97% of the time, but 348
+sectors carry the flag with a bad mode byte and 31 carry a good mode
+byte without it. Gating on it would drop 5% of the good sectors to save
+work on chaff that should not be there in the first place. The gate
+stays out.
+---
+ bios/scdapi.h |  2 +-
+ bios/segacd.c | 24 ++++++++++++++++++++++--
+ 2 files changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 174683a..d44878c 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  11
++#define SCD_VERSION  12
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 8990254..1cca856 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1258,7 +1258,21 @@ const UBYTE cdc_ladder[3][2] = {
+  * this driver has always written. A first read attempt therefore
+  * behaves exactly as it did before, and only a failed one escalates. */
+ UBYTE cdc_rung = 2;
+-static UBYTE cdc_rung_ok;       /* this rung put a sector in the ring */
++static UBYTE cdc_rung_ok;
++/* The decoder is initialised and has not been torn down since.
++ *
++ * cdc_setup() is a full CDC reset -- register $F, then IFCTRL, WA, PT
++ * and the control pair -- and cd_fetch() called it at the top of every
++ * read. Sega does not: CDCSTART initialises the decoder once and
++ * ROMREADN streams from it thereafter. The console's own counters show
++ * what the difference costs. The round that finally read this disc
++ * reports 71 seeks against 11 waits, and 13,018 sectors rejected by
++ * the mode gate against 651 accepted -- 95% chaff. A decoder that has
++ * just been reset must re-acquire sync and everything it emits while
++ * doing so is chaff, so 71 resets buy 71 bursts of it, and the loop
++ * closes on itself: reset, garbage, no ring entry, timeout, seek,
++ * reset. */
++static UBYTE cdc_live;       /* this rung put a sector in the ring */
+ /* Which rungs have been written since boot, one bit each.
+  *
+  * The instantaneous rung is close to useless and the first hardware log
+@@ -1316,6 +1330,7 @@ static void cdc_setup(void)
+         }
+         set_sr(sr);
+     }
++    cdc_live = 1;
+ }
+ 
+ /* CDCSTOP, $1FB6: mask level 5, write IFCTRL twice, and finish by
+@@ -1326,6 +1341,7 @@ static void cdc_stop(void)
+ 
+     WORD sr = set_sr(0x2700);
+ 
++    cdc_live = 0;               /* torn down: the next read initialises */
+     GA_INTMASK &= (UBYTE)~0x20;
+     *CDC_AR = 0x01; *CDC_DATA = 0x38;
+     *CDC_AR = 0x01; *CDC_DATA = 0x3A;
+@@ -2335,7 +2351,11 @@ static BOOL cd_fetch(ULONG lba)
+             cdc_ints = 0;
+             cdc_hit = 0;
+             if (attempt == 0) {
+-                cdc_setup();
++                /* ...and only if it needs it. A seek does not require
++                 * the decoder to be torn down: the sectors that arrive
++                 * after one are the same sectors, from a new place. */
++                if (!cdc_live)
++                    cdc_setup();
+             } else {
+                 /* Pause before every reissue. This is GameArts' stall
+                  * recovery, verbatim: CDC_STOP, ROM_PAUSEON, wait for

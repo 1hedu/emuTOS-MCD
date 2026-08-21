@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 03:16:41 +0000
+Subject: [PATCH 128/184] segacd: CDR_LEADIN is not a lead-in
+
+cd_lead is 2 or 20 -- the L arm of the diagnostic, how many frames
+early to command the read. The macro wrapping it was called CDR_LEADIN,
+and on a CD "lead-in" means the 150 frames before sector zero, which
+lba_to_msf() already adds. Reading `lba - CDR_LEADIN` as a unit
+conversion rather than a tuning knob nearly produced the wrong fix for
+the hardware result this week. CDR_EARLY.
+---
+ bios/segacd.c | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 75fe947..93075c4 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1693,7 +1693,12 @@ static void cdd_ask_idle(void)
+  * frames late and the sector is behind the head, and reading forward
+  * never comes back to it. Twenty frames is a quarter of a second of
+  * run-up and costs nothing but that. */
+-#define CDR_LEADIN cd_lead
++/* How many frames early to command the read -- 2 or 20, the L arm of
++ * the diagnostic. Named CDR_EARLY until it nearly caused the wrong
++ * fix: "lead-in" on a CD means the 150 frames before sector zero, and
++ * lba_to_msf() already adds those. This is a tuning knob and reads
++ * like a unit conversion. */
++#define CDR_EARLY cd_lead
+ 
+ /* ...and if it lands late anyway, ask again. This is the BIOS's own
+  * answer: $4124 re-issues the whole read when an arriving header is not
+@@ -1712,8 +1717,8 @@ static void cdr_reissue(void)
+ {
+     UBYTE start[3];
+ 
+-    lba_to_msf(cdr_lbas[cdr_slot] >= CDR_LEADIN
+-                   ? cdr_lbas[cdr_slot] - CDR_LEADIN : 0, start);
++    lba_to_msf(cdr_lbas[cdr_slot] >= CDR_EARLY
++                   ? cdr_lbas[cdr_slot] - CDR_EARLY : 0, start);
+     cdc_hit = 0;
+     cdc_ints = 0;
+     cdr_seen = 0;
+@@ -2204,7 +2209,7 @@ static BOOL cd_fetch(ULONG lba)
+              * gap. There was a command Sega has and does not use, and
+              * sending it was one of three ways this driver was moving
+              * the drive around behind its own back. */
+-            lba_to_msf(lba >= CDR_LEADIN ? lba - CDR_LEADIN : 0, start);
++            lba_to_msf(lba >= CDR_EARLY ? lba - CDR_EARLY : 0, start);
+             cdd_ask_read(start);
+             if (cd_late && !cdc_altctrl)
+                 cd_ctrl2_wait = 1;

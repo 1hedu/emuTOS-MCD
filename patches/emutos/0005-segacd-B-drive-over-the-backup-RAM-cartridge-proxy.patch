@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 03:57:22 +0000
+Subject: [PATCH 005/184] segacd: B: drive over the backup RAM cartridge proxy
+
+Only the Genesis-side CPU can reach the cartridge, so B: sectors move
+through a bounce buffer at the top of the shared PRG bank: the sub
+posts (op, lba, seq) in the comm registers and spins for the servant's
+echoed sequence. A: keeps its direct memcpy path.
+---
+ bios/segacd.c | 85 ++++++++++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 71 insertions(+), 14 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index dfe2013..f4a0c0c 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -121,22 +121,55 @@ void segacd_int_2_c(void)
+  * we only do linear sector math (16 sectors/track, 1 side, 512 bytes). */
+ 
+ #define ADISK_BASE  ((UBYTE *)0x60000)
+-#define ADISK_SECTORS 256
++#define ADISK_SECTORS 248               /* 0x1F000 / 512 */
++
++/* B: is the backup RAM cartridge, which only the Genesis-side CPU can
++ * reach. Sectors move through a bounce buffer at the top of the same
++ * PRG bank the servant windows; requests go out through the sub->main
++ * comm registers and completion comes back as an echoed sequence. */
++#define BOUNCE      ((volatile UBYTE *)0x7F000)
++#define CART_LBA    (*(volatile UWORD *)0xFF8024)
++#define CART_REQ    (*(volatile UWORD *)0xFF8026)   /* (op<<8)|seq */
++#define CART_ACK    (*(volatile UWORD *)0xFF8018)   /* echoed seq */
++#define CART_CNT    (*(volatile UWORD *)0xFF801A)   /* sectors, 0 = absent */
+ 
+ static BOOL adisk_present;
++static UWORD cart_sectors;
++static UBYTE cart_seq;
+ 
+ void segacd_floppy_init(void)
+ {
+     /* the builder stamps "EmuTOSMD" as the OEM field at offset 2 */
+     adisk_present = (ADISK_BASE[2] == 'E' && ADISK_BASE[3] == 'm'
+                   && ADISK_BASE[4] == 'u' && ADISK_BASE[5] == 'T');
++    cart_sectors = CART_CNT;    /* published by the servant at startup */
+ }
+ 
+ BOOL segacd_flop_detect_drive(WORD dev)
+ {
+     if (dev == 0)
+         return adisk_present;
+-    return FALSE;               /* B: arrives with the cart proxy */
++    if (dev == 1)
++        return cart_sectors != 0;
++    return FALSE;
++}
++
++/* Post one sector request to the servant and wait for its echo.
++ * op: 1 = read into BOUNCE, 2 = write from BOUNCE. */
++static WORD cart_xfer(UWORD op, UWORD lba)
++{
++    LONG timeout;
++
++    CART_LBA = lba;
++    cart_seq++;
++    if (!cart_seq) cart_seq = 1;
++    CART_REQ = (UWORD)((op << 8) | cart_seq);
++
++    /* the servant answers within a frame; allow several */
++    for (timeout = 4000000; timeout > 0; timeout--)
++        if ((UBYTE)CART_ACK == cart_seq)
++            return E_OK;
++    return EREADF;
+ }
+ 
+ LONG segacd_flop_mediach(WORD dev)
+@@ -148,22 +181,46 @@ LONG segacd_flop_mediach(WORD dev)
+ WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
+                    WORD side, WORD count)
+ {
+-    LONG lba;
+-    UBYTE *p;
++    LONG lba = (LONG)track * 16 + (sect - 1);
++    WORD err;
+ 
+-    if (dev != 0 || !adisk_present)
+-        return EUNDEV;
+-
+-    lba = (LONG)track * 16 + (sect - 1);
+     MAYBE_UNUSED(side);
+-    if (lba < 0 || lba + count > ADISK_SECTORS)
++    if (lba < 0)
+         return ESECNF;
+ 
+-    p = ADISK_BASE + lba * SECTOR_SIZE;
+-    if (rw & 1)
+-        memcpy(p, buf, (LONG)count * SECTOR_SIZE);   /* volatile but writable */
+-    else
+-        memcpy(buf, p, (LONG)count * SECTOR_SIZE);
++    if (dev == 0) {
++        UBYTE *p;
++        if (!adisk_present)
++            return EUNDEV;
++        if (lba + count > ADISK_SECTORS)
++            return ESECNF;
++        p = ADISK_BASE + lba * SECTOR_SIZE;
++        if (rw & 1)
++            memcpy(p, buf, (LONG)count * SECTOR_SIZE);
++        else
++            memcpy(buf, p, (LONG)count * SECTOR_SIZE);
++        return E_OK;
++    }
++
++    if (dev != 1 || !cart_sectors)
++        return EUNDEV;
++    if (lba + count > cart_sectors)
++        return ESECNF;
++
++    while (count--) {
++        if (rw & 1) {
++            memcpy((void *)BOUNCE, buf, SECTOR_SIZE);
++            err = cart_xfer(2, (UWORD)lba);
++        } else {
++            err = cart_xfer(1, (UWORD)lba);
++            if (err == E_OK)
++                memcpy(buf, (const void *)BOUNCE, SECTOR_SIZE);
++        }
++        if (err != E_OK)
++            return (rw & 1) ? EWRITF : EREADF;
++        buf += SECTOR_SIZE;
++        lba++;
++    }
+     return E_OK;
+ }
+ 

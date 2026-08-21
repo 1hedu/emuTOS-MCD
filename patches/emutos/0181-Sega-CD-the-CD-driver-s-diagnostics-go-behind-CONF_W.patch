@@ -1,0 +1,293 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 20 Aug 2026 20:33:18 +0000
+Subject: [PATCH 181/184] Sega CD: the CD driver's diagnostics go behind
+ CONF_WITH_SCD_DIAG
+
+scd_snapshot and the counter accessors that fill it, the boot-sector
+selftest behind Up-at-power-on, and cdr_report()'s per-frame status
+block. None of it does anything on a console that is working, and all of
+it was in an image that has to fit under the parked CDBIOS.
+
+    release            233424 -> 230570      2854 bytes
+    headroom to 0xBA000  4144 -> 6998
+    make segacd SCD_DIAG=1                   233424, all of it back
+
+2854 rather than the 1543 the symbol table suggested, because
+cdr_report() had been inlined into the VBL handler and guarding it took
+the caller down with it.
+
+Off by default and one flag from on, rather than deleted, because every
+failure in this port that mattered was visible only on real hardware --
+the cartridge slot, the white-then-yellow hang, the skid. That is
+exactly when this is worth 2.8 KB, and it should be a build away rather
+than a rewrite away.
+
+With it off, scd_api's snapshot pointer is NULL, not a stub returning
+zeros: CDTEST would otherwise render a page of confident nothings that
+read as a machine in trouble. It checks, and says which flag to rebuild
+with.
+
+Three things this turned up, all introduced earlier today:
+
+  segacd.h names struct brmcall in a prototype and did not include
+  scdapi.h, which defines it -- so the prototype declared a fresh
+  incomplete type of its own and all three call sites were passing an
+  "incompatible pointer". It compiled because they are all pointers.
+  That is precisely the shared-by-offset hazard the comment beside it
+  warns about, one line below where it was happening. The header
+  includes scdapi.h now.
+
+  bram_probe() had an unused ULONG, and cdr_seq only exists for
+  cdr_report. Both gone.
+
+And a trap worth more than the bytes: make does not rebuild when only
+DEF changes, so switching between a release and an SCD_DIAG=1 build
+quietly kept the previous image. That is a whole hardware round spent on
+a binary that does not contain the change being tested -- the same
+failure build-iso.sh already deletes its outputs to prevent. The segacd
+rule removes obj/segacd.o first. Proved by flipping release -> diag ->
+release and watching 230570 / 233424 / 230570.
+
+Desktop 26213da8979c5fbb on disc and cartridge, unchanged throughout.
+---
+ Makefile         | 13 +++++++++++++
+ bios/segacd.c    | 36 ++++++++++++++++++++++++++++++++++--
+ bios/segacd.h    |  7 +++++++
+ include/config.h | 17 +++++++++++++++++
+ 4 files changed, 71 insertions(+), 2 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 8ebc225..a4a6a3e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -900,8 +900,21 @@ NODEP += segacd
+ segacd: UNIQUE = us
+ segacd: OPTFLAGS = $(SMALL_OPTFLAGS)
+ segacd: override DEF += -DTARGET_SEGACD
++# make segacd SCD_DIAG=1 -- the CD driver's diagnostic surface back in:
++# the snapshot CDTEST reads, the counter accessors, the boot-sector
++# selftest and cdr_report()'s status block. About 2.8 KB. See
++# CONF_WITH_SCD_DIAG in include/config.h.
++ifeq (1,$(SCD_DIAG))
++segacd: override DEF += -DCONF_WITH_SCD_DIAG=1
++endif
+ segacd:
+ 	@echo "# Building Sega CD EmuTOS into emutos-segacd.img"
++# CONF_WITH_SCD_DIAG reaches only segacd.c, and make does not rebuild
++# when DEF changes -- so switching between a release and an SCD_DIAG=1
++# build quietly kept the previous image, which is a whole hardware round
++# spent on a binary that does not contain the change being tested. The
++# object goes first; two seconds beats that.
++	@rm -f obj/segacd.o
+ 	$(MAKE) CPUFLAGS='-m68000' DEF='$(DEF)' OPTFLAGS='$(OPTFLAGS)' UNIQUE=$(UNIQUE) WITH_CLI=1 emutos.img
+ 	cp emutos.img emutos-segacd.img
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index f8f7452..6de0dac 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1954,6 +1954,7 @@ static void cdr_start(ULONG lba)
+ #define CDREPORT    ((volatile UWORD *)0x7F780)
+ #define CDREPORT_MAGIC 0xCDC0
+ 
++#if CONF_WITH_SCD_DIAG
+ static UWORD cdr_seq;
+ 
+ static void cdr_report(void)
+@@ -2037,6 +2038,8 @@ static void cdr_report(void)
+                               : (cd_badhdr + cd_tornhdr)));
+     CDREPORT[0] = CDREPORT_MAGIC;
+ }
++#endif
++
+ 
+ /* Is the decoder past the sector we are waiting for? BCD digits compare
+  * as plain bytes, so minute, second and frame in that order is an
+@@ -3476,6 +3479,7 @@ UWORD segacd_bios_nearread(void)
+  * is checked against a formula, and the volume descriptor, which is
+  * checked against its signature. The report block is filled exactly as
+  * before, so every host-side tool keeps working unchanged. */
++#if CONF_WITH_SCD_DIAG
+ void segacd_bios_selftest(void)
+ {
+     const UBYTE *scratch = (const UBYTE *)0x7D000UL;
+@@ -3510,6 +3514,8 @@ void segacd_bios_selftest(void)
+     }
+     cdr_state = CDR_PARKED;
+ }
++#endif
++
+ 
+ BOOL segacd_bios_available(void)
+ {
+@@ -3545,6 +3551,7 @@ UWORD segacd_bios_swaps(void)
+  *   ctrl $FF8037 in the high byte, $FF8033 in the low, both read on
+  *        entry before the visit touched either
+  */
++#if CONF_WITH_SCD_DIAG
+ void segacd_bios_ipath(ULONG *i4, ULONG *own, ULONG *vec4, UWORD *ctrl,
+                        UWORD *lost)
+ {
+@@ -3554,15 +3561,20 @@ void segacd_bios_ipath(ULONG *i4, ULONG *own, ULONG *vec4, UWORD *ctrl,
+     *ctrl = segacd_bios_ctrl;
+     *lost = segacd_bios_lost;
+ }
++#endif
++
+ 
+ /* The last exchange, as it stood when the visit gave up: what the drive
+  * said, what the firmware wrote back, and the two control bytes. */
++#if CONF_WITH_SCD_DIAG
+ void segacd_bios_cdd(ULONG *st, ULONG *cm, UWORD *ctl2)
+ {
+     *st = segacd_bios_st;
+     *cm = segacd_bios_cm;
+     *ctl2 = segacd_bios_ctl2;
+ }
++#endif
++
+ 
+ /* Put the timeshare back on the drive. The diagnostic calls this at the
+  * top of every round: standing down for good is right on an ordinary
+@@ -3619,6 +3631,7 @@ void segacd_ts_tune(WORD drvinit)
+ /* What the D: layer has been through, for the on-screen diagnostic.
+  * The counters are the diagnosis: a read that fails and a read that
+  * never happened look identical from GEMDOS's side of the call. */
++#if CONF_WITH_SCD_DIAG
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+                      UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
+@@ -3650,9 +3663,12 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+     *torn = cd_tornhdr;
+     *flag = cd_flagged;
+ }
++#endif
++
+ 
+ /* The rest of it, in a second call rather than eight more pointers on
+  * the first, which already takes eighteen. */
++#if CONF_WITH_SCD_DIAG
+ void segacd_cd_probe(UWORD *ringok, ULONG *newest, UWORD *dsr, UWORD *edt,
+                      UWORD *nz, UBYTE *hdr, UBYTE *st4,
+                      ULONG *blba, UWORD *boff, UBYTE *bsrc, UWORD *bnz,
+@@ -3683,6 +3699,8 @@ void segacd_cd_probe(UWORD *ringok, ULONG *newest, UWORD *dsr, UWORD *edt,
+         st4[i] = cdc_stat4[i];
+     }
+ }
++#endif
++
+ 
+ /* The diagnostic's knobs. The disc got burned with exactly one
+  * experimental lever on a button, and the button's detection could not
+@@ -3707,6 +3725,7 @@ void segacd_cd_probe(UWORD *ringok, ULONG *newest, UWORD *dsr, UWORD *edt,
+  *
+  * One snapshot call rather than twenty accessors, so that every number
+  * in a printed round describes the same moment. */
++#if CONF_WITH_SCD_DIAG
+ static void scd_snapshot(struct scd_snap *s)
+ {
+     UWORD seeks, hits, errs, why, bad, wrong, torn, flag, fix;
+@@ -3775,6 +3794,8 @@ static void scd_snapshot(struct scd_snap *s)
+     for (i = 0; i < 32; i++)            /* the status line's own source */
+         s->rep[i] = CDREPORT[i];
+ }
++#endif
++
+ 
+ void cart_swap_arm(void);       /* defined with cart_seq, further down */
+ static ULONG scd_payload(LONG op, LONG a, LONG b);
+@@ -3956,7 +3977,15 @@ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+ }
+ 
+ static const struct scd_api scd_api = {
+-    sizeof(struct scd_api), SCD_VERSION, scd_snapshot, scd_control
++    sizeof(struct scd_api), SCD_VERSION,
++#if CONF_WITH_SCD_DIAG
++    scd_snapshot,
++#else
++    /* NULL, not a stub: see CONF_WITH_SCD_DIAG in config.h. A caller
++     * that gets zeros back cannot tell them from a machine in trouble. */
++    (void (*)(struct scd_snap *))0,
++#endif
++    scd_control
+ };
+ 
+ void segacd_publish_api(void)
+@@ -4275,10 +4304,12 @@ void segacd_int_2_c(void)
+     /* With the firmware driving, the verification runs through it --
+      * once, as soon as it is asked for, with no waiting on a CDD round
+      * trip this driver no longer performs. */
++#if CONF_WITH_SCD_DIAG
+     if (cd_selftest && !cdr_tried && cd_ts) {
+         cdr_tried = 1;
+         segacd_bios_selftest();
+     }
++#endif
+ 
+     if (cd_selftest && cdd_cmd_on && !cdr_tried && cdr_state == CDR_IDLE
+             && (cdd_ok || ++cdr_boot > 600)) {
+@@ -4384,7 +4415,9 @@ void segacd_int_2_c(void)
+         | ((UWORD)((cdd_stalled ? cdd_wakes : cdd_sent) & 0x07) << 12)
+         | (cdd_stalled ? 0x8000 : 0));
+ 
++#if CONF_WITH_SCD_DIAG
+     cdr_report();
++#endif
+ 
+     if (pcm_countdown) {                /* silence the bell when it is due */
+         if (--pcm_countdown == 0)
+@@ -4715,7 +4748,6 @@ static ULONG segacd_buram_info(BOOL again)
+ static void bram_probe(void)
+ {
+     UBYTE save;
+-    ULONG i;
+ 
+     /* is there memory there at all? */
+     save = bram_rd(0);
+diff --git a/bios/segacd.h b/bios/segacd.h
+index a76e508..f329b4c 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -12,6 +12,13 @@
+ 
+ #ifdef MACHINE_SEGACD
+ 
++/* struct brmcall lives here, and this header names it in a prototype.
++ * Without the include, that prototype declares a fresh incomplete type
++ * scoped to itself and every caller passes an "incompatible pointer" --
++ * which compiles, because they are all pointers, and is exactly the
++ * shared-by-offset hazard this project keeps writing warnings about. */
++#include "scdapi.h"
++
+ /* Screen */
+ void segacd_screen_init(void);
+ void segacd_setphys(const UBYTE *addr);
+diff --git a/include/config.h b/include/config.h
+index e61cba1..d42050a 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -796,6 +796,23 @@
+ # ifndef CONF_WITH_PRINTER_PORT
+ #  define CONF_WITH_PRINTER_PORT 0
+ # endif
++/* The CD driver's own diagnostic surface: the snapshot CDTEST reads,
++ * the counter accessors that fill it, the boot-sector selftest behind
++ * Up-at-power-on, and cdr_report()'s per-frame status block. About 1.5 KB
++ * of an image that has to fit under the parked CDBIOS at Word RAM
++ * 0xBA000, and none of it does anything on a console that is working.
++ *
++ * Off here and on for `make segacd SCD_DIAG=1`, so nothing is lost --
++ * every failure this port has had that mattered was visible only on real
++ * hardware, and that is exactly when this is worth 1.5 KB. It is a build
++ * away, not a rewrite away.
++ *
++ * With it off, scd_api's snapshot pointer is NULL rather than a stub
++ * returning zeros: a diagnostic that reports confident nothings is worse
++ * than one that says it is not there. CDTEST checks. */
++# ifndef CONF_WITH_SCD_DIAG
++#  define CONF_WITH_SCD_DIAG 0
++# endif
+ # ifndef CONF_WITH_MIDI_ACIA
+ #  define CONF_WITH_MIDI_ACIA 0
+ # endif

@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 06:48:33 +0000
+Subject: [PATCH 132/184] The dead-drive latch was answering every D: request
+
+segacd_cd_rw() stops asking the drive after three consecutive failed
+blocks and returns EREADF from the block layer instead. disk_init_all()
+probes the CD unit at boot; on Mode 1 that probe fails; three failures
+is one probe. So the latch is on before the desktop is drawn, every
+boot.
+
+The cool-down that was supposed to let it go was counted in cdd_ticks,
+which advances only in the level-4 handler -- so on the boot where the
+drive never reports, which is precisely the boot that sets the latch,
+the clock that releases it is stopped. The latch was permanent.
+
+Six runs of CDTEST were measuring that and nothing else. Getbpb 0 on
+every round because the read was refused upstream of the driver; ring
+0, dsr 0, rd 0, rc 0000 because no request ever reached the drive.
+Eight tuning arms, none of them tried.
+
+Count the cool-down in hz_200, which runs whatever the drive does, and
+publish dead/deadrun/booting/stormed/ticks in the snapshot so a round
+says whether it asked before it says what it got.
+---
+ bios/scdapi.h | 17 ++++++++++++++++-
+ bios/segacd.c | 28 ++++++++++++++++++++++++----
+ 2 files changed, 40 insertions(+), 5 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 468c8d6..7924e7f 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  3
++#define SCD_VERSION  4
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -74,6 +74,21 @@ struct scd_snap {
+     unsigned char  bram;                /* 0 none 1 ours 2 Sega saves */
+     unsigned short bootflags;           /* the raw button word */
+ 
++    /* The dead-drive latch.
++     *
++     * Everything else in this structure describes what happened when
++     * the drive was asked. These four say whether it was asked at all.
++     * segacd_cd_rw() answers EREADF out of hand while 'dead' is set,
++     * and disk_init_all() sets it during every Mode 1 boot, so a whole
++     * session's worth of diagnostics can be reporting on requests that
++     * never left the block layer. That is not a hypothetical: it is
++     * what six runs of CDTEST were measuring. */
++    unsigned char  dead;                /* the latch is on */
++    unsigned char  deadrun;             /* consecutive failed blocks */
++    unsigned char  booting;             /* still on the short leash */
++    unsigned char  stormed;             /* level 4 was masked off */
++    unsigned short ticks;               /* cdd_ticks: 75 Hz, or frozen */
++
+     /* The whole CD report block, verbatim.
+      *
+      * This is what the hardware status line renders, and the question
+diff --git a/bios/segacd.c b/bios/segacd.c
+index a15a6f7..fdc1a1d 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -301,7 +301,21 @@ static void cd_boot_over(void); /* with the dead-drive latch, below */
+ static UBYTE cd_deadrun;        /* consecutive failed blocks; see the
+                                  * latch they set, further down */
+ static UBYTE cd_dead;
+-static UWORD cd_deadstamp;      /* cdd_ticks when the latch went on */
++static LONG cd_deadstamp;       /* hz_200 when the latch went on.
++                                 * Deliberately not cdd_ticks. That
++                                 * counter advances in the level-4
++                                 * handler and nowhere else, so on the
++                                 * boot where the drive never reports --
++                                 * which is exactly the boot that sets
++                                 * this latch -- it is frozen, the
++                                 * cool-down below never expires, and
++                                 * the latch is permanent. Six sessions
++                                 * of D: diagnostics were answered by
++                                 * that: every read after the probe
++                                 * returned EREADF without the drive
++                                 * being asked anything. A cool-down is
++                                 * wall-clock patience, so it belongs on
++                                 * the clock that runs regardless. */
+ #define CD_SPIN_BACKSTOP 130000L
+ 
+ static UWORD cd_epoch;          /* cdd_ticks when this block read began */
+@@ -2893,7 +2907,7 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+  * counter left one failure away from latching again. Free when the
+  * drive is dead (nobody is asking) and the difference between "C: is
+  * gone" and "C: needed a moment" when it is not. */
+-#define CD_DEAD_COOLDOWN 750    /* 10 s at 75 Hz */
++#define CD_DEAD_COOLDOWN 2000   /* 10 s at 200 Hz */
+ 
+ void segacd_cd_revive(void)
+ {
+@@ -2918,7 +2932,7 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+     if (sector < 0 || (ULONG)sector + count > CD_DDISK_BLOCKS)
+         return ESECNF;
+     if (cd_dead) {
+-        if ((UWORD)(cdd_ticks - cd_deadstamp) < CD_DEAD_COOLDOWN)
++        if (hz_200 - cd_deadstamp < CD_DEAD_COOLDOWN)
+             return EREADF;      /* answer immediately, as it has been */
+         cd_dead = 0;            /* one more try, and one failure from
+                                  * being right back where it was */
+@@ -2929,7 +2943,7 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+         if (!cd_read_block((ULONG)sector, buf)) {
+             if (++cd_deadrun >= CD_DEADRUN) {
+                 cd_dead = 1;
+-                cd_deadstamp = cdd_ticks;
++                cd_deadstamp = hz_200;
+             }
+             cd_park();
+             return EREADF;
+@@ -3357,6 +3371,12 @@ static void scd_snapshot(struct scd_snap *s)
+     s->bram = segacd_bram_state();
+     s->bootflags = segacd_bootflags;
+ 
++    s->dead = cd_dead;
++    s->deadrun = cd_deadrun;
++    s->booting = cd_booting;
++    s->stormed = cdd_stormed;
++    s->ticks = cdd_ticks;
++
+     for (i = 0; i < 32; i++)            /* the status line's own source */
+         s->rep[i] = CDREPORT[i];
+ }

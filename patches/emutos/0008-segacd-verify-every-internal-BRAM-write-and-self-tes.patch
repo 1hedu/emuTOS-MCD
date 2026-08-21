@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 05:27:53 +0000
+Subject: [PATCH 008/184] segacd: verify every internal-BRAM write, and
+ self-test at boot
+
+Hardware run #2 mounted B: from internal backup RAM but lost writes.
+Two defences:
+
+- bram_wr() now reads back and retries. The BRAM is slow SRAM behind
+  the gate array; single spaced writes stick (which is why the probe
+  passed and the volume mounted) but a tight run of them can be dropped
+  on silicon, losing every file. The read-back verifies and paces.
+- A non-destructive write/read-back test on the last BRAM byte at boot,
+  published to the servant as bit 4 of the state word, so the on-screen
+  status line can answer "does this memory take writes at all" without
+  a debugger.
+---
+ bios/segacd.c | 36 ++++++++++++++++++++++++++++++++++--
+ 1 file changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 1f953a0..94a053b 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -176,15 +176,29 @@ static BOOL adisk_present;
+ static UWORD cart_sectors;
+ static UBYTE cart_seq;
+ static UBYTE bram_state;
++static UBYTE bram_wtest;
+ 
+ static UBYTE bram_rd(ULONG i)
+ {
+     return *(volatile UBYTE *)(BRAM_BASE + i * 2 + 1);
+ }
+ 
++/* Write one byte, then confirm it landed. The internal backup RAM is
++ * slow SRAM behind the gate array: single spaced writes always stick,
++ * but a tight run of them can be dropped on real hardware, which shows
++ * up as a volume that mounts (the probe's writes stuck) yet loses every
++ * file (the bulk writes did not). The read-back both verifies and
++ * paces the bus. */
+ static void bram_wr(ULONG i, UBYTE v)
+ {
+-    *(volatile UBYTE *)(BRAM_BASE + i * 2 + 1) = v;
++    volatile UBYTE *p = (volatile UBYTE *)(BRAM_BASE + i * 2 + 1);
++    WORD tries;
++
++    for (tries = 0; tries < 8; tries++) {
++        *p = v;
++        if (*p == v)
++            return;
++    }
+ }
+ 
+ /* Lay down a minimal FAT12 volume: 16 sectors, 1 sector per cluster,
+@@ -274,7 +288,25 @@ void segacd_floppy_init(void)
+     bram_state = BRAM_NONE;
+     if (!cart_sectors)
+         bram_probe();
+-    *(volatile UWORD *)0xFF802A = bram_state;   /* for the status line */
++
++    /* Non-destructive write test on the last BRAM byte, so the hardware
++     * status line can say whether this memory actually takes writes at
++     * all — emulators model it as plain RAM, silicon may not. */
++    bram_wtest = 0;
++    if (bram_state == BRAM_OURS) {
++        UBYTE keep = bram_rd(BRAM_BYTES - 1);
++        bram_wr(BRAM_BYTES - 1, 0x5A);
++        if (bram_rd(BRAM_BYTES - 1) == 0x5A) {
++            bram_wr(BRAM_BYTES - 1, 0xA5);
++            if (bram_rd(BRAM_BYTES - 1) == 0xA5)
++                bram_wtest = 1;
++        }
++        bram_wr(BRAM_BYTES - 1, keep);
++    }
++
++    /* low nibble: state; bit 4: writes verified */
++    *(volatile UWORD *)0xFF802A =
++        (UWORD)(bram_state | (bram_wtest ? 0x10 : 0));
+ }
+ 
+ BOOL segacd_flop_detect_drive(WORD dev)

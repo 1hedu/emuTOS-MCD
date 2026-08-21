@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 01:58:14 +0000
+Subject: [PATCH 023/184] segacd: hold-C must reformat B: even when the volume
+ is already ours
+
+bram_probe() returned BRAM_OURS the moment it recognised our own boot
+sector, before it ever looked at the claim flag. So the documented
+"hold C at power-on to reformat" worked only on a volume that was not
+already EmuTOS-formatted -- precisely the case where nobody needs it. A
+damaged B: had no recovery path at all.
+
+Which is how folders on B: became undeletable: they were created during
+the builds where flopver failed every write that had actually landed,
+so their directory clusters never received their . and .. entries, and
+the desktop cannot empty a folder it cannot enumerate. GEMDOS itself is
+fine -- headlessly Ddelete returns 0 on an empty folder and -36 on a
+full one, and EmuDesk recurses through the contents first.
+
+The claim flag is now tested before anything else and reformats
+unconditionally.
+---
+ bios/bios.c   | 18 +++++++++++++++++-
+ bios/segacd.c | 17 ++++++++++++++---
+ 2 files changed, 31 insertions(+), 4 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index e985501..bd02171 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -931,13 +931,14 @@ void biosmain(void)
+         static char buf[512];
+         static char path[16] = "?:\\BTEST.TXT";
+         static char dpath[8] = "?:\\BDIR";
++        static char path2[16] = "?:\\BTEST2.TXT";
+         static const char drive[2] = { 'A', 'B' };
+         LONG h, rc;
+         int i, d;
+ 
+         cprintf("\033E");
+         for (d = 0; d < 2; d++) {
+-        path[0] = dpath[0] = drive[d];
++        path[0] = dpath[0] = path2[0] = drive[d];
+         for (i = 0; i < 400; i++)
+             buf[i] = (char)('A' + (i % 26));
+ 
+@@ -965,6 +966,21 @@ void biosmain(void)
+         }
+         rc = Dcreate(dpath);
+         cprintf("Dcreate  = %ld\r\n", rc);
++        {   /* what does deleting a folder that still has a file in it
++             * report? that is what the desktop would be hitting */
++            static char inner[24] = "?:\\BDIR\\IN.TXT";
++            inner[0] = drive[d];
++            h = Fcreate(inner, 0);
++            if (h >= 0L) Fclose((WORD)h);
++            cprintf("Ddel full= %ld\r\n", Ddelete(dpath));
++            Fdelete(inner);
++        }
++        rc = Ddelete(dpath);
++        cprintf("Ddel empty %ld\r\n", rc);
++        rc = Frename(path, path2);
++        cprintf("Frename  = %ld\r\n", rc);
++        rc = Fdelete(path2);
++        cprintf("Fdelete  = %ld\r\n", rc);
+         rc = Dfree(buf, d + 1);           /* 1 = A:, 2 = B: */
+         cprintf("Dfree    = %ld  free %ld of %ld\r\n",
+                 rc, *(LONG *)buf, *((LONG *)buf + 1));
+diff --git a/bios/segacd.c b/bios/segacd.c
+index f7c058a..a0c4e01 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -412,6 +412,18 @@ static void bram_probe(void)
+     if (bram_rd(0) != 0xA5) { bram_state = BRAM_NONE; return; }
+     bram_wr(0, save);
+ 
++    /* Holding C at power-on is an explicit request for this memory,
++     * whatever is in it now. That has to include reformatting a volume
++     * that is already ours: a damaged filesystem otherwise has no
++     * recovery path at all, and this one is tiny, easy to fill, and
++     * survived several builds that reported failed writes which had in
++     * fact landed. */
++    if (*(volatile UWORD *)0xFF801E == 0x0C1A) {
++        bram_format();
++        bram_state = BRAM_OURS;
++        return;
++    }
++
+     /* already ours? */
+     if (bram_rd(2) == 'E' && bram_rd(3) == 'm'
+      && bram_rd(4) == 'u' && bram_rd(5) == 'T') {
+@@ -420,9 +432,8 @@ static void bram_probe(void)
+     }
+ 
+     /* Sega's own format ends with a "SEGA_CD_ROM" marker; if the user's
+-     * game saves live here, leave them be — unless they explicitly asked
+-     * for the space by holding C at power-on. */
+-    if (*(volatile UWORD *)0xFF801E != 0x0C1A) {
++     * game saves live here, leave them be. */
++    {
+         for (i = BRAM_BYTES - 64; i < BRAM_BYTES - 10; i++) {
+             if (bram_rd(i) == 'S' && bram_rd(i + 1) == 'E'
+              && bram_rd(i + 2) == 'G' && bram_rd(i + 3) == 'A'

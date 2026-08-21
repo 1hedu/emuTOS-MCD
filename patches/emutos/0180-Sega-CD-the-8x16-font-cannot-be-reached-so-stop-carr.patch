@@ -1,0 +1,171 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 20 Aug 2026 20:19:42 +0000
+Subject: [PATCH 180/184] Sega CD: the 8x16 font cannot be reached, so stop
+ carrying it
+
+font_set_default() chooses between the two system fonts with
+
+    font = (V_REZ_VT < 400) ? &fon8x8 : &fon8x16;
+
+and this machine's screen is a fixed 320x200 ST-low buffer with no other
+mode, so V_REZ_VT is 200 for the life of the console and the tall one is
+unreachable. It was linked anyway, because the generated bios/ctables.h
+names fnt_st_8x16 in font_sets[] and fon8x8.next_font points at it -- so
+4186 bytes of glyphs for a resolution the hardware cannot display sat in
+an image with 48 bytes of headroom left under the parked CDBIOS.
+
+bios/fnt_seg_8x16.c defines the symbol instead. libfont.a is an archive,
+so a plain object satisfies the reference first and the member is never
+pulled: nothing upstream is edited and the generated table is left as
+localise wrote it. It is a real font rather than a stub -- the 8x8's
+metrics, pointing at the 8x8's glyphs, which fnt_st_8x8.c now exports
+for it -- so the header is valid for font_init() to copy and text_init()
+to walk, and anything that somehow reached for the big font would draw
+characters rather than whatever lies at those addresses. It just would
+not draw them sixteen pixels tall, and here nothing can ask.
+
+The offset table needed nothing: off_8x16_table has always been a
+#define alias of off_8x8_table in bios.h.
+
+  emutos-segacd.img  237520 -> 233424      4096 bytes
+  headroom to 0xBA000      48 -> 4144
+
+Verified by the strongest check available: the desktop frame hashes
+26213da8979c5fbb on both the disc and the cartridge, exactly as before.
+Pixel-identical, which is what "unreachable" should look like.
+---
+ Makefile            |  2 +-
+ bios/fnt_seg_8x16.c | 77 +++++++++++++++++++++++++++++++++++++++++++++
+ bios/fnt_st_8x8.c   | 14 +++++++--
+ 3 files changed, 90 insertions(+), 3 deletions(-)
+ create mode 100644 bios/fnt_seg_8x16.c
+
+diff --git a/Makefile b/Makefile
+index 8454c89..8ebc225 100644
+--- a/Makefile
++++ b/Makefile
+@@ -307,7 +307,7 @@ bios_src +=  memory.S processor.S vectors.S aciavecs.S bios.c xbios.c acsi.c \
+              pmmu030.c 68040_pmmu.S \
+              amiga.c amiga2.S spi_vamp.c \
+              lisa.c lisa2.S \
+-             segacd.c segacd2.S \
++             segacd.c segacd2.S fnt_seg_8x16.c \
+              delay.c delayasm.S sd.c memory2.c bootparams.c scsi.c nova.c \
+              dsp.c dsp2.S \
+              scsidriv.c
+diff --git a/bios/fnt_seg_8x16.c b/bios/fnt_seg_8x16.c
+new file mode 100644
+index 0000000..603a2b5
+--- /dev/null
++++ b/bios/fnt_seg_8x16.c
+@@ -0,0 +1,77 @@
++/*
++ * fnt_seg_8x16.c - the Sega CD's 8x16 font, which is the 8x8 one
++ *
++ * Copyright (C) 2026 The EmuTOS development team
++ *
++ * This file is distributed under the GPL, version 2 or at your
++ * option any later version.  See doc/license.txt for details.
++ */
++
++/*
++ * The Mega CD's screen is a fixed 320x200 ST-low buffer. It has no other
++ * mode, so V_REZ_VT is 200 for the life of the machine, and
++ * font_set_default() chooses between the two system fonts with
++ *
++ *     font = (V_REZ_VT < 400) ? &fon8x8 : &fon8x16;
++ *
++ * The tall one is therefore unreachable. It was still linked, because
++ * the generated bios/ctables.h names fnt_st_8x16 in font_sets[] and the
++ * chain fon8x8.next_font = &fon8x16 needs a header to point at -- so
++ * 4186 bytes of glyphs for a resolution this hardware cannot display
++ * were sitting in an image with 48 bytes of headroom left under the
++ * parked CDBIOS at Word RAM 0xBA000.
++ *
++ * This defines the symbol instead. libfont.a is an archive, so a plain
++ * object satisfies the reference first and the 4 KB member is never
++ * pulled; nothing upstream is edited and the generated table is left
++ * exactly as localise wrote it.
++ *
++ * It is a real font, not a stub: same metrics as the 8x8 and pointing at
++ * the same glyphs, which bios/fnt_st_8x8.c exports for this. So the
++ * header is valid for font_init() to copy and for text_init() to walk
++ * when it counts font ids, and if some path ever does reach for the big
++ * font it draws characters rather than whatever happens to be at those
++ * addresses. What it will not do is draw them sixteen pixels tall, and
++ * on this machine nothing can ask it to.
++ */
++
++#include "emutos.h"
++
++#ifdef TARGET_SEGACD
++
++#include "bios.h"
++#include "fonthdr.h"
++
++extern const UWORD fnt_st_8x8_dat[];    /* bios/fnt_st_8x8.c */
++
++const Fonthead fnt_st_8x16 = {
++    1,                  /* WORD font_id -- the system font, as 8x8 is */
++    9,                  /* WORD point */
++    "8x8 system font",  /* char name[32] */
++    0,                  /* WORD first_ade */
++    255,                /* WORD last_ade */
++    6,                  /* UWORD top */
++    6,                  /* UWORD ascent */
++    4,                  /* UWORD half */
++    1,                  /* UWORD descent */
++    1,                  /* UWORD bottom */
++    7,                  /* UWORD max_char_width */
++    8,                  /* UWORD max_cell_width */
++    1,                  /* UWORD left_offset */
++    3,                  /* UWORD right_offset */
++    1,                  /* UWORD thicken */
++    1,                  /* UWORD ul_size */
++    0x5555,             /* UWORD lighten */
++    0x5555,             /* UWORD skew */
++    F_STDFORM | F_MONOSPACE | F_DEFAULT,
++    0,                  /* UBYTE *hor_table */
++    off_8x8_table,      /* UWORD *off_table -- already shared; bios.h
++                         * defines off_8x16_table as an alias of it */
++    fnt_st_8x8_dat,     /* UWORD *dat_table */
++    256,                /* UWORD form_width */
++    8,                  /* UWORD form_height */
++    0,                  /* Fonthead *next_font */
++    0                   /* reserved by Atari */
++};
++
++#endif /* TARGET_SEGACD */
+diff --git a/bios/fnt_st_8x8.c b/bios/fnt_st_8x8.c
+index 129e2b8..2ee94ad 100644
+--- a/bios/fnt_st_8x8.c
++++ b/bios/fnt_st_8x8.c
+@@ -11,7 +11,17 @@
+ #include "bios.h"
+ #include "fonthdr.h"
+ 
+-static const UWORD dat_table[] =
++/* Not static, and not for this file's benefit.
++ *
++ * The Sega CD build replaces the 8x16 font with a header pointing at
++ * these same glyphs -- see bios/fnt_seg_8x16.c. That machine has a
++ * fixed 320x200 screen, so font_set_default()'s
++ * `(V_REZ_VT < 400) ? &fon8x8 : &fon8x16` can never choose the tall one,
++ * and four kilobytes of glyphs for a resolution the hardware does not
++ * have was the difference between fitting under the parked CDBIOS and
++ * not. Exported rather than duplicated so that if anything ever does
++ * reach for it, it gets real characters. */
++const UWORD fnt_st_8x8_dat[] =
+ {
+     0x0018, 0x3c18, 0x183c, 0xffe7, 0x017e, 0x1818, 0xf0f0, 0x05a0,
+     0x7c06, 0x7c7c, 0xc67c, 0x7c7c, 0x7c7c, 0x0078, 0x07f0, 0x1104,
+@@ -165,7 +175,7 @@ const Fonthead fnt_st_8x8 = {
+     F_STDFORM | F_MONOSPACE | F_DEFAULT,  /* UWORD flags        */
+     0,                  /*   UBYTE *hor_table   */
+     off_8x8_table,       /*   UWORD *off_table   */
+-    dat_table,           /*   UWORD *dat_table   */
++    fnt_st_8x8_dat,      /*   UWORD *dat_table   */
+     256,  /* UWORD form_width */
+     8,  /* UWORD form_height */
+     0,  /* Fonthead * next_font */

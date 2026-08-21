@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 21:06:01 +0000
+Subject: [PATCH 157/184] The 20-second folder open was the DRV_INIT gate
+ refusing a live drive
+
+CDTEST's new per-op clocks caught it in one hardware run. The first
+Getbpb of the session: 20,390 ms -- the init gate's 1200-frame budget
+to the frame -- spent waiting for drive state $10/$20/$40 from a drive
+reporting 1 and 6. The immediate retry ran the identical DRV_INIT
+through the identical gate and succeeded in about two seconds. The
+drive was ready; the gate refused the states it spins up through, and
+the retry collected the credit. Warm numbers on the same run: Getbpb
+25 ms, Dfree 150 ms, Fsfirst 5 ms, Fopen 5 ms -- once mounted, the
+firmware path is already game-snappy. (Our fallback path measured
+3,720 ms for the same Dfree; noted, not the priority.)
+
+So the gate stops being able to fail the visit: on timeout, proceed to
+the read. Every stage below has its own 200-frame bound and ROMREADN
+snaps a willing drive to play, so proceeding costs seconds where
+failing cost twenty. Budget down to 450 frames with the sting removed.
+Doom never blocks on DRV_INIT at all; this is one step from that.
+---
+ bios/scdapi.h  |  2 +-
+ bios/segacd2.S | 17 +++++++++++++++--
+ 2 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index ee187bb..950240a 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  25
++#define SCD_VERSION  26
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index b6f926d..d6f0521 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -249,7 +249,7 @@ _segacd_bios_lost:                      // mask bits seen switched off
+         .globl  _segacd_bios_initwait
+         .align  2
+ _segacd_bios_initwait:                  // frames DRV_INIT may take
+-        .long   1200
++        .long   450
+ 
+ _segacd_bios_drvinit:                   // whether to wake with DRV_INIT
+         // On, and that reverses a correction.
+@@ -608,8 +608,21 @@ brd_wait_init:
+         // the one the BIOS's own ROMREAD singles out as worth another
+         // go, so "not finished yet" is the reading with the most behind
+         // it. Whether it is right is what this change asks.
++        // On timeout, read anyway -- do not fail the visit.
++        //
++        // The hardware log that decided this: the first Getbpb of the
++        // session cost 20,390 ms, which is this gate's 1200-frame
++        // budget to the frame, spent waiting for state $10/$20/$40
++        // from a drive reporting 1 and 6 -- and the immediate retry
++        // re-ran the same DRV_INIT through the same gate and succeeded
++        // in about two seconds. The drive was ready; the gate refused
++        // the states it spins up through. Every stage below carries
++        // its own 200-frame bound, and ROMREADN itself snaps a willing
++        // drive to play, so proceeding costs at most seconds and
++        // failing here cost twenty. Doom never blocks on DRV_INIT at
++        // all: it retries per frame off CDBSTAT.
+         cmp.l   _segacd_bios_initwait,d2
+-        bcc     brd_fail_init
++        bcc     brd_awake
+         move.w  #0x0081,d0              // CDB_STAT
+         move.w  d0,50(a5)
+         jsr     0x5F22

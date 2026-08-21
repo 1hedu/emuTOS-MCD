@@ -1,0 +1,244 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 09:54:25 +0000
+Subject: [PATCH 147/184] The CTRL ladder was never a ladder: $A7/$F0 is mode 0
+
+Four control pairs were read out of the BIOS as an escalation ladder --
+try $A7/$F0, drop to $A4/$D8 when the decoder produces nothing, then
+$A3/$B0, then give up on $A0/$F8. Two of the eight diagnostic arms and
+a rung counter were built on that reading. It is wrong.
+
+CDCSETMODE ($1ED8) is five instructions and none of them touch the
+decoder: it stores its argument into bits 2-5 of the BIOS variable at
+$5A30. CDCSTART reads it back:
+
+  20ba: move.b $5A30(a5),d0
+  20be: andi.b #12,d0        bits 2-3, the mode
+  20c2: beq    $211A
+  211a: move.b #$0A,(a2)     AR = $0A
+  211e: move.b #$A7,(a3)     CTRL0 = $A7
+  2122: move.b #$F0,(a3)     CTRL1 = $F0
+
+The pairs are mode selectors. $A4/$D8 ($207A) and $A3/$B0 ($2168)
+belong to other modes; $A0/$F8 is not a mode at all -- it is the whole
+of the subroutine at $21DA, which the exit path at $215A calls on its
+way out, which is exactly why it looked like giving up. Doom calls
+CDCSETMODE with d1 = 0 two instructions after DRV_INIT and never
+touches it again.
+
+So a data disc wants $A7/$F0 and this driver was walking away from it
+on the first failure and configuring the decoder for a sector format
+the disc does not contain -- for the rest of the session, since the
+rung only ever advanced. Standing candidate for the chaff: 13,018
+sectors rejected on their mode byte against 651 accepted.
+
+Written inline where CDCSTART writes it, not deferred for a drive state
+this machine never reports. $A0/$F8 moves to cdc_stop(), where the BIOS
+puts it. The rung counter, the deferred level-4 write and the escalation
+are gone.
+
+Also: DRV_INIT's budget is a variable now, and bring-up sets it to 300
+frames. A visit that includes a successful DRV_INIT costs about 174 of
+the diagnostic's ticks on the console, so five seconds is generous;
+twenty was a tax an empty tray would pay on top of the twenty the
+cartridge loader already spends. Reads that genuinely need a cold spin-up
+keep the full budget.
+
+Emulator: the trace shows A0/F8 then A7/F0 and no other pair anywhere.
+seeks 4, cd_why 0, header 00 23 25 01, woke 1, DY.
+---
+ bios/scdapi.h  |  2 +-
+ bios/segacd.c  | 96 +++++++++++++++++++++++++++++++-------------------
+ bios/segacd.h  |  1 +
+ bios/segacd2.S | 10 ++++--
+ 4 files changed, 69 insertions(+), 40 deletions(-)
+
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index a1c9e41..5ed00e1 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  15
++#define SCD_VERSION  16
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 1889b34..61a1021 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1057,22 +1057,11 @@ void segacd_int_4_c(void)
+      * wait and `dbeq d7` around it, so after thirty exchanges it stops
+      * asking and moves on. Thirty exchanges is four tenths of a second
+      * at 75 Hz. */
+-    if (cd_ctrl2_wait
+-        && ((cdd_valid && cdd_stat[0] == 0x1) || --cd_ctrl2_wait == 0)) {
+-        /* CDC_AR/CDC_DATA are defined further down; their addresses,
+-         * not the macros, are what this early handler needs. */
+-        WORD sr = set_sr(0x2700);
+-        *(volatile UBYTE *)0xFF8005 = 0x0A;
+-        *(volatile UBYTE *)0xFF8007 = cdc_ladder[cdc_rung][0];
+-        *(volatile UBYTE *)0xFF8007 = cdc_ladder[cdc_rung][1];
+-        /* Set here, not where the rung is chosen: with the write
+-         * deferred, "chosen" and "written" are no longer the same
+-         * event, and a mask that meant the first would report a ladder
+-         * that never actually reached the decoder as tried. */
+-        cdc_rungs |= (UBYTE)(1 << cdc_rung);
+-        set_sr(sr);
+-        cd_ctrl2_wait = 0;
+-    }
++    /* The deferred CTRL write is gone with the ladder it served. It
++     * existed to hold the "second" control pair back until the drive
++     * reported playing, on the theory that the pair was an escalation
++     * step. It is not: $A7/$F0 is mode 0 and CDCSTART writes it inline
++     * at $211A, before it yields. See cdc_setup(). */
+ 
+ 
+     /* Acknowledge -- but only if DTS says there is an outgoing transfer
+@@ -1310,27 +1299,40 @@ static void cdc_setup(void)
+ 
+         GA_INTMASK |= 0x20;     /* level 5, once per sector decoded */
+ 
+-        /* Down a rung if the last configuration never produced a
+-         * sector, stay put if it did. The firmware escalates on
+-         * failure and so does this; what it does not do is throw away
+-         * a decoder setting that is working. */
+-        if (!cdc_rung_ok)
+-            cdc_rung = (UBYTE)((cdc_rung + 1) % 3);
+-        cdc_rung_ok = 0;
+-
+-        *CDC_AR = 0x0A; *CDC_DATA = 0xA0; *CDC_DATA = 0xF8; /* CTRL0, CTRL1 */
+-        if (cdc_altctrl) {
+-            /* B held: the reset pair alone, nothing after it. */
+-        } else if (cd_ctrl_inline) {
+-            *CDC_AR = 0x0A;
+-            *CDC_DATA = cdc_ladder[cdc_rung][0];
+-            *CDC_DATA = cdc_ladder[cdc_rung][1];
+-            cdc_rungs |= (UBYTE)(1 << cdc_rung);
+-        } else {
+-            /* The firmware's way: let the drive be looked at first,
+-             * for up to thirty of its exchanges. */
+-            cd_ctrl2_wait = CDC_CTRL_WAIT;
+-        }
++        /* CTRL0 and CTRL1: $A7, $F0. Once, always, no ladder.
++         *
++         * These four pairs were read out of the BIOS as an escalation
++         * ladder -- try $A7/$F0, and if the decoder produces nothing
++         * drop to $A4/$D8, then $A3/$B0, then give up on $A0/$F8. That
++         * was a misreading of the control flow.
++         *
++         * CDCSETMODE ($1ED8) does nothing but store its argument into
++         * bits 2-5 of the BIOS variable at $5A30. CDCSTART reads it
++         * back at $20BA:
++         *
++         *   20ba: move.b $5A30(a5),d0
++         *   20be: andi.b #12,d0        bits 2-3: the mode
++         *   20c2: beq    $211A         mode 0 ...
++         *   211a: move.b #$0A,(a2)     ... AR = $0A
++         *   211e: move.b #$A7,(a3)     ... CTRL0 = $A7
++         *   2122: move.b #$F0,(a3)     ... CTRL1 = $F0
++         *
++         * The pairs are mode selectors, not fallbacks. $A4/$D8 and
++         * $A3/$B0 belong to other modes, and $A0/$F8 is not a mode at
++         * all -- it is the whole of the subroutine at $21DA, which the
++         * exit path at $215A calls on its way out. That is why it
++         * looked like giving up. Doom calls CDCSETMODE with d1 = 0 two
++         * instructions after DRV_INIT and never touches it again.
++         *
++         * So a data disc wants $A7/$F0 and nothing else, and this
++         * driver was walking away from it on the first failure and
++         * configuring the decoder for a sector format the disc does not
++         * contain. Standing candidate for the chaff: the console
++         * rejected 13,018 sectors on their mode byte and accepted 651.
++         *
++         * Written here, inline, where CDCSTART writes it, rather than
++         * held back for a drive state this machine never reports. */
++        *CDC_AR = 0x0A; *CDC_DATA = 0xA7; *CDC_DATA = 0xF0;
+         set_sr(sr);
+     }
+     cdc_live = 1;
+@@ -1346,6 +1348,10 @@ static void cdc_stop(void)
+ 
+     cdc_live = 0;               /* torn down: the next read initialises */
+     GA_INTMASK &= (UBYTE)~0x20;
++    /* $A0/$F8: what the BIOS's own exit path writes. $215A calls the
++     * subroutine at $21DA, and that pair is all $21DA is. Teardown, not
++     * a mode and not a last resort. */
++    *CDC_AR = 0x0A; *CDC_DATA = 0xA0; *CDC_DATA = 0xF8;
+     *CDC_AR = 0x01; *CDC_DATA = 0x38;
+     *CDC_AR = 0x01; *CDC_DATA = 0x3A;
+     m = *CDC_MODE_RD;
+@@ -3048,7 +3054,23 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+              * happens on the first block anyone asks for, which is the
+              * boot probe, so the drive is awake before disk_init_all
+              * decides whether D: has a filesystem. */
++            /* Five seconds, not twenty.
++             *
++             * A firmware visit that includes a successful DRV_INIT
++             * costs about 174 of the diagnostic's ticks on the console
++             * -- under three seconds -- so five is generous and twenty
++             * is a tax on an empty tray. The cartridge loader already
++             * spends up to twenty of its own waiting for the drive
++             * before EmuTOS starts, and paying it twice for a machine
++             * with nothing in the tray is not a trade worth making for
++             * headroom nothing has ever used.
++             *
++             * Put back afterwards, because a read that genuinely needs
++             * the drive spun up from cold is a different question from
++             * a boot probe. */
++            segacd_bios_initwait = 300UL;
+             cd_woke = (UBYTE)(segacd_bios_read(0UL, 0) == 0 ? 1 : 2);
++            segacd_bios_initwait = 1200UL;
+         }
+     }
+ 
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 3d4f3ec..cabc400 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -62,6 +62,7 @@ UWORD segacd_bios_nearread(void); /* ...one it read at boot, near the boot files
+ BOOL segacd_bios_available(void);
+ void segacd_bios_selftest(void);
+ WORD segacd_bios_read(ULONG lba, WORD count);
++extern ULONG segacd_bios_initwait;  /* frames DRV_INIT may take */
+ UWORD segacd_bios_swaps(void);
+ void segacd_bios_ipath(ULONG *i4, ULONG *own, ULONG *vec4, UWORD *ctrl,
+                        UWORD *lost);
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 9b3fb2e..1d27ab5 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -246,6 +246,11 @@ _segacd_bios_ctrl:                      // $FF8037 and $FF8033 on entry
+         .word   0
+ _segacd_bios_lost:                      // mask bits seen switched off
+         .word   0                       //    at any point during a visit
++        .globl  _segacd_bios_initwait
++        .align  2
++_segacd_bios_initwait:                  // frames DRV_INIT may take
++        .long   1200
++
+ _segacd_bios_drvinit:                   // whether to wake with DRV_INIT
+         // On, and that reverses a correction.
+         //
+@@ -553,7 +558,8 @@ brd_own_done:
+         move.w  d0,50(a5)
+         jsr     0x5F22
+ brd_wait_init:
+-        // Twenty seconds, not three and a third.
++        move.l  _segacd_bios_frames,d2
++        // How long DRV_INIT gets, and why it is now a variable.
+         //
+         // DRV_INIT spins the disc up, reads the table of contents and
+         // then pauses about two seconds -- boot/m1emu.S budgets 20 s
+@@ -564,7 +570,7 @@ brd_wait_init:
+         // the one the BIOS's own ROMREAD singles out as worth another
+         // go, so "not finished yet" is the reading with the most behind
+         // it. Whether it is right is what this change asks.
+-        cmpi.l  #1200,_segacd_bios_frames
++        cmp.l   _segacd_bios_initwait,d2
+         bcc     brd_fail_init
+         move.w  #0x0081,d0              // CDB_STAT
+         move.w  d0,50(a5)

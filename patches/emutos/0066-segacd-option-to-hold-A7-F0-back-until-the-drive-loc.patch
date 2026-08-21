@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 00:05:29 +0000
+Subject: [PATCH 066/184] segacd: option to hold $A7/$F0 back until the drive
+ locks, as the BIOS does
+
+The BIOS writes $A0/$F8 when it resets the decoder and $A7/$F0 only
+once the drive reports itself playing, waiting on drive status in
+between ($21C8 against $2132). This driver has always written both
+pairs back-to-back at setup, before the drive was commanded at all.
+
+The console's failure signature fits a decoder that never cleanly
+locked: sectors decode, but headers appear hundreds of sectors past the
+target, and a fresh setup succeeds where retries inside one did not.
+Neither emulator models CTRL0/CTRL1 meaningfully, so emulation cannot
+distinguish the orderings -- which is precisely why this is a
+diagnostic arm (LATE, the third knob of segacd_cd_tune) rather than a
+blind default change.
+
+The deferred write happens in the level-4 handler on the first valid
+status packet showing state 1, masked to 7 for the three register
+writes because level 5 shares the CDC address register.
+
+Also recorded from BlastEm's hardware-measured CDD model: command
+nibble 1 must be zero, reads undershoot 3 sectors inside the drive,
+pause is a one-track hover rather than a stop, and the status stream
+thins to every third sector during coarse seeks with periodic
+deliberate NOT READY packets.
+---
+ bios/bios.c   | 13 +++++++------
+ bios/segacd.c | 41 +++++++++++++++++++++++++++++++++++++++--
+ bios/segacd.h |  2 +-
+ 3 files changed, 47 insertions(+), 9 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index f6c146c..921cc7d 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1067,8 +1067,9 @@ void biosmain(void)
+          *
+          * Whichever arm's counters stay clean is the answer, read off
+          * a CRT, no reburn required. */
+-        static const UWORD arm_lead[4] = { 20, 2, 20, 2 };
+-        static const UWORD arm_hold[4] = {  0, 0,  1, 1 };
++        static const UWORD arm_lead[8] = { 20, 2, 20, 2, 20, 2, 20, 2 };
++        static const UWORD arm_hold[8] = {  0, 0,  1, 1,  0, 0,  1, 1 };
++        static const UWORD arm_late[8] = {  0, 0,  0, 0,  1, 1,  1, 1 };
+         static char buf[512];
+         static DTA dta;
+         LONG h, rc;
+@@ -1078,10 +1079,10 @@ void biosmain(void)
+ 
+         cprintf("\033E");
+         for (run = 0; ; run++) {
+-            arm = (UWORD)(run & 3);
+-            segacd_cd_tune(arm_lead[arm], arm_hold[arm]);
+-            cprintf("D: TEST %u  LEAD %u HOLD %u  BTNS %02X\r\n",
+-                    run + 1, arm_lead[arm], arm_hold[arm],
++            arm = (UWORD)(run & 7);
++            segacd_cd_tune(arm_lead[arm], arm_hold[arm], arm_late[arm]);
++            cprintf("D: TEST %u  LEAD %u HOLD %u LATE %u  BTNS %02X\r\n",
++                    run + 1, arm_lead[arm], arm_hold[arm], arm_late[arm],
+                     segacd_bootflags);
+ 
+             rc = Dfree((LONG *)buf, 3);         /* 3 = C: */
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 6b1f251..9be3642 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -20,6 +20,7 @@
+  */
+ 
+ #include "emutos.h"
++#include "asm.h"
+ 
+ #ifdef MACHINE_SEGACD
+ 
+@@ -157,6 +158,19 @@ UWORD segacd_bootflags;         /* the raw button word the servant sent.
+  * make on someone else's disc. */
+ static ULONG cd_lead = 20UL;
+ static UBYTE cd_hold;           /* send command 6 after each fill */
++/* When to give the decoder its second control pair.
++ *
++ * The BIOS writes $A0/$F8 when it resets the decoder and $A7/$F0 only
++ * once the drive has locked, waiting on the drive's status in between
++ * ($21C8 against $2132). This driver has always written both
++ * back-to-back, before the drive was even commanded -- and the failure
++ * the console shows is the one a decoder that never cleanly locked
++ * would produce: sectors decoding, headers arriving hundreds of
++ * sectors late, and a fresh setup succeeding where retries inside one
++ * did not. Neither emulator models these two registers at all, which
++ * is why emulation has never been able to see any of this. */
++static UBYTE cd_late;           /* hold $A7/$F0 back until the drive locks */
++static volatile UBYTE cd_ctrl2_wait;    /* ...and it is currently held */
+ /* D: telemetry. Declared up here because the report that publishes it
+  * is written before the code that keeps it, and a forward declaration
+  * for four counters is less to get wrong than moving either. */
+@@ -606,6 +620,24 @@ void segacd_int_4_c(void)
+ 
+     cdd_poll();
+ 
++    /* The held-back control pair, written the moment the drive says it
++     * is playing -- which is the order the BIOS does it in. From here,
++     * at level 4, because the decoder's own interrupt cannot be relied
++     * on for it (a decoder that has not locked may never fire one),
++     * and masked to 7 for the three register writes because level 5
++     * uses the same address register and can preempt this level
++     * mid-sequence. */
++    if (cd_ctrl2_wait && cdd_valid && cdd_stat[0] == 0x1) {
++        /* CDC_AR/CDC_DATA are defined further down; their addresses,
++         * not the macros, are what this early handler needs. */
++        WORD sr = set_sr(0x2700);
++        *(volatile UBYTE *)0xFF8005 = 0x0A;
++        *(volatile UBYTE *)0xFF8007 = 0xA7;
++        *(volatile UBYTE *)0xFF8007 = 0xF0;
++        set_sr(sr);
++        cd_ctrl2_wait = 0;
++    }
++
+ 
+     /* Acknowledge -- but only if DTS says there is an outgoing transfer
+      * to acknowledge. The BIOS tests that bit first and skips the write
+@@ -753,7 +785,7 @@ static void cdc_setup(void)
+     GA_INTMASK |= 0x20;         /* level 5, once per sector decoded */
+ 
+     *CDC_AR = 0x0A; *CDC_DATA = 0xA0; *CDC_DATA = 0xF8; /* CTRL0, CTRL1 */
+-    if (!cdc_altctrl) {
++    if (!cdc_altctrl && !cd_late) {
+         *CDC_AR = 0x0A; *CDC_DATA = 0xA7; *CDC_DATA = 0xF0;
+     }
+ }
+@@ -1117,6 +1149,8 @@ static void cdr_reissue(void)
+      * not the same thing and has no reason to go better. */
+     cdc_setup();
+     cdd_ask_read(start);
++    if (cd_late && !cdc_altctrl)
++        cd_ctrl2_wait = 1;
+     cdr_state = CDR_COMMAND;
+ }
+ 
+@@ -1550,6 +1584,8 @@ static BOOL cd_fetch(ULONG lba)
+              * the drive around behind its own back. */
+             lba_to_msf(lba >= CDR_LEADIN ? lba - CDR_LEADIN : 0, start);
+             cdd_ask_read(start);
++            if (cd_late && !cdc_altctrl)
++                cd_ctrl2_wait = 1;
+             cd_quiet = 0;
+             cd_streaming = 1;
+             cd_seeks++;
+@@ -1802,10 +1838,11 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+  * experimental lever on a button, and the button's detection could not
+  * be seen -- so now the diagnostic drives the levers itself and prints
+  * what it set. Nothing about a normal boot goes through here. */
+-void segacd_cd_tune(UWORD lead, UWORD hold)
++void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late)
+ {
+     cd_lead = lead;
+     cd_hold = (UBYTE)(hold ? 1 : 0);
++    cd_late = (UBYTE)(late ? 1 : 0);
+ }
+ 
+ LONG segacd_cd_ioctl(WORD op, void *arg)
+diff --git a/bios/segacd.h b/bios/segacd.h
+index cd95139..0858aea 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -38,7 +38,7 @@ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+-void segacd_cd_tune(UWORD lead, UWORD hold);
++void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);
+ 
+ /* Clock */
+ ULONG segacd_getdt(void);

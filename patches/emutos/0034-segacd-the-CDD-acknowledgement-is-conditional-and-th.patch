@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 06:30:36 +0000
+Subject: [PATCH 034/184] segacd: the CDD acknowledgement is conditional, and
+ that matters
+
+Writing #4 to the control register also puts zero into DRS, and zero
+written to DRS aborts an incoming transfer. The BIOS tests DTS first
+and skips the write when it is clear; this driver wrote it every
+exchange, which tears down packets that were about to arrive.
+
+That fits the hardware report exactly: a link that had been merely
+unhelpful -- perfect score, drive answering "invalid" -- became a dead
+one, score zero and the interrupt stopped, in the build that started
+acknowledging unconditionally.
+---
+ bios/segacd.c | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 96dbfb0..4d0ee65 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -371,11 +371,16 @@ void segacd_int_4_c(void)
+ 
+     cdd_poll();
+ 
+-    /* Acknowledge the exchange before sending anything: HOCK stays
+-     * set, DTS and DRS go to zero. The BIOS does this the moment it
+-     * has the status in hand and only then loads the next command,
+-     * which is the ordering this driver had inside out. */
+-    *CDD_CTRL_B = CDD_HOCK;
++    /* Acknowledge -- but only if DTS says there is an outgoing transfer
++     * to acknowledge. The BIOS tests that bit first and skips the write
++     * when it is clear, and the reason is in what the write does: it
++     * zeroes DRS as well, and zero written to DRS aborts an incoming
++     * transfer. Doing it unconditionally, as this driver did for one
++     * disc, tears down packets that were about to arrive -- which is
++     * exactly the shape of the failure that came back, a link that had
++     * been merely unhelpful becoming a link that was dead. */
++    if (*CDD_CTRL_RD & CDD_DTS)
++        *CDD_CTRL_B = CDD_HOCK;
+ 
+     /* Send something every single exchange, as the BIOS does: the
+      * queued question if there is one, otherwise a NOP. The BIOS never

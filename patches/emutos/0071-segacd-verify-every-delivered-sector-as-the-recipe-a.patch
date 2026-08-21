@@ -1,0 +1,199 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 04:39:01 +0000
+Subject: [PATCH 071/184] segacd: verify every delivered sector, as the recipe
+ always said to
+
+The audit the LED forced. Two absences, both against steps written in
+docs/cdd-bios-notes.md since stage 3:
+
+'Compare the header against the frame expected, else start over' --
+the BIOS does it, megadev and Lunar do it twice, this driver never
+did. Now done after every transfer; a mismatch counts as cd_wrongsec,
+stamps why nibble 5, and retries.
+
+STAT0, read every sector since the beginning (reading STAT3 is what
+re-arms the interrupt) and never once consulted: bit 7 is CRCOK, and
+without the gate a sector the decoder itself flagged as damaged
+entered the ring as good. Gated when the correction pair is in force.
+
+The header check then caught what it was built for, in emulation of
+all places: 24 wrong-sector deliveries per run from stale ring
+entries -- the decoder's buffer is five or six sectors deep and keeps
+writing while the foreground gets round to spending an entry, so a
+lapped entry delivers some newer sector's bytes. The five weeks of
+occasional Fsfirst -33 and err counts in 'passing' emulated runs were
+this. Entries more than four behind the stream are now refused, and
+the diagnostic prints ten rounds of zero errors, zero wrong sectors,
+zero refusals on both cores -- its first clean sheet.
+---
+ bios/bios.c   |  8 ++++---
+ bios/segacd.c | 66 ++++++++++++++++++++++++++++++++++++++++++++++-----
+ bios/segacd.h |  2 +-
+ 3 files changed, 66 insertions(+), 10 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 921cc7d..5517e99 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1073,7 +1073,7 @@ void biosmain(void)
+         static char buf[512];
+         static DTA dta;
+         LONG h, rc;
+-        UWORD run, arm, seeks, hits, errs, why;
++        UWORD run, arm, seeks, hits, errs, why, bad, wrong;
+         UBYTE state;
+         int i;
+ 
+@@ -1107,9 +1107,11 @@ void biosmain(void)
+                 cprintf(" Fread    %ld   [%s]\r\n", rc, buf);
+             }
+ 
+-            segacd_cd_stats(&seeks, &hits, &errs, &state, &why);
+-            cprintf(" drive %X  seek %u  wait %u  err %u  why %04X\r\n\r\n",
++            segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
++                            &bad, &wrong);
++            cprintf(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+                     state, seeks, hits, errs, why);
++            cprintf(" refused %u  wrong-sector %u\r\n\r\n", bad, wrong);
+ 
+             /* Long enough to read a round before the next scrolls it
+              * away, and long enough that the drive is not being flogged
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 92f5b9c..611201b 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -226,7 +226,12 @@ static UBYTE cd_gone;           /* the drive said the disc changed */
+ static UBYTE cd_badrun;         /* consecutive packets saying "nothing" */
+ static UBYTE cd_badstate;       /* ...and the state that said it */
+ static UWORD cd_notready;       /* reads that found the drive unfit */
+-static UWORD cd_badhdr;         /* headers rejected as impossible BCD */
++static UWORD cd_badhdr;         /* sectors the decoder disowned, plus
++                                 * headers rejected as impossible BCD */
++static UWORD cd_wrongsec;       /* transfers that delivered the wrong
++                                 * sector and were caught by the header
++                                 * check -- each one of these used to be
++                                 * silent corruption */
+ static UWORD cd_why;            /* nibble per attempt of the last
+                                  * failed fetch: 1 timed out, 2 the
+                                  * head was already past, 3 the
+@@ -271,6 +276,17 @@ static BOOL cd_ring_find(ULONG lba, UWORD *pt)
+ {
+     UBYTE i;
+ 
++    /* An entry is only as good as the decoder's buffer is deep -- five
++     * or six sectors -- because the decoder keeps writing while the
++     * foreground gets round to reading. An entry the stream has since
++     * lapped points at some newer sector's bytes, and until the header
++     * check existed, spending one delivered that newer sector with a
++     * straight face: the ring said 1600, the buffer held 1606. Refuse
++     * anything the stream has moved more than four past; a refusal
++     * costs one seek, a stale hit used to cost silent corruption. */
++    if (cd_ring_newest != 0xFFFFFFFFUL && cd_ring_newest > lba + 4)
++        return FALSE;
++
+     for (i = 0; i < CD_RING; i++) {
+         if (cd_ring_lba[i] == lba) {
+             *pt = cd_ring_pt[i];
+@@ -888,6 +904,12 @@ void segacd_int_5_c(void)
+      * pointer has to be latched with it: by the time the foreground gets
+      * round to the transfer, PT has moved on to later sectors. */
+     cdc_pt_last = (UWORD)(((UWORD)pth << 8) | ptl);
++
++    if (!cdc_altctrl && !(cdc_stat4[0] & 0x80)) {
++        cd_badhdr++;                    /* decoded, but damaged */
++        return;
++    }
++
+     if (!cdc_hit && h0 == cdc_want[0] && h1 == cdc_want[1]
+                  && h2 == cdc_want[2]) {
+         cdc_pt = cdc_pt_last;
+@@ -897,7 +919,18 @@ void segacd_int_5_c(void)
+     /* Note it in the ring, whether or not anybody asked for it. Cheap:
+      * a couple of multiplies and three stores, against the alternative
+      * of a reader trying to be awake at the right moment. */
+-    /* Only a header that could exist may enter the ring. A console
++    /* Only a sector the decoder itself vouches for may be latched or
++     * ring-inserted. STAT0 bit 7 is CRCOK: the mode-1 check passed
++     * after correction. This driver read STAT0 every sector from the
++     * first day -- reading STAT3 is what re-arms the interrupt -- and
++     * never once looked at the value, so a damaged sector entered the
++     * ring with the same standing as a good one. On pressed discs that
++     * is rare; on the hundredth CD-R through a 1992 lens it is
++     * routine. Gated only when the correction pair is in force: with
++     * the reset-time pair alone (B held) the flag never sets and the
++     * gate would refuse everything.
++     *
++     * Only a header that could exist may enter the ring. A console
+      * once reported the head at 01:80:00 -- eighty is not a second --
+      * and a poisoned ring is worse than an empty one: a garbage entry
+      * that happens to equal the wanted LBA delivers the wrong sector
+@@ -1325,7 +1358,9 @@ static void cdr_report(void)
+      * should be the length of the image the disc was built from. */
+     CDREPORT[32] = (UWORD)(((UWORD)cdd_len_m << 8) | cdd_len_s);
+     CDREPORT[33] = (UWORD)(((UWORD)cdd_len_f << 8) | cdd_len_ok);
+-    CDREPORT[34] = cd_badhdr;   /* impossible headers the ring refused */
++    CDREPORT[34] = (UWORD)((cd_wrongsec > 0xFF ? 0xFF00
++                            : (cd_wrongsec << 8))
++                           | (cd_badhdr > 0xFF ? 0xFF : cd_badhdr));
+     CDREPORT[0] = CDREPORT_MAGIC;
+ }
+ 
+@@ -1786,8 +1821,25 @@ static BOOL cd_fetch(ULONG lba)
+ 
+ collect:
+         if (cdc_grab(pt)) {
+-            cd_cached = lba;
+-            got = TRUE;
++            /* The step the recipe always had and this driver never
++             * did: "compare the header against the frame expected,
++             * else start over". The BIOS does it; megadev and Lunar
++             * both do it twice. Without it a stale pointer -- the
++             * decoder's buffer is about six sectors deep, and ours is
++             * latched at interrupt time and spent later -- delivers
++             * some other sector's bytes with a straight face, which is
++             * how a directory reads back plausible and empty. */
++            UBYTE wanthdr[3];
++
++            lba_to_msf(lba, wanthdr);
++            if (cdc_hdr[0] == wanthdr[0] && cdc_hdr[1] == wanthdr[1]
++                && cdc_hdr[2] == wanthdr[2]) {
++                cd_cached = lba;
++                got = TRUE;
++            } else {
++                cd_wrongsec++;
++                cd_why = (UWORD)((cd_why << 4) | 5);
++            }
+         } else {
+             cd_streaming = 0;           /* the transfer is what failed */
+             cd_why = (UWORD)((cd_why << 4) | 3);
+@@ -1945,13 +1997,15 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+  * The counters are the diagnosis: a read that fails and a read that
+  * never happened look identical from GEMDOS's side of the call. */
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+-                     UBYTE *state, UWORD *why)
++                     UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong)
+ {
+     *seeks = cd_seeks;
+     *hits = cd_hits;
+     *errs = cd_errors;
+     *state = cdd_stat[0];
+     *why = cd_why;
++    *bad = cd_badhdr;
++    *wrong = cd_wrongsec;
+ }
+ 
+ /* The diagnostic's knobs. The disc got burned with exactly one
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 0858aea..6f212c9 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -35,7 +35,7 @@ void segacd_keyclick(void);
+ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
+ LONG segacd_cd_ioctl(WORD op, void *arg);
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+-                     UBYTE *state, UWORD *why);
++                     UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);

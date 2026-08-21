@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 18:26:32 +0000
+Subject: [PATCH 018/184] segacd: publish sound state so a silent console can
+ be diagnosed
+
+First hardware report was no keyclick from the on-screen keyboard, and
+nothing on screen could say whether the software chain even reached the
+machine layer. It now counts every keyclick it is asked for and reports
+that, plus whether the PCM chip was set up and whether conterm has
+keyclick enabled, packed into the spare bits of the drive status comm
+word -- no comm register was free.
+
+Verified rising under both cores: three OSK keypresses, three clicks.
+So a console showing the count rise and making no sound has an
+analogue-path problem, not a software one.
+---
+ bios/segacd.c | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index c54ddfd..11e8203 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -101,6 +101,9 @@ const UBYTE *segacd_physbase(void)
+ #define PCM_CLICK_FRAMES 2
+ 
+ static UBYTE pcm_countdown;             /* VBLs left before we silence it */
++static UBYTE pcm_clicks;                /* keyclicks actually requested */
++static UBYTE pcm_ready;                 /* segacd_sound_init() completed */
++static UWORD bram_status;               /* base value of the status word */
+ 
+ /* A decaying triangle tone, sign-magnitude: bit 7 is the sign, bits 6-0
+  * the magnitude. 0xFF is the chip's end-of-sample marker, so magnitudes
+@@ -143,6 +146,8 @@ void segacd_sound_init(void)
+     PCM_ONOFF = 0xFF;                   /* every channel off for now */
+     pcm_countdown = 0;
+ 
++    pcm_ready = 1;
++
+     /* Power-on chime. Not decoration: the bell's only other trigger is
+      * a BEL character reaching the VT52 driver, and nothing in GEM, the
+      * desktop or EmuCON ever writes one -- so without this there is no
+@@ -165,6 +170,7 @@ void segacd_bell(void)
+ 
+ void segacd_keyclick(void)
+ {
++    pcm_clicks++;               /* proves the hook chain reaches us */
+     pcm_beep(PCM_CLICK_FRAMES, 0x50);
+ }
+ 
+@@ -225,6 +231,16 @@ void segacd_int_2_c(void)
+         }
+     }
+ 
++    /* Sound telemetry, packed into the spare bits of the drive status
++     * word: no comm register is free, and this answers the only
++     * question a silent console cannot -- whether the keyclick chain
++     * reaches the machine layer at all. If the count moves when you
++     * press keys, the software is fine and the silence is analogue. */
++    *(volatile UWORD *)0xFF802A = (UWORD)(bram_status
++        | (pcm_ready ? 0x20 : 0)
++        | ((conterm & 1) ? 0x40 : 0)
++        | ((UWORD)pcm_clicks << 8));
++
+     if (pcm_countdown) {                /* silence the bell when it is due */
+         if (--pcm_countdown == 0)
+             PCM_ONOFF = 0xFF;
+@@ -423,8 +439,8 @@ void segacd_floppy_init(void)
+     *(volatile UWORD *)0xFF8028 = 0xB0FF;
+ 
+     /* low nibble: state; bit 4: writes verified */
+-    *(volatile UWORD *)0xFF802A =
+-        (UWORD)(bram_state | (bram_wtest ? 0x10 : 0));
++    bram_status = (UWORD)(bram_state | (bram_wtest ? 0x10 : 0));
++    *(volatile UWORD *)0xFF802A = bram_status;
+     *(volatile UWORD *)0xFF8022 =
+         (bram_state == BRAM_NONE) ? 0 : bram_fs_signature();
+ }

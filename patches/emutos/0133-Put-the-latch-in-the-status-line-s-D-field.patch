@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Fri, 14 Aug 2026 06:52:23 +0000
+Subject: [PATCH 133/184] Put the latch in the status line's D field
+
+cd_dtest's two bits are sticky -- bit 0 the first time cd_read_block()
+is entered, bit 1 the first time a block is handed over -- and neither
+is ever cleared. The boot probe sets bit 0 on every boot, so "DX" has
+been on the status line permanently and means only "the drive was
+touched once, at some point". It cannot distinguish reads being tried
+and failing from nothing being asked at all, which is the distinction
+that mattered.
+
+Pack the live dead-drive latch into bits 8 and 9 of CDREPORT[27].
+---
+ bios/segacd.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index fdc1a1d..e010c8a 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -1873,7 +1873,19 @@ static void cdr_report(void)
+     CDREPORT[24] = cd_seeks;
+     CDREPORT[25] = cd_hits;
+     CDREPORT[26] = cd_errors;
+-    CDREPORT[27] = cd_dtest;
++    /* cd_dtest's two bits are sticky: bit 0 goes on the first time
++     * cd_read_block() is entered and bit 1 the first time a block is
++     * handed over, and neither is ever cleared. So "1, not 2" has been
++     * on the status line since the boot probe touched the drive, on
++     * every boot, and stays there whether or not anything has asked
++     * since. It cannot tell "reads are being tried and failing" from
++     * "nothing has been asked in ten minutes".
++     *
++     * The latch is what separates them, and unlike the other two it is
++     * a live value, re-read every report. */
++    CDREPORT[27] = (UWORD)(cd_dtest
++                         | (cd_dead ? 0x100 : 0)
++                         | (cd_deadrun ? 0x200 : 0));
+     CDREPORT[28] = cd_why;
+     /* The drive's own state, nibble 0 of its status packet. The
+      * BIOS dispatches sixteen ways on this byte at $140E and this

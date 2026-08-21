@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 21:36:12 +0000
+Subject: [PATCH 087/184] segacd: mask the payload transfer -- the last
+ unguarded CDC sequence
+
+'Dfree -11, Fsfirst -33, Fopen -33' is two different faults, and the
+-33 is the one nothing here could see: a directory that reads without
+error and does not contain a file sitting in its first entry means the
+bytes were wrong, not the read.
+
+_segacd_cdc_read streams 1026 words out of the host register with
+interrupts enabled. Level 4 arrives every 13 ms and level 5 on every
+decoded sector; both read the CDC register file, level 5 alone doing
+eleven reads of 0xFF8007 inside that window. The header words leave
+first and arrive intact, so the sector passes every check this driver
+has while its payload is disturbed behind them -- silent corruption
+with a valid header, which is exactly the -33 signature.
+
+Every foreground register sequence in segacd.c was masked days ago
+against precisely this hazard. The payload transfer, the longest and
+most exposed of them all, was left open. Sega's CDCTRN cannot hit it
+because it runs FROM the decoder interrupt; ours runs underneath it.
+
+About 1.5 ms masked at 12.5 MHz -- one exchange window, and the drive
+tolerates a late read. It is a late COMMAND that kills the link, and
+none are sent from here.
+---
+ bios/segacd2.S | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/bios/segacd2.S b/bios/segacd2.S
+index 98b0a7c..b682bbc 100644
+--- a/bios/segacd2.S
++++ b/bios/segacd2.S
+@@ -98,11 +98,31 @@ _segacd_int_5:
+ //   hdr   <- two words, the sector's M/S/F/mode header
+ //   data  <- (groups+1) * 8 words
+         .globl  _segacd_cdc_read
++// Masked for its whole length, which it was not until now.
++//
++// The loop below streams 1026 words out of the CDC's host register with
++// interrupts enabled. Level 4 arrives every 13 ms and level 5 on every
++// decoded sector, and BOTH read the CDC register file -- level 5 does
++// eleven reads of 0xFF8007 by itself. The header words leave first and
++// arrive intact, so nothing downstream can tell: the sector passes the
++// header check with a disturbed payload behind it, which is exactly
++// what "Fsfirst -33, file not in a directory that read fine" is.
++//
++// Every foreground register sequence in segacd.c was masked days ago
++// for precisely this hazard; the payload transfer, the longest and
++// most exposed of them, was left open. Sega's CDCTRN cannot hit this
++// because it runs FROM the decoder interrupt. Ours runs underneath it.
++//
++// About 1.5 ms at 12.5 MHz -- one exchange window at most, and the
++// drive tolerates a late read; it is a late COMMAND that kills the
++// link, and none are sent from here.
+ _segacd_cdc_read:
+         move.l  4(sp),a1                // header destination
+         move.l  8(sp),a0                // data destination
+         move.w  14(sp),d1               // low word of the long count
+         move.l  a2,-(sp)
++        move.w  sr,-(sp)
++        move.w  #0x2700,sr
+         lea     0xFF8008,a2
+         move.w  (a2),(a1)+
+         nop
+@@ -124,6 +144,7 @@ _segacd_cdc_read:
+         move.w  (a2),(a0)+
+         nop
+         dbra    d1,1b
++        move.w  (sp)+,sr
+         move.l  (sp)+,a2
+         rts
+ 

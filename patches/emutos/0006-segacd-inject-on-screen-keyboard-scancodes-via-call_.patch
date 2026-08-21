@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 04:32:39 +0000
+Subject: [PATCH 006/184] segacd: inject on-screen-keyboard scancodes via
+ call_ikbdraw
+
+The servant posts (scancode<<8)|seq in GA_KEY when an OSK key is
+pressed; the VBL handler feeds it to EmuTOS with call_ikbdraw (press +
+release), the exact mechanism the Lisa port uses. Shift (0x2A) latches
+caps-lock style. A scancode echo to a status register lets the servant
+confirm each key completed the trip. call_ikbdraw guards widened to
+include MACHINE_SEGACD in ikbd.h and aciavecs.S.
+---
+ bios/aciavecs.S |  2 +-
+ bios/ikbd.h     |  3 ++-
+ bios/segacd.c   | 23 +++++++++++++++++++++++
+ 3 files changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/bios/aciavecs.S b/bios/aciavecs.S
+index 216b74d..8d92a3a 100644
+--- a/bios/aciavecs.S
++++ b/bios/aciavecs.S
+@@ -553,7 +553,7 @@ _call_mousevec:
+ #endif
+         rts
+ 
+-#if CONF_WITH_FLEXCAN || CONF_SERIAL_IKBD || defined(MACHINE_LISA)
++#if CONF_WITH_FLEXCAN || CONF_SERIAL_IKBD || defined(MACHINE_LISA) || defined(MACHINE_SEGACD)
+ 
+ /******************************************************************************/
+ /* Call ikbdraw from C                                                        */
+diff --git a/bios/ikbd.h b/bios/ikbd.h
+index 253008b..bec79ea 100644
+--- a/bios/ikbd.h
++++ b/bios/ikbd.h
+@@ -128,7 +128,8 @@ void call_mousevec(SBYTE *packet);
+ #ifdef MACHINE_AMIGA
+ void call_joyvec(UBYTE *packet);
+ #endif
+-#if CONF_WITH_FLEXCAN || CONF_SERIAL_IKBD || defined(MACHINE_LISA)
++#if CONF_WITH_FLEXCAN || CONF_SERIAL_IKBD || defined(MACHINE_LISA) \
++ || defined(MACHINE_SEGACD)
+ void call_ikbdraw(UBYTE b);
+ #endif
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index f4a0c0c..cb9b5ee 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -109,6 +109,29 @@ void segacd_int_2_c(void)
+         oldbtn = btn;
+     }
+ 
++    /* On-screen keyboard: the servant posts (scancode<<8)|seq in GA_KEY
++     * when a key is pressed. Shift (0x2A) latches caps-lock style; every
++     * other key is a press/release pair. */
++    {
++        static UBYTE oldseq, shift_down;
++        UWORD kw = *(volatile UWORD *)0xFF801C;
++        UBYTE seq = (UBYTE)kw;
++        UBYTE sc = (UBYTE)(kw >> 8);
++
++        if (seq != oldseq) {
++            oldseq = seq;
++            if (sc == 0x2A) {
++                shift_down ^= 1;
++                call_ikbdraw(shift_down ? 0x2A : 0xAA);
++            } else if (sc) {
++                call_ikbdraw(sc);
++                call_ikbdraw((UBYTE)(sc | 0x80));
++            }
++            /* echo to the servant: proves the key made the full trip */
++            *(volatile UWORD *)0xFF8028 = (UWORD)((oldseq << 8) | sc);
++        }
++    }
++
+     int_vbl();
+ }
+ 

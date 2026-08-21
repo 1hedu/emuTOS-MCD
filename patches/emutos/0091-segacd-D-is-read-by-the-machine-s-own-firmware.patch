@@ -1,0 +1,260 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 22:13:41 +0000
+Subject: [PATCH 091/184] segacd: D: is read by the machine's own firmware
+
+Dfree 0, 92 of 8095 free. Fsfirst 0 [READCD.TXT]. Fopen 6. Fread 32.
+CDBIOS rd 8 fail 0. The whole filesystem stack, served by the parked
+CDBIOS through the timeshare, on both cores.
+
+cd_fill now visits the firmware instead of driving the decoder: one
+visit, up to four sectors, ROMREADN taking a count so a run of
+consecutive sectors costs one seek and one seek only -- the BIOS does
+its own seeking, its own retrying and its own streaming, which is what
+every commercial disc has always relied on.
+
+Our CDD traffic stops the moment the timeshare engages. Two drivers
+commanding one drive is worse than either alone: the VBL's status
+rotation would land inside the BIOS's session and take the drive out
+from under it. One drive, one master.
+
+And the stage-3 verification is re-based on whoever is actually
+reading. It silently stopped running when our driver stopped being
+used -- taking the harness's automated gate with it -- so the same two
+sectors are now checked the same two ways, by the firmware, filling
+the same report block. verdict 03 on both cores.
+---
+ bios/bios.c   |   7 +--
+ bios/segacd.c | 127 +++++++++++++++++++++++++++++++++++++++++++++++++-
+ bios/segacd.h |   5 +-
+ 3 files changed, 133 insertions(+), 6 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 25f4160..e14ceaa 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1075,7 +1075,7 @@ void biosmain(void)
+         LONG h, rc;
+         UWORD run, arm, seeks, hits, errs, why, bad, wrong, torn, flag;
+         WORD wdelta;
+-        UWORD fix, flba, fsame;
++        UWORD fix, flba, fsame, ts, tsf;
+         UBYTE state;
+         int i;
+ 
+@@ -1111,12 +1111,13 @@ void biosmain(void)
+ 
+             segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
+                             &bad, &wrong, &torn, &flag, &wdelta, &fix,
+-                            &flba, &fsame);
++                            &flba, &fsame, &ts, &tsf);
+             cprintf(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+                     state, seeks, hits, errs, why);
+             cprintf(" torn %u bcd %u wr %u l%d fx %u fl %u\r\n",
+                     torn, bad, wrong, wdelta, fix, flag);
+-            cprintf(" lastfail %u x%u\r\n", flba, fsame);
++            cprintf(" lastfail %u x%u  CDBIOS rd %u fail %u\r\n",
++                    flba, fsame, ts, tsf);
+             /* Phase one of the timeshare: is the machine's own CDBIOS
+              * still up there in Word RAM, and does it execute when
+              * exchanged back into low memory? CDBCHK is the smallest
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 895ce8e..54cf3d5 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -2112,6 +2112,53 @@ static UBYTE cd_cache[CD_CACHE_SECTORS][CDC_DATA_BYTES];
+ 
+ /* Fill the cache starting at lba: one seek, then as many more as the
+  * drive hands over while we are still listening. */
++/* Fill the cache by visiting the parked firmware.
++ *
++ * One visit, up to CD_TS_SECTORS sectors, straight into the scratch
++ * buffer above phystop; then the cache is filled from it once EmuTOS's
++ * world is back. The BIOS does its own seeking, its own retrying and
++ * its own multi-sector streaming -- ROMREADN takes a count -- so a run
++ * of consecutive sectors costs one seek and one visit, which is what
++ * every commercial disc has always done.
++ *
++ * While this path is in use our own CDD traffic must stop. Two drivers
++ * commanding one drive is worse than either alone: the VBL's status
++ * rotation would land in the middle of the BIOS's session and take the
++ * drive out from under it. */
++#define CD_TS_SECTORS 4         /* 8 KB of scratch at 0x7D000 */
++
++static UBYTE cd_ts;             /* the timeshare is driving */
++static UBYTE cd_ts_decided;
++static UWORD cd_ts_reads, cd_ts_fails;
++
++static BOOL cd_fill_bios(ULONG lba)
++{
++    const UBYTE *scratch = (const UBYTE *)0x7D000UL;
++    UBYTE want = CD_TS_SECTORS;
++    UBYTE i;
++
++    if (lba + want > CD_DDISK_LBA + (CD_DDISK_BLOCKS >> CD_BPS_SHIFT))
++        want = (UBYTE)(CD_DDISK_LBA + (CD_DDISK_BLOCKS >> CD_BPS_SHIFT)
++                       - lba);
++    if (want == 0)
++        return FALSE;
++
++    cd_seeks++;
++    if (segacd_bios_read(lba, want)) {
++        cd_ts_fails++;
++        return FALSE;
++    }
++    cd_ts_reads++;
++
++    for (i = 0; i < want; i++)
++        memcpy(cd_cache[i], scratch + (ULONG)i * CDC_DATA_BYTES,
++               CDC_DATA_BYTES);
++    cd_cache_base = lba;
++    cd_cache_have = want;
++    cd_cached = lba;
++    return TRUE;
++}
++
+ static BOOL cd_fill(ULONG lba)
+ {
+     UBYTE i;
+@@ -2119,6 +2166,9 @@ static BOOL cd_fill(ULONG lba)
+     cd_cache_base = 0xFFFFFFFFUL;
+     cd_cache_have = 0;
+ 
++    if (cd_ts)
++        return cd_fill_bios(lba);
++
+     if (!cd_fetch(lba))
+         return FALSE;
+     memcpy(cd_cache[0], CDSECT, CDC_DATA_BYTES);
+@@ -2164,6 +2214,20 @@ static BOOL cd_read_block(ULONG block, UBYTE *buf)
+     UWORD off = (UWORD)((block & ((1U << CD_BPS_SHIFT) - 1)) * SECTOR_SIZE);
+ 
+     cd_dtest |= 1;
++
++    /* Decide once, on the first block anyone asks for: if the machine's
++     * own firmware is parked up there, it drives the disc. It reads
++     * this disc perfectly and has since 1991; the driver below it is
++     * five weeks old and does not. Our CDD traffic stops at the same
++     * moment -- one drive, one master. */
++    if (!cd_ts_decided) {
++        cd_ts_decided = 1;
++        if (segacd_bios_available()) {
++            cd_ts = 1;
++            cdd_cmd_on = 0;     /* our VBL stops talking to the drive */
++        }
++    }
++
+     if (lba < cd_cache_base || lba >= cd_cache_base + cd_cache_have) {
+         UBYTE go;
+ 
+@@ -2298,7 +2362,6 @@ static BOOL bios_parked(void)
+ WORD segacd_bios_call(WORD fn);         /* segacd2.S */
+ extern UWORD segacd_bios_swapcnt;       /* segacd2.S */
+ 
+-WORD segacd_bios_read(ULONG lba, WORD count);   /* segacd2.S */
+ 
+ /* Phase two: does the parked firmware actually READ?
+  *
+@@ -2329,6 +2392,56 @@ UWORD segacd_bios_readtest(void)
+     return 0;
+ }
+ 
++/* The stage-3 verification, re-based on the timeshare.
++ *
++ * The old self-test proved OUR driver could read; with the firmware
++ * driving there is nothing of ours left in that path, and the test
++ * silently stopped running -- taking the harness's automated gate with
++ * it. This is the same verification against the same two sectors,
++ * performed by whoever is actually reading: the pattern sector, which
++ * is checked against a formula, and the volume descriptor, which is
++ * checked against its signature. The report block is filled exactly as
++ * before, so every host-side tool keeps working unchanged. */
++void segacd_bios_selftest(void)
++{
++    const UBYTE *scratch = (const UBYTE *)0x7D000UL;
++    UBYTE k;
++
++    if (!bios_parked())
++        return;
++
++    for (k = 0; k < CDR_SLOTS; k++) {
++        ULONG h = 0;
++        UWORD i;
++
++        if (segacd_bios_read(cdr_lbas[k], 1)) {
++            cdr_verdict |= CDR_V_NOREAD;
++            cdr_fails[k] = 1;
++            continue;
++        }
++        memcpy(CDSECT, scratch, CDC_DATA_BYTES);
++        for (i = 0; i < CDC_DATA_BYTES; i++)
++            h = (h << 5) - h + CDSECT[i];
++        cdr_sum[k] = h;
++        if (cdr_check(k)) {
++            cdr_verdict |= (UBYTE)(1 << k);
++            cdr_pub = k;
++        } else {
++            cdr_verdict |= CDR_V_BAD;
++        }
++        cdc_head[0] = scratch[0];       /* the header the BIOS delivered */
++        cdc_head[1] = scratch[1];
++        cdc_head[2] = scratch[2];
++        cdc_head[3] = scratch[3];
++    }
++    cdr_state = CDR_PARKED;
++}
++
++BOOL segacd_bios_available(void)
++{
++    return bios_parked();
++}
++
+ UWORD segacd_bios_probe(void)
+ {
+     if (!bios_parked())
+@@ -2352,8 +2465,10 @@ UWORD segacd_bios_swaps(void)
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+                      UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
+-                     UWORD *flba, UWORD *fsame)
++                     UWORD *flba, UWORD *fsame, UWORD *ts, UWORD *tsf)
+ {
++    *ts = cd_ts ? cd_ts_reads : 0xFFFF;
++    *tsf = cd_ts_fails;
+     *wdelta = cd_wrongdelta;
+     *fix = cd_fixups;
+     *flba = (UWORD)cd_lastfail;
+@@ -2631,6 +2746,14 @@ void segacd_int_2_c(void)
+      * count is a fallback for the case where the round-trip test never
+      * concludes -- ten seconds in, try anyway and let the result say
+      * what happened. */
++    /* With the firmware driving, the verification runs through it --
++     * once, as soon as it is asked for, with no waiting on a CDD round
++     * trip this driver no longer performs. */
++    if (cd_selftest && !cdr_tried && cd_ts) {
++        cdr_tried = 1;
++        segacd_bios_selftest();
++    }
++
+     if (cd_selftest && cdd_cmd_on && !cdr_tried && cdr_state == CDR_IDLE
+             && (cdd_ok || ++cdr_boot > 600)) {
+         cdr_tried = 1;
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 34952e5..6b50c8d 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -37,10 +37,13 @@ LONG segacd_cd_ioctl(WORD op, void *arg);
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+                      UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix,
+-                     UWORD *flba, UWORD *fsame);
++                     UWORD *flba, UWORD *fsame, UWORD *ts, UWORD *tsf);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
+ UWORD segacd_bios_probe(void);  /* exchange the CDBIOS in, call it, out */
+ UWORD segacd_bios_readtest(void); /* ...and have it read a known sector */
++BOOL segacd_bios_available(void);
++void segacd_bios_selftest(void);
++WORD segacd_bios_read(ULONG lba, WORD count);
+ UWORD segacd_bios_swaps(void);
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);

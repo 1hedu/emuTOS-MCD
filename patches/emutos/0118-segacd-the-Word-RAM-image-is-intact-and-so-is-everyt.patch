@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 10:26:20 +0000
+Subject: [PATCH 118/184] segacd: the Word RAM image is intact, and so is
+ everything else
+
+A checksum of 192 KB of the running EmuTOS image, taken at deskmain
+and compared against the same sum of the file on the build host:
+964E on a CD boot, 964E in Mode 1, 964E from the file. The image the
+desktop reads its resources out of is byte-perfect on both.
+
+The desktop's stack is at 013800 on both, far below the framebuffer at
+058000, so it is not stacking through the screen either.
+---
+ bios/segacd.c   | 36 +++++++++++++++++++++++++++++++++---
+ bios/segacd.h   |  2 ++
+ desk/deskmain.c | 16 ++++++++++++++++
+ 3 files changed, 51 insertions(+), 3 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 0eb13db..ceafbbe 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -308,6 +308,29 @@ void segacd_event(UWORD bit)
+ {
+     cd_events |= (UBYTE)(1u << bit);
+ }
++
++static UWORD cd_wsum = 0xFFFF;  /* 0xFFFF = not computed yet */
++static UWORD cd_stack = 0xFFFF; /* the desktop's stack page */
++
++void segacd_stack_at(UWORD page)
++{
++    cd_stack = page;
++}
++
++/* Sum 192 KB of the EmuTOS image where it actually sits, so it can be
++ * compared against the same sum taken of the file on the build host.
++ * Comfortably inside the 236360-byte image, and one pass at one moment
++ * rather than anything periodic. */
++void segacd_wordram_sum(void)
++{
++    const ULONG *p = (const ULONG *)0x00080000UL;
++    ULONG sum = 0;
++    ULONG i;
++
++    for (i = 0; i < 0x30000UL / 4; i++)
++        sum += *p++;
++    cd_wsum = (UWORD)(sum ^ (sum >> 16));
++}
+ static UWORD cd_badmode;        /* decoded, mode byte neither 1 nor 2 */
+ static UBYTE cd_lasth3;         /* the last such byte, verbatim */
+ /* Everything else a console cannot currently say out loud.
+@@ -856,9 +879,16 @@ void segacd_int_4_c(void)
+      * sticky bits say so -- and draws correctly on one, so what is left
+      * between the AES and the pixels is the line-A description of the
+      * screen. memtop and phystop have both been read and matched. */
+-    *(volatile UWORD *)0xFF802C = (UWORD)(((UWORD)v_planes << 12)
+-                                        | ((UWORD)v_lin_wr << 4)
+-                                        | (cd_events & 0x0F));
++    /* The Word RAM checksum, once it exists. Planes and bytes-per-line
++     * have been read and match; this has not been checked at all.
++     *
++     * EmuTOS's code and read-only data live in Word RAM, which is the
++     * one thing a Mode 1 boot hands over by a different route -- the
++     * cartridge fills it and passes it with DMNA, where a CD boot has
++     * the SP load it in place. The cart's copy checksummed correctly
++     * at handover; nothing has established it is still intact by the
++     * time the desktop reads its resources out of it. */
++    *(volatile UWORD *)0xFF802C = cd_stack;
+ 
+     /* Wait for DRS to go *low*. It reads as "a status packet is on its
+      * way in", so the BIOS spins until the incoming transfer is over
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 226f2fa..714cba3 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -35,6 +35,8 @@ void segacd_keyclick(void);
+ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
+ void segacd_cd_revive(void);   /* the drive gets another chance */
+ void segacd_event(UWORD bit);  /* a sticky boot event, ORed, never cleared */
++void segacd_wordram_sum(void); /* checksum the image where it runs */
++void segacd_stack_at(UWORD page);  /* where the desktop is stacking */
+ LONG segacd_cd_ioctl(WORD op, void *arg);
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+diff --git a/desk/deskmain.c b/desk/deskmain.c
+index a9f1015..89c0901 100644
+--- a/desk/deskmain.c
++++ b/desk/deskmain.c
+@@ -1937,12 +1937,28 @@ void static close_desktop_windows(void)
+  */
+ #ifdef MACHINE_SEGACD
+ void segacd_event(UWORD bit);   /* bios/segacd.h is not on the desk path */
++void segacd_wordram_sum(void);
++void segacd_stack_at(UWORD page);
+ #endif
+ 
+ BOOL deskmain(void)
+ {
+ #ifdef MACHINE_SEGACD
+     segacd_event(4);            /* the desktop actually ran */
++    segacd_wordram_sum();       /* ...and is the image it reads intact? */
++    {   /* Where is this program's stack?
++         *
++         * The framebuffer sits at 058000 and memtop reads 058000, so
++         * the pool ends exactly where the screen begins and nothing in
++         * it should reach the screen. But the bytes that appear there
++         * -- 4E93, 4CEE, 4FEF0020 -- are 68000 instructions, and a
++         * stack full of saved frames is the likeliest thing to look
++         * like that. If this address is above 058000 then the TPA was
++         * sized against phystop instead of memtop and the desktop is
++         * running its stack straight down through the screen. */
++        volatile int onstack;
++        segacd_stack_at((UWORD)(((ULONG)&onstack) >> 8));
++    }
+ #endif
+     WORD ii, done, flags;
+     UWORD ev_which, mx, my, button, kstate, kret, bret;

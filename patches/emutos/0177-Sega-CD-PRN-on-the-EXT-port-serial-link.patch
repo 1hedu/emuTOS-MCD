@@ -1,0 +1,230 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 20 Aug 2026 02:09:08 +0000
+Subject: [PATCH 177/184] Sega CD: PRN: on the EXT-port serial link
+
+CONF_WITH_PRINTER_PORT is off on this machine and the stock bconout0
+discards every byte, so the desktop's printer icon has always run its
+dialog over nothing. The wire it can have is the EXT connector's UART,
+which the servant already drives at 4800 8N1 for the serial keyboard,
+with GEOS-Genesis's Pico on the far end turning a framed page into PCL.
+
+bconout0 is replaced with one that fills a page and hands the servant
+its address; one frame is one page, because the Pico feeds the paper
+after a text frame, and a page ends on half a second of silence since
+print_file() writes a file's bytes and then simply stops.
+
+The buffer is aligned at run time rather than by the linker: the address
+crosses as a 512-byte block index, an alignment attribute says nothing
+about where the section lands, and this one landed at 0x2140 while the
+servant read from 0x2000.
+
+Not yet working end to end -- see the main tree's commit.
+---
+ bios/bios.c   |   3 ++
+ bios/scdapi.h |   8 +++-
+ bios/segacd.c | 119 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ bios/segacd.h |   6 +++
+ 4 files changed, 135 insertions(+), 1 deletion(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 9781b3f..7e63e4e 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -445,6 +445,9 @@ static void bios_init(void)
+     /* Initialize the RS-232 port(s) */
+     KDEBUG(("chardev_init()\n"));
+     SCTRACE(22); chardev_init();     /* Initialize low-memory bios vectors */
++#ifdef MACHINE_SEGACD
++    segacd_printer_init();          /* ...and put PRN: on the serial port */
++#endif
+     boot_status |= CHARDEV_AVAILABLE;   /* track progress */
+     KDEBUG(("init_serport()\n"));
+     SCTRACE(23); init_serport();
+diff --git a/bios/scdapi.h b/bios/scdapi.h
+index 6a21622..af220bd 100644
+--- a/bios/scdapi.h
++++ b/bios/scdapi.h
+@@ -28,7 +28,7 @@
+ #define SCDAPI_H
+ 
+ #define SCD_COOKIE   0x53674344L        /* 'SgCD' */
+-#define SCD_VERSION  33
++#define SCD_VERSION  34
+ 
+ /* Everything the disc diagnostic prints, in one go. Taken in a single
+  * call rather than twenty accessors so that the numbers in one report
+@@ -196,6 +196,12 @@ struct scd_snap {
+  * it. This says so, and is what deskmain() would have said a moment
+  * later anyway. */
+ #define SCD_BOOT_OVER     17
++/* Print a page: a = its address in PRG RAM, b = how many bytes. The
++ * servant streams it out the EXT-port UART as one GEOS-Genesis printer
++ * frame, which the Pico on the far end turns into PCL. Returns E_OK
++ * when the servant took the job, EBUSY while one is still on the wire.
++ * The buffer must stay put and unchanged until then. */
++#define SCD_PRINT_PAGE    18
+ #define SCD_CARTSWAP      11            /* Mode 1: expect the cartridge to
+                                          * be pulled and another put in */
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 2a038a7..1ff5adf 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3784,6 +3784,113 @@ static ULONG scd_payload(LONG op, LONG a, LONG b);
+  * there is nothing to copy. */
+ static ULONG bulk_base, bulk_len, disk_base, disk_len;
+ 
++/* ---- the printer ------------------------------------------------------
++ *
++ * There is no Centronics port on this machine and CONF_WITH_PRINTER_PORT
++ * is off, so EmuTOS's own bconout0() compiles down to "return 0" and the
++ * desktop's printer icon has always been a lie: the dialog runs, the
++ * bytes go nowhere.
++ *
++ * The wire it can have is the EXT connector's UART, which the servant
++ * already drives at 4800 8N1 for the serial keyboard. On the far end is
++ * GEOS-Genesis's Pico, which reads a framed page and speaks PCL to a
++ * DeskJet over Centronics. That firmware knows nothing about GEOS; it
++ * knows the frame.
++ *
++ * One frame is one page -- the Pico prints a text frame and feeds the
++ * paper -- so this side buffers a page rather than streaming bytes. A
++ * page ends when it is full or when nothing has been written to it for
++ * half a second, which is the only end-of-job signal there is: the
++ * desktop's print_file() writes the file's bytes through Bconout and
++ * then simply stops.
++ *
++ * Four kilobytes, 512-byte aligned because the request register carries
++ * the address as a block index. At 4800 baud a full one is nine seconds
++ * of paper.
++ */
++static WORD cart_xfer(UWORD op, UWORD lba);     /* below, with the cart */
++
++#define PRN_PAGE    4096
++#define PRN_IDLE_TICKS  100     /* hz_200: half a second of silence ends it */
++
++/* Aligned at run time, not by the linker.
++ *
++ * The address crosses to the servant as a 512-byte block index -- that
++ * is what the request register can carry -- so the buffer has to start
++ * on a 512-byte boundary or the servant reads from up to 511 bytes
++ * before it. An alignment attribute puts the object at the right offset
++ * inside its section and says nothing about where the section lands;
++ * this one landed at 0x2140 and the servant streamed a page of zeros
++ * out of 0x2000. Rounding a pointer costs 512 bytes and cannot be got
++ * wrong by a link script. */
++static UBYTE prn_arena[PRN_PAGE + 512];
++static UBYTE *prn_page;
++static UWORD prn_fill_len;
++static ULONG prn_last;
++static UWORD prn_busy_seen;     /* flushes the servant was not ready for */
++
++static void prn_flush(void)
++{
++    ULONG where;
++
++    if (!prn_fill_len)
++        return;
++    where = (((ULONG)prn_page >> 17) & 3) << 14;
++    where |= (((ULONG)prn_page & 0x1FFFFUL) >> 9);
++    if (cart_xfer(9, (UWORD)where) != E_OK)
++        return;
++    if (cart_xfer(10, prn_fill_len) != E_OK)
++        return;
++    prn_fill_len = 0;
++}
++
++/* Called from the VBL. The page has no terminator, so silence is the
++ * terminator. */
++static void prn_tick(void)
++{
++    if (prn_fill_len && (hz_200 - prn_last) >= PRN_IDLE_TICKS)
++        prn_flush();
++}
++
++/* Installed after chardev_init(), which fills bconout_vec[] with the
++ * stock table. Doing it here rather than in chardev.c keeps the machine
++ * out of a file that is every machine's. */
++void segacd_printer_init(void)
++{
++    prn_page = (UBYTE *)(((ULONG)prn_arena + 511UL) & ~511UL);
++    bconout_vec[0] = segacd_bconout0;
++    prn_fill_len = 0;
++    prn_last = hz_200;
++}
++
++/* Bconout(0). Installed over EmuTOS's own, which on this machine does
++ * nothing at all.
++ *
++ * A full page goes out here rather than waiting for the silence: a file
++ * longer than the buffer becomes more than one page, which is what a
++ * printer does with a long document anyway. */
++LONG segacd_bconout0(WORD dev, WORD c)
++{
++    if (prn_fill_len >= PRN_PAGE) {
++        prn_flush();
++        if (prn_fill_len >= PRN_PAGE) {     /* the servant is still busy */
++            prn_busy_seen++;
++            return 0L;                      /* dropped, and counted */
++        }
++    }
++    /* Stamped before the byte lands, not after.
++     *
++     * The other way round leaves a window on the first byte of every
++     * page: prn_fill_len goes to one while prn_last still holds
++     * whatever it held when the last page went -- seconds ago, or the
++     * boot -- and the very next VBL sees an idle page and flushes it.
++     * Not a rare race: the first byte of every job hits it, and the
++     * first page out of this was one byte long. */
++    prn_last = hz_200;
++    prn_page[prn_fill_len++] = (UBYTE)c;
++    return 0L;
++}
++
+ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+ {
+     switch (op) {
+@@ -3807,6 +3914,16 @@ static ULONG scd_control(LONG op, LONG a, LONG b, LONG c)
+     case SCD_PAYLOAD_BULK:
+         return scd_payload(op, a, b);
+     case SCD_BOOT_OVER: cd_boot_over(); break;
++    case SCD_PRINT_PAGE:
++        /* A caller with its own page, rather than the byte-at-a-time
++         * path: SHOW.PRG printing a picture would come this way. */
++        if (b <= 0 || b > 0xFFFF) return (ULONG)EBADRQ;
++        {
++            ULONG where = (((ULONG)a >> 17) & 3) << 14;
++            where |= (((ULONG)a & 0x1FFFFUL) >> 9);
++            if (cart_xfer(9, (UWORD)where) != E_OK) return (ULONG)EREADF;
++            return (ULONG)cart_xfer(10, (UWORD)b);
++        }
+     case SCD_BULK_INFO:
+         if (a) {
+             ((ULONG *)a)[0] = bulk_base;
+@@ -4102,6 +4219,8 @@ void segacd_int_2_c(void)
+         }
+     }
+ 
++    prn_tick();                 /* silence is what ends a printed page */
++
+     /* Only queue the question here; the interrupt asks it. Twice a
+      * second is often enough to watch the reply follow the request and
+      * rare enough that a wrong guess is not hammering the drive.
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 000f359..6868483 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -84,6 +84,12 @@ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);
+ void segacd_publish_api(void);  /* the 'SgCD' cookie, for programs */
+ 
++/* Bconout(0) -- PRN:. Installed over EmuTOS's own after chardev_init(),
++ * because on this machine CONF_WITH_PRINTER_PORT is off and the stock
++ * one discards every byte. See the printer block in segacd.c. */
++LONG segacd_bconout0(WORD dev, WORD c);
++void segacd_printer_init(void);
++
+ /* Clock */
+ ULONG segacd_getdt(void);
+ 

@@ -1,0 +1,185 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 9 Aug 2026 03:39:53 +0000
+Subject: [PATCH 004/184] segacd: A: ramdisk as a floppy-shaped block device
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The boot loader reads a FAT12 image from the CD into PRG-RAM bank 3;
+the floppy hooks (Lisa pattern) serve it as drive A: with plain
+memcpy sector I/O — writable, though volatile. GEMDOS mounts it,
+EmuDesk shows the drive icon, windows open on real files. B: is
+reserved for the backup RAM cartridge proxy.
+---
+ bios/floppy.c    | 16 +++++++++++++
+ bios/segacd.c    | 59 ++++++++++++++++++++++++++++++++++++++++++++++++
+ bios/segacd.h    |  8 +++++++
+ include/config.h |  3 ---
+ 4 files changed, 83 insertions(+), 3 deletions(-)
+
+diff --git a/bios/floppy.c b/bios/floppy.c
+index 90f5390..43d8a7c 100644
+--- a/bios/floppy.c
++++ b/bios/floppy.c
+@@ -33,6 +33,7 @@
+ #include "intmath.h"
+ #include "amiga.h"
+ #include "lisa.h"
++#include "segacd.h"
+ 
+ 
+ /*==== Introduction =======================================================*/
+@@ -321,6 +322,8 @@ void flop_hdv_init(void)
+     amiga_floppy_init();
+ #elif defined(MACHINE_LISA)
+     lisa_floppy_init();
++#elif defined(MACHINE_SEGACD)
++    segacd_floppy_init();
+ #endif
+     flop_init(0);
+     flop_init(1);
+@@ -412,6 +415,14 @@ static void flop_detect_drive(WORD dev)
+     return;
+ #endif
+ 
++#ifdef MACHINE_SEGACD
++    if (segacd_flop_detect_drive(dev)) {
++        flop_add_drive(dev);
++        units[dev].last_access = hz_200;
++    }
++    return;
++#endif
++
+ #if CONF_WITH_FDC
+     floplock(dev);
+ 
+@@ -464,6 +475,8 @@ LONG flop_mediach(WORD dev)
+     return amiga_flop_mediach(dev);
+ #elif defined(MACHINE_LISA)
+     return lisa_flop_mediach(dev);
++#elif defined(MACHINE_SEGACD)
++    return segacd_flop_mediach(dev);
+ #endif
+ 
+     fi = &finfo[dev];
+@@ -1092,6 +1105,9 @@ static WORD flopio(UBYTE *userbuf, WORD rw, WORD dev,
+ #elif defined(MACHINE_LISA)
+     err = lisa_floprw(userbuf, rw, dev, sect, track, side, count);
+     units[dev].last_access = hz_200;
++#elif defined(MACHINE_SEGACD)
++    err = segacd_floprw(userbuf, rw, dev, sect, track, side, count);
++    units[dev].last_access = hz_200;
+ #elif CONF_WITH_FDC
+     floplock(dev);
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index db68b66..dfe2013 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -29,6 +29,10 @@
+ #include "tosvars.h"
+ #include "biosext.h"
+ #include "ikbd.h"
++#include "gemerror.h"
++#include "blkdev.h"
++#include "disk.h"
++#include "string.h"
+ 
+ #define GA_TIMER    (*(volatile UBYTE *)0xFF8031)
+ #define GA_INTMASK  (*(volatile UBYTE *)0xFF8033)
+@@ -108,6 +112,61 @@ void segacd_int_2_c(void)
+     int_vbl();
+ }
+ 
++/******************************************************************************/
++/* Floppy-shaped block devices                                                */
++/******************************************************************************/
++
++/* A: is a FAT12 image the boot loader reads from the CD into PRG-RAM
++ * bank 3 — plain memory to us. Geometry lives in its own boot sector;
++ * we only do linear sector math (16 sectors/track, 1 side, 512 bytes). */
++
++#define ADISK_BASE  ((UBYTE *)0x60000)
++#define ADISK_SECTORS 256
++
++static BOOL adisk_present;
++
++void segacd_floppy_init(void)
++{
++    /* the builder stamps "EmuTOSMD" as the OEM field at offset 2 */
++    adisk_present = (ADISK_BASE[2] == 'E' && ADISK_BASE[3] == 'm'
++                  && ADISK_BASE[4] == 'u' && ADISK_BASE[5] == 'T');
++}
++
++BOOL segacd_flop_detect_drive(WORD dev)
++{
++    if (dev == 0)
++        return adisk_present;
++    return FALSE;               /* B: arrives with the cart proxy */
++}
++
++LONG segacd_flop_mediach(WORD dev)
++{
++    MAYBE_UNUSED(dev);
++    return MEDIANOCHANGE;
++}
++
++WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
++                   WORD side, WORD count)
++{
++    LONG lba;
++    UBYTE *p;
++
++    if (dev != 0 || !adisk_present)
++        return EUNDEV;
++
++    lba = (LONG)track * 16 + (sect - 1);
++    MAYBE_UNUSED(side);
++    if (lba < 0 || lba + count > ADISK_SECTORS)
++        return ESECNF;
++
++    p = ADISK_BASE + lba * SECTOR_SIZE;
++    if (rw & 1)
++        memcpy(p, buf, (LONG)count * SECTOR_SIZE);   /* volatile but writable */
++    else
++        memcpy(buf, p, (LONG)count * SECTOR_SIZE);
++    return E_OK;
++}
++
+ /******************************************************************************/
+ /* Keyboard                                                                   */
+ /******************************************************************************/
+diff --git a/bios/segacd.h b/bios/segacd.h
+index ddc280e..c4d8163 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -26,6 +26,14 @@ void segacd_kbd_init(void);
+ /* Clock */
+ ULONG segacd_getdt(void);
+ 
++/* Floppy-shaped block devices: A: = CD-loaded ramdisk in PRG bank 3,
++ * B: = backup RAM cartridge via the main-CPU servant (when present) */
++void segacd_floppy_init(void);
++BOOL segacd_flop_detect_drive(WORD dev);
++LONG segacd_flop_mediach(WORD dev);
++WORD segacd_floprw(UBYTE *buf, WORD rw, WORD dev, WORD sect, WORD track,
++                   WORD side, WORD count);
++
+ /* Interrupt handlers (assembler entry points in segacd2.S) */
+ void segacd_int_2(void);        /* INT2: VBL, raised by the main CPU */
+ void segacd_int_3(void);        /* INT3: gate array timer, 200 Hz */
+diff --git a/include/config.h b/include/config.h
+index 68afec7..593bd68 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -628,9 +628,6 @@
+     * emulation; idle with a plain loop instead (as the Lisa port does) */
+ #  define USE_STOP_INSN_TO_FREE_HOST_CPU 0
+ # endif
+-# ifndef CONF_WITH_FLOPPY
+-#  define CONF_WITH_FLOPPY 0
+-# endif
+ # ifndef CONF_WITH_ADVANCED_CPU
+ #  define CONF_WITH_ADVANCED_CPU 0
+ # endif

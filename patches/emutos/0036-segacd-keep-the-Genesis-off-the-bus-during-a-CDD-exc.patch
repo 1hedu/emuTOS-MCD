@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 07:42:36 +0000
+Subject: [PATCH 036/184] segacd: keep the Genesis off the bus during a CDD
+ exchange
+
+One command sent and then silence -- the same signature as the very
+first hardware test, unchanged by every correction to the protocol.
+That is a strong hint the protocol was never the problem.
+
+The Genesis halts this CPU with SBRQ every frame to read the screen out
+of PRG-RAM. A halt landing inside a CDD exchange does not delay it, it
+destroys it: the gate array clocks a fixed exchange every 1/75 s and a
+grab lasting milliseconds drops us out of that window. A status read
+arriving late costs nothing, which is exactly why the passive link has
+been flawless throughout; a command arriving late is corruption.
+
+The sub now raises a flag for the few microseconds it is mid-exchange
+and the servant honours it. Emulators cannot show this either way --
+their arbitration is instant and neither models the transfer window.
+---
+ bios/segacd.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 669baa0..e358576 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -325,6 +325,18 @@ void segacd_int_4_c(void)
+ {
+     UBYTE ctrl;
+ 
++    /* Tell the servant to stay off the bus. The Genesis halts this CPU
++     * with SBRQ every frame to read the screen out of PRG-RAM, and a
++     * halt landing inside a CDD exchange stretches it across whole
++     * milliseconds -- far outside the 1/75 s window the gate array is
++     * clocking. A late *read* of the status registers costs nothing,
++     * which is why the passive link was always healthy; a late or
++     * split *command* is exactly the corruption that killed the link
++     * at the first one, on every build, whatever the sequence. No
++     * emulator reproduces it: their arbitration is instant and neither
++     * models the transfer window at all. */
++    *(volatile UWORD *)0xFF8022 |= 0x0008;
++
+     /* The VBL is a lower level than this one, so it cannot preempt a
+      * handler that keeps being re-entered: if the gate array holds the
+      * request asserted, nothing below level 4 ever runs again and the
+@@ -405,6 +417,8 @@ void segacd_int_4_c(void)
+         cdd_ctrl_ever |= (UBYTE)(*CDD_CTRL_RD & (CDD_DTS | CDD_DRS));
+     }
+ 
++    *(volatile UWORD *)0xFF8022 &= (UWORD)~0x0008;   /* bus is yours */
++
+     /* A boolean cannot tell a dead link from a flaky one. Count how
+      * many of the last sixteen packets checksummed and report that:
+      * F is a clean link, 0 is nothing, anything between is a race. */

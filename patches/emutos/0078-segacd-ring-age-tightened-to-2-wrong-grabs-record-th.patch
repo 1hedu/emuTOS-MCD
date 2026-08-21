@@ -1,0 +1,122 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 19:23:12 +0000
+Subject: [PATCH 078/184] segacd: ring age tightened to 2; wrong grabs record
+ their delta
+
+wrong went 37 to 44 across two hardware runs with the age bound at 4:
+too loose. The transfer itself spans up to two more sector times after
+the find, against a buffer seven deep -- age 4 plus 2 in flight is a
+slot being rewritten mid-grab. The BIOS consumes entries at age 0-1.
+
+And every caught wrong grab now records delivered-minus-wanted, shown
+in the diagnostic as 'wrong N (last +d)': a constant small delta is
+pointer semantics, scattered positives are recycling, garbage is an
+upstream lie. One signed number replaces the argument.
+---
+ bios/bios.c   |  7 ++++---
+ bios/segacd.c | 28 ++++++++++++++++++++++++++--
+ bios/segacd.h |  2 +-
+ 3 files changed, 31 insertions(+), 6 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 11304bc..ba11692 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1074,6 +1074,7 @@ void biosmain(void)
+         static DTA dta;
+         LONG h, rc;
+         UWORD run, arm, seeks, hits, errs, why, bad, wrong, torn, flag;
++        WORD wdelta;
+         UBYTE state;
+         int i;
+ 
+@@ -1108,11 +1109,11 @@ void biosmain(void)
+             }
+ 
+             segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
+-                            &bad, &wrong, &torn, &flag);
++                            &bad, &wrong, &torn, &flag, &wdelta);
+             cprintf(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+                     state, seeks, hits, errs, why);
+-            cprintf(" torn %u  badbcd %u  wrong %u  flag %u\r\n\r\n",
+-                    torn, bad, wrong, flag);
++            cprintf(" torn %u  badbcd %u  wrong %u (last %+d)  flag %u\r\n\r\n",
++                    torn, bad, wrong, wdelta, flag);
+ 
+             /* Long enough to read a round before the next scrolls it
+              * away, and long enough that the drive is not being flogged
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 9464d0d..49fc8af 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -234,6 +234,7 @@ static UWORD cd_badhdr;         /* headers rejected as impossible BCD */
+ static UWORD cd_tornhdr;        /* headers that changed between two reads */
+ static UWORD cd_flagged;        /* sectors with STAT0 bit 7 clear: counted,
+                                  * never obeyed */
++static WORD cd_wrongdelta;      /* last wrong grab: delivered minus wanted */
+ static UWORD cd_wrongsec;       /* transfers that delivered the wrong
+                                  * sector and were caught by the header
+                                  * check -- each one of these used to be
+@@ -307,7 +308,12 @@ static BOOL cd_ring_find(ULONG lba, UWORD *pt)
+     for (i = 0; i < CD_RING; i++) {
+         if (cd_ring_lba[i] == lba) {
+             age = (UBYTE)(cdc_ints - cd_ring_age[i]);
+-            if (age <= 4 && age < best) {
++            /* Two, not four: the transfer itself takes up to two more
++             * sector times after the find, and the buffer is only
++             * seven deep -- at age four plus two in flight the slot is
++             * being rewritten mid-grab. The BIOS consumes its entries
++             * at age zero or one; two is already generous. */
++            if (age <= 2 && age < best) {
+                 best = age;
+                 *pt = cd_ring_pt[i];
+                 found = TRUE;
+@@ -1947,6 +1953,23 @@ collect:
+                 cd_cached = lba;
+                 got = TRUE;
+             } else {
++                /* Which sector came instead? The distance between what
++                 * arrived and what was asked for is the diagnosis: a
++                 * constant +1 or -1 is pointer semantics, small
++                 * positives are recycling, garbage is a lie somewhere
++                 * upstream. One signed number on the screen replaces a
++                 * night of guessing among those. */
++                LONG got = (LONG)(((cdc_hdr[0] >> 4) * 10
++                                   + (cdc_hdr[0] & 0x0F))) * 4500L
++                         + (LONG)(((cdc_hdr[1] >> 4) * 10
++                                   + (cdc_hdr[1] & 0x0F))) * 75L
++                         + (LONG)(((cdc_hdr[2] >> 4) * 10
++                                   + (cdc_hdr[2] & 0x0F)))
++                         - 150L - (LONG)lba;
++
++                if (got > 999L) got = 999L;
++                if (got < -999L) got = -999L;
++                cd_wrongdelta = (WORD)got;
+                 cd_wrongsec++;
+                 cd_why = (UWORD)((cd_why << 4) | 5);
+             }
+@@ -2130,8 +2153,9 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+  * never happened look identical from GEMDOS's side of the call. */
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+-                     UWORD *torn, UWORD *flag)
++                     UWORD *torn, UWORD *flag, WORD *wdelta)
+ {
++    *wdelta = cd_wrongdelta;
+     *seeks = cd_seeks;
+     *hits = cd_hits;
+     *errs = cd_errors;
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 220a47b..ca8e920 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -36,7 +36,7 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
+ LONG segacd_cd_ioctl(WORD op, void *arg);
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+-                     UWORD *torn, UWORD *flag);
++                     UWORD *torn, UWORD *flag, WORD *wdelta);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);

@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 11 Aug 2026 02:49:42 +0000
+Subject: [PATCH 026/184] segacd: declare 16 sectors per track, and rate-limit
+ CDD commands
+
+Two hardware failures, both invisible in emulation.
+
+FORMAT.PRG did not work on a real console. It used logical sector I/O,
+which needs the volume to be loggable -- and the only volume anyone
+formats is one that is not. On a corrupt disk Getbpb fails, the
+media-change flag never clears, and every logical access answers E_CHNG
+for ever, so the tool refused to run on exactly the disk it existed to
+repair. My headless test formatted a healthy volume, which is the one
+case that was never in question; it now corrupts B: first.
+
+Physical mode then exposed an older bug underneath. flop_add_drive()
+defaults a drive to a 3.5" floppy's 9 sectors per track and getbpb only
+corrects that once it has read a boot sector, while our driver assumes
+16. With no valid BPB, floppy_rw split requests on a boundary the
+driver does not use and every sector landed elsewhere -- reads well
+inside the volume returned ESECNF. Sega CD drives now declare their
+real geometry at detection.
+
+CDD: polling alone checksummed clean on hardware, but a command every
+VBL gave CD N. The drive publishes status every 1/75 s against our
+60 Hz, so commands eventually land mid-exchange; no emulator models it.
+Commands are now sent twice a second, and the validity boolean is a
+score -- how many of the last sixteen packets checksummed -- because a
+boolean cannot tell a dead link from a flaky one.
+---
+ bios/bios.c   | 12 ++++++++++++
+ bios/floppy.c | 11 +++++++++++
+ bios/segacd.c | 28 +++++++++++++++++++++++++---
+ 3 files changed, 48 insertions(+), 3 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index b2757a0..d0ae39a 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -885,6 +885,18 @@ void biosmain(void)
+         static char buf[64];
+         LONG rc;
+ 
++        {   /* Wreck B: first. The tool's whole job is to recover a
++             * volume that cannot be mounted, so testing it on a healthy
++             * one tests the wrong thing -- which is exactly how the
++             * first version shipped broken. */
++            static char junk[512];
++            int j;
++            for (j = 0; j < 512; j++)
++                junk[j] = (char)(j ^ 0x3C);
++            Rwabs(1 | 8 | 2, (LONG)junk, 1, 0, 1, 0L);
++            cprintf("\033Ecorrupted B: boot sector\r\n");
++        }
++
+         call_ikbdraw(0x15);             /* 'Y' press */
+         call_ikbdraw(0x95);             /* and release */
+         call_ikbdraw(0x39);             /* space, for "press any key" */
+diff --git a/bios/floppy.c b/bios/floppy.c
+index 8be7f5e..23d0be8 100644
+--- a/bios/floppy.c
++++ b/bios/floppy.c
+@@ -418,6 +418,17 @@ static void flop_detect_drive(WORD dev)
+ #ifdef MACHINE_SEGACD
+     if (segacd_flop_detect_drive(dev)) {
+         flop_add_drive(dev);
++        /*
++         * Our volumes are 16 sectors per track, one side. The generic
++         * default is a 3.5" floppy's 9, and getbpb only corrects it
++         * once it has successfully read a boot sector -- so on a volume
++         * too damaged to log in, floppy_rw splits requests on a
++         * boundary the driver does not use and every sector lands
++         * somewhere else. Which is precisely when a format utility
++         * needs raw access to work.
++         */
++        blkdev[dev].geometry.spt = 16;
++        blkdev[dev].geometry.sides = 1;
+         units[dev].last_access = hz_200;
+     }
+     return;
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 5ec9490..f10d86f 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -103,7 +103,10 @@ const UBYTE *segacd_physbase(void)
+ #define CDD_INFO_ABSMSF 0x00
+ 
+ static UBYTE cdd_stat[10];
+-static UBYTE cdd_valid;
++static UBYTE cdd_valid;         /* last packet checksummed */
++static UBYTE cdd_score;         /* valid packets in the last 16, latched */
++static UBYTE cdd_count, cdd_good;
++static UBYTE cdd_tick;
+ 
+ void segacd_cdd_init(void)
+ {
+@@ -334,11 +337,30 @@ void segacd_int_2_c(void)
+         }
+     }
+ 
+-    cdd_ask_position();
++    /* The drive publishes status every 1/75 s and we run at 60 Hz, so
++     * writing a command every frame lands in the middle of an exchange
++     * sooner or later. Real hardware notices; the emulators do not.
++     * Ask a couple of times a second instead. */
++    if (++cdd_tick >= 32) {
++        cdd_tick = 0;
++        cdd_ask_position();
++    }
+     cdd_poll();
++
++    /* A boolean cannot tell a dead link from a flaky one. Count how
++     * many of the last sixteen packets checksummed and report that:
++     * F is a clean link, 0 is nothing, anything between is a race. */
++    if (cdd_valid)
++        cdd_good++;
++    if (++cdd_count >= 16) {
++        /* sixteen does not fit in the nibble we report it in */
++        cdd_score = (UBYTE)((cdd_good > 15) ? 15 : cdd_good);
++        cdd_count = 0;
++        cdd_good = 0;
++    }
+     /* status nibble and the minutes in one word, seconds and frames in
+      * the other: no comm register is free enough to carry all seven */
+-    *(volatile UWORD *)0xFF8022 = (UWORD)((cdd_valid ? 0x8000 : 0)
++    *(volatile UWORD *)0xFF8022 = (UWORD)(((UWORD)cdd_score << 12)
+         | ((UWORD)cdd_stat[0] << 8)
+         | ((UWORD)cdd_stat[2] << 4)
+         |  (UWORD)cdd_stat[3]);

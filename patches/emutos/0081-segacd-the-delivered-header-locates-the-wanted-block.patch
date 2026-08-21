@@ -1,0 +1,173 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 12 Aug 2026 20:13:27 +0000
+Subject: [PATCH 081/184] segacd: the delivered header locates the wanted
+ block; correct in-buffer
+
+BlastEm's byte-clocked LC8951 model (hardware-derived) supplies the
+mechanism behind the measured wrong-grab deltas: the chip writes the
+HEAD registers straight off the incoming bit stream as the NEXT
+block's header arrives, and refreshes them from the buffer at PT only
+at decode-complete. A delayed interrupt therefore records header N+1
+against pointer N -- the measured l-1 -- and a read landing mid-byte
+explains every 01:80:00 the HUD ever showed.
+
+The buffer, unlike the registers, is never mispaired: a block's header
+and data are written together at its pointer, 2352 apart in a 16K ring
+(GPGX). So a wrong neighbor now corrects itself: the delivered header
+says exactly how many blocks off the pointer was, one more grab at the
+corrected address settles it, and the header check judges the result.
+Counted as fx in the diagnostic.
+
+Diagnostic rounds also drop to a 300-tick leash -- sixteen seconds per
+failed block prints a line every few minutes, which reads as a hang
+from a couch. The information is in which reads fail.
+---
+ bios/bios.c   |  7 ++++---
+ bios/segacd.c | 53 +++++++++++++++++++++++++++++++++++----------------
+ bios/segacd.h |  2 +-
+ 3 files changed, 42 insertions(+), 20 deletions(-)
+
+diff --git a/bios/bios.c b/bios/bios.c
+index 736ffdf..b3811b1 100644
+--- a/bios/bios.c
++++ b/bios/bios.c
+@@ -1075,6 +1075,7 @@ void biosmain(void)
+         LONG h, rc;
+         UWORD run, arm, seeks, hits, errs, why, bad, wrong, torn, flag;
+         WORD wdelta;
++        UWORD fix;
+         UBYTE state;
+         int i;
+ 
+@@ -1109,11 +1110,11 @@ void biosmain(void)
+             }
+ 
+             segacd_cd_stats(&seeks, &hits, &errs, &state, &why,
+-                            &bad, &wrong, &torn, &flag, &wdelta);
++                            &bad, &wrong, &torn, &flag, &wdelta, &fix);
+             cprintf(" drive %X  seek %u  wait %u  err %u  why %04X\r\n",
+                     state, seeks, hits, errs, why);
+-            cprintf(" torn %u bcd %u wr %u l%d fl %u\r\n\r\n",
+-                    torn, bad, wrong, wdelta, flag);
++            cprintf(" torn %u bcd %u wr %u l%d fx %u fl %u\r\n\r\n",
++                    torn, bad, wrong, wdelta, fix, flag);
+ 
+             /* Long enough to read a round before the next scrolls it
+              * away, and long enough that the drive is not being flogged
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 423e22a..9ad8236 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -235,6 +235,7 @@ static UWORD cd_tornhdr;        /* headers that changed between two reads */
+ static UWORD cd_flagged;        /* sectors with STAT0 bit 7 clear: counted,
+                                  * never obeyed */
+ static WORD cd_wrongdelta;      /* last wrong grab: delivered minus wanted */
++static UWORD cd_fixups;         /* mispaired grabs corrected in-buffer */
+ static UWORD cd_wrongsec;       /* transfers that delivered the wrong
+                                  * sector and were caught by the header
+                                  * check -- each one of these used to be
+@@ -1726,7 +1727,7 @@ static BOOL cd_fetch(ULONG lba)
+     UWORD pt;
+     int attempt;
+     UBYTE settle, seen;
+-    UBYTE why1, wrongs;
++    UBYTE why1, wrongs, cd_fixed;
+     BOOL got = FALSE;
+ 
+     /* The early ring-hit path jumps straight to the transfer, past the
+@@ -1735,6 +1736,7 @@ static BOOL cd_fetch(ULONG lba)
+     settle = seen = cdd_irqs;
+     why1 = 0;
+     wrongs = 0;
++    cd_fixed = 0;
+ 
+     /* Take the drive. The VBL rotates a status question at the CDD
+      * every thirty-two frames, and a question is a command like any
+@@ -1993,22 +1995,34 @@ collect:
+                 cd_wrongsec++;
+                 cd_why = (UWORD)((cd_why << 4) | 5);
+ 
+-                /* A wrong grab that delivered a NEIGHBOR is not a lost
+-                 * drive, it is a mispaired pointer: on silicon the
+-                 * header registers and the block pointer do not update
+-                 * at the same instant, so an unlucky read inside the
+-                 * 13 ms window records sector N's header with N-1's
+-                 * pointer -- the last two hardware runs measured the
+-                 * mispair directly, -1 and +5. The stream is still
+-                 * exactly where it should be, and every lap re-inserts
+-                 * the wanted sector with a freshly paired pointer. So
+-                 * go back to consuming the stream instead of burning an
+-                 * attempt on a pause-and-reseek that arrives back in
+-                 * the same phase trap. Bounded, then the attempt loop
+-                 * takes over as before. */
++                /* A wrong neighbor is not a lost drive, it is a
++                 * mispaired read: the chip writes the HEAD registers
++                 * straight off the incoming bit stream as the NEXT
++                 * block's header arrives, and refreshes them from the
++                 * buffer at PT only at decode-complete -- so a delayed
++                 * interrupt records header N+1 against pointer N.
++                 * (BlastEm's byte-clocked model, from hardware
++                 * measurement; the measured deltas here were -1.)
++                 *
++                 * But the buffer itself is never mispaired: a block's
++                 * header and data live together at its pointer, blocks
++                 * are 2352 apart in a 16K ring. The delivered header
++                 * therefore says exactly where the wanted block is:
++                 * delta blocks back. Grab once more at the corrected
++                 * pointer -- the header check right here judges the
++                 * correction, so a wrong guess costs one transfer and
++                 * proves itself wrong. */
++                if (got >= -2L && got <= 2L && got != 0 && !cd_fixed) {
++                    pt = (UWORD)((pt - (WORD)got * 2352) & 0x3FFF);
++                    cd_fixed = 1;
++                    cd_fixups++;
++                    goto collect;
++                }
+                 if (got >= -7L && got <= 7L && ++wrongs <= 8
+-                        && cd_time_left())
++                        && cd_time_left()) {
++                    cd_fixed = 0;
+                     goto rewait;
++                }
+             }
+         } else {
+             cd_streaming = 0;           /* the transfer is what failed */
+@@ -2190,9 +2204,10 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+  * never happened look identical from GEMDOS's side of the call. */
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+-                     UWORD *torn, UWORD *flag, WORD *wdelta)
++                     UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix)
+ {
+     *wdelta = cd_wrongdelta;
++    *fix = cd_fixups;
+     *seeks = cd_seeks;
+     *hits = cd_hits;
+     *errs = cd_errors;
+@@ -2213,6 +2228,12 @@ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late)
+     cd_lead = lead;
+     cd_hold = (UBYTE)(hold ? 1 : 0);
+     cd_late = (UBYTE)(late ? 1 : 0);
++    /* Only the diagnostic calls this, and a diagnostic that spends
++     * sixteen seconds per failed block prints a line every few minutes
++     * -- which reads as a hang from a couch. Half the leash: the
++     * information is in which reads fail, not in how long they are
++     * indulged. */
++    cd_leash = 300;
+ }
+ 
+ LONG segacd_cd_ioctl(WORD op, void *arg)
+diff --git a/bios/segacd.h b/bios/segacd.h
+index ca8e920..b3153af 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -36,7 +36,7 @@ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
+ LONG segacd_cd_ioctl(WORD op, void *arg);
+ void segacd_cd_stats(UWORD *seeks, UWORD *hits, UWORD *errs,
+                      UBYTE *state, UWORD *why, UWORD *bad, UWORD *wrong,
+-                     UWORD *torn, UWORD *flag, WORD *wdelta);
++                     UWORD *torn, UWORD *flag, WORD *wdelta, UWORD *fix);
+ extern UBYTE segacd_diag;       /* Down held at power-on */
+ extern UWORD segacd_bootflags;  /* raw boot-button word, for printing */
+ void segacd_cd_tune(UWORD lead, UWORD hold, UWORD late);

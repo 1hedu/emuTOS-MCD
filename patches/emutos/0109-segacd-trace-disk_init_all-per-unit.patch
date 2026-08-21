@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Thu, 13 Aug 2026 09:13:17 +0000
+Subject: [PATCH 109/184] segacd: trace disk_init_all per unit
+
+The Mode 1 hang is inside it; this says which unit swallows the boot,
+and 0xE3FF when every one of them is probed.
+---
+ bios/disk.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/bios/disk.c b/bios/disk.c
+index f3d710e..94eb536 100644
+--- a/bios/disk.c
++++ b/bios/disk.c
+@@ -327,6 +327,10 @@ void disk_init_all(void)
+     /* scan for attached harddrives and their partitions */
+     for(i = 0; i < ARRAY_SIZE(majors); i++) {
+         UWORD unit = NUMFLOPPIES + majors[i];
++#ifdef MACHINE_SEGACD
++        /* Which unit swallowed the boot, if one does. */
++        *(volatile UWORD *)0xFF8020 = (UWORD)(0xE300u + unit);
++#endif
+         disk_init_one(unit,&devices_available);
+         if (!devices_available) {
+             KDEBUG(("disk_init_all(): maximum number of partitions reached!\n"));
+@@ -339,6 +343,9 @@ void disk_init_all(void)
+      *
+      * also save bitmap of removable drives
+      */
++#ifdef MACHINE_SEGACD
++    *(volatile UWORD *)0xFF8020 = 0xE3FF;       /* every unit probed */
++#endif
+     for (i = 0; i < UNITSNUM; i++)  /* initialise */
+         units[i].drivemap = 0L;
+     drvrem = 0UL;
