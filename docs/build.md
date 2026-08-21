@@ -173,14 +173,3 @@ screen, and by the time it has said what it is for, the desktop he was
 supposed to be standing on is gone. Start ends it; so does walking into
 the sign post at the end of the fourth screen.
 
-## One thing to know about this repository's history
-
-Two Sega ROM archives were committed at the top of the tree on the first
-day, through GitHub's web uploader, before `assets/` existed and before
-the rule that keeps dumps out of here did. They are out of `HEAD` now
-and `/*.zip` is git-ignored, but **deleting a file does not remove it
-from the history**, and anyone who clones this repository still gets
-them. Taking them out for good means rewriting history — `git filter-repo
---invert-paths`, or BFG — and force-pushing, which breaks every existing
-clone and every commit hash after the rewrite point. That is a decision
-for whoever owns the repository, not something a build script can do.
