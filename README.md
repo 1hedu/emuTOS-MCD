@@ -43,3 +43,6 @@ Build instructions, including how to add Sonic: [docs/build.md](docs/build.md).
 | `payload/` | Genesis-side payloads |
 | `tools/` | build scripts, emulator harness |
 | `docs/` | documentation; `CHECKPOINT.md` is the project log |
+
+## UNTESTED
+pico Printer bridge
