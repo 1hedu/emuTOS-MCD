@@ -46,3 +46,6 @@ Build instructions, including how to add Sonic: [docs/build.md](docs/build.md).
 
 ## UNTESTED
 pico Printer bridge
+## TODO
+MegaKey -- pico keyboard bridge for those without UART
+Other pico bridges like perhaps a floppy disk.
