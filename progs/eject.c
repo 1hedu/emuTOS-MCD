@@ -52,8 +52,27 @@ static void put2(unsigned long v)
  * knows which drive it was loaded from, so the difference is somewhere
  * it can only be seen -- print the drive state around the command and
  * the answer is on the screen instead of in the next round trip. */
+/* Is there a snapshot to take at all?
+ *
+ * A driver built without CONF_WITH_SCD_DIAG publishes NULL here rather
+ * than a stub returning zeros. CDTEST checks it; this program did not,
+ * and on any build without SCD_DIAG=1 the call below went through the
+ * NULL -- Supexec ran it in supervisor mode, so execution began at
+ * address 0 and walked the vector table until an illegal instruction
+ * at 0x30. The tray never opened. */
+static int have_snapshot(void)
+{
+    return g_api && g_api->snapshot;
+}
+
 static void show_state(const char *when)
 {
+    if (!have_snapshot()) {
+        con_ws(when);
+        con_ws(" drive state unavailable (driver built without\r\n");
+        con_ws("        diagnostics -- rebuild with SCD_DIAG=1)\r\n");
+        return;
+    }
     xbios_supexec((long)sup_snapshot);
     con_ws(when);
     con_ws(" drive state ");
