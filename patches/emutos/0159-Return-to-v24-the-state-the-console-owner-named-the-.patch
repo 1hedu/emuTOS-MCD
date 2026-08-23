@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 21:27:45 +0000
-Subject: [PATCH 159/184] Return to v24, the state the console owner named the
+Subject: [PATCH 159/185] Return to v24, the state the console owner named the
  high-water mark
 
 They labeled v24 "probably the best state yet" -- D: opening in one

@@ -285,6 +285,23 @@ uint8_t osk_slot_free(void)
     return (uint8_t)!was;
 }
 
+/* Has the sub processed the last key it was given? It echoes the
+ * sequence byte into its COMFLG byte -- free since the SP finished the
+ * boot handshake -- once the scancode is injected. GA_KEY is a single
+ * latest-wins word, so posting into an unacknowledged one deletes a
+ * key; the serial keyboard's queue holds until this says go.
+ *
+ * The timeout is for an EmuTOS old enough not to answer: after half a
+ * second of silence the queue posts anyway, falling back to the lossy
+ * protocol this ack replaced. */
+uint8_t osk_key_acked(void)
+{
+    static uint8_t stale;
+    if (VU8(GA_COMFLG_S) == key_seq) { stale = 0; return 1; }
+    if (++stale >= 30) { stale = 0; return 1; }
+    return 0;
+}
+
 /* Handle one frame of pad input while the OSK is up. Consumes edges from
  * the raw pad word (SACBRLDU in our packing). Returns nonzero if it used
  * the input (so the caller suppresses pointer motion). */

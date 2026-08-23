@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 09:10:19 +0000
-Subject: [PATCH 043/184] segacd: report both CDD checksums instead of guessing
+Subject: [PATCH 043/185] segacd: report both CDD checksums instead of guessing
  between them
 
 Every packet failing while the drive plainly answers has exactly two

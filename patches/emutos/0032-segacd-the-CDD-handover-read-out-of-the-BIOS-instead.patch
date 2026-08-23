@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 05:38:35 +0000
-Subject: [PATCH 032/184] segacd: the CDD handover, read out of the BIOS
+Subject: [PATCH 032/185] segacd: the CDD handover, read out of the BIOS
  instead of guessed at
 
 The user asked why I was guessing at what the BIOS does rather than

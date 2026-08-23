@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 07:11:15 +0000
-Subject: [PATCH 103/184] segacd: the sector cache indexed three megabytes past
+Subject: [PATCH 103/185] segacd: the sector cache indexed three megabytes past
  itself
 
 D: has been handing GEMDOS blocks that never came off the disc, and

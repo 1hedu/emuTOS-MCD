@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 20 Aug 2026 20:19:42 +0000
-Subject: [PATCH 180/184] Sega CD: the 8x16 font cannot be reached, so stop
+Subject: [PATCH 180/185] Sega CD: the 8x16 font cannot be reached, so stop
  carrying it
 
 font_set_default() chooses between the two system fonts with

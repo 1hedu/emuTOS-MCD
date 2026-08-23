@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 06:30:36 +0000
-Subject: [PATCH 034/184] segacd: the CDD acknowledgement is conditional, and
+Subject: [PATCH 034/185] segacd: the CDD acknowledgement is conditional, and
  that matters
 
 Writing #4 to the control register also puts zero into DRS, and zero

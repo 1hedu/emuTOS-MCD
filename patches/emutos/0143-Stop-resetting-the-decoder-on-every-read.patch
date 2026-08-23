@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 09:12:44 +0000
-Subject: [PATCH 143/184] Stop resetting the decoder on every read
+Subject: [PATCH 143/185] Stop resetting the decoder on every read
 
 D: reads on the console. The round that did it also says what it cost:
 71 seeks against 11 waits, and 13,018 sectors rejected by the mode gate

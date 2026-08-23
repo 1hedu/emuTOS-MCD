@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 04:39:01 +0000
-Subject: [PATCH 071/184] segacd: verify every delivered sector, as the recipe
+Subject: [PATCH 071/185] segacd: verify every delivered sector, as the recipe
  always said to
 
 The audit the LED forced. Two absences, both against steps written in

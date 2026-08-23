@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 12:02:28 +0000
-Subject: [PATCH 121/184] segacd: point the diagnostic at the disc again, and
+Subject: [PATCH 121/185] segacd: point the diagnostic at the disc again, and
  log to the cartridge
 
 Three things, all in service of one hardware boot answering the disc

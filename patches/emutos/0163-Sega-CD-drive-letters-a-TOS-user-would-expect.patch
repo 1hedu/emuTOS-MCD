@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sat, 15 Aug 2026 05:11:48 +0000
-Subject: [PATCH 163/184] Sega CD: drive letters a TOS user would expect
+Subject: [PATCH 163/185] Sega CD: drive letters a TOS user would expect
 
 A: and B: are the floppy slots. On a TOS machine that means removable
 media, and C: onward means storage that cannot leave the machine. This

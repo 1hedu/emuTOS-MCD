@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 09:09:10 +0000
-Subject: [PATCH 108/184] segacd: publish the CDD tick counter, live
+Subject: [PATCH 108/185] segacd: publish the CDD tick counter, live
 
 Every timeout in the read path is counted in cdd_ticks, and cdd_ticks
 only advances in the level 4 handler. If those 75 Hz status reports

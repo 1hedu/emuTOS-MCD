@@ -38,9 +38,8 @@
  * a one-byte latch with no FIFO. At 4800 baud a byte completes every
  * 2 ms against a 16 ms frame, so a sender that follows each character
  * with a line ending -- a Flipper Zero, on the bench -- puts two or
- * three bytes on the wire back to back. The second overruns the first
- * long before the next frame, and RERR's read-and-discard eats what
- * survived: the character is lost, the Enter is not.
+ * three bytes on the wire back to back, and the second overruns the
+ * first long before the next frame.
  *
  * The queue is for the other end of the path: the sub CPU takes one
  * scancode per frame through a single comm register, the protocol the
@@ -90,13 +89,18 @@ static uint16_t uart_rx;        /* bytes taken off the port */
 static uint16_t uart_err;       /* ...and how many arrived broken */
 static uint16_t uart_drop;      /* scancodes the queue had no room for */
 
+static uint16_t uart_pushes;
+
 static void push(uint8_t sc)
 {
     uint8_t n = (uint8_t)((qhead + 1) % QLEN);
     if (n == qtail) { uart_drop++; return; }
     q[qhead] = sc;
     qhead = n;
+    uart_pushes++;
 }
+
+uint16_t uart_pushed(void) { return uart_pushes; }
 
 void uart_enable(uint8_t on)
 {
@@ -138,15 +142,21 @@ void uart_poll(void)
         uint8_t st = VU8(UART_SCTRL);
         uint8_t ch, sc, was;
 
-        if (st & SCTRL_RERR) {
-            (void)VU8(UART_RXDATA);     /* reading it clears the error */
-            uart_err++;
-            continue;
-        }
-        if (!(st & SCTRL_RRDY))
+        if (!(st & (SCTRL_RRDY | SCTRL_RERR)))
             break;
 
+        /* One read serves both flags: it takes the byte and clears the
+         * error. The first version handled RERR by reading the latch
+         * and discarding the value, but on an overrun the latch holds
+         * the byte that survived, so discarding it dropped the
+         * character. RERR is now counted, not acted on -- GEOS-Genesis
+         * ignores it entirely. A byte is dropped only when RERR is up
+         * with nothing ready, an error carrying no data. */
         ch = VU8(UART_RXDATA);
+        if (st & SCTRL_RERR)
+            uart_err++;
+        if (!(st & SCTRL_RRDY))
+            continue;
         uart_rx++;
         was = last_ch;
         last_ch = ch;

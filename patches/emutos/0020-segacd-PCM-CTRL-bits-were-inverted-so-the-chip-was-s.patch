@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 9 Aug 2026 18:46:14 +0000
-Subject: [PATCH 020/184] segacd: PCM CTRL bits were inverted, so the chip was
+Subject: [PATCH 020/185] segacd: PCM CTRL bits were inverted, so the chip was
  switched off
 
 Bit 7 of CTRL is the chip's master enable; bit 6 chooses whether the

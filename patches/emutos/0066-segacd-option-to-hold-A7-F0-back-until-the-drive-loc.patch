@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 00:05:29 +0000
-Subject: [PATCH 066/184] segacd: option to hold $A7/$F0 back until the drive
+Subject: [PATCH 066/185] segacd: option to hold $A7/$F0 back until the drive
  locks, as the BIOS does
 
 The BIOS writes $A0/$F8 when it resets the decoder and $A7/$F0 only

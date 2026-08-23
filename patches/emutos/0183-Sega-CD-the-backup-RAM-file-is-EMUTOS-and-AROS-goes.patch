@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 20 Aug 2026 22:25:22 +0000
-Subject: [PATCH 183/184] Sega CD: the backup RAM file is EMUTOS, and AROS goes
+Subject: [PATCH 183/185] Sega CD: the backup RAM file is EMUTOS, and AROS goes
 
 We built an EmuTOS port. Naming the volume AROSDISK after the operating
 system we did not build was funnier than it was useful, so it is EMUTOS

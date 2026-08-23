@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 02:11:55 +0000
-Subject: [PATCH 126/184] segacd: the second CTRL writer was still spelling out
+Subject: [PATCH 126/185] segacd: the second CTRL writer was still spelling out
  $A7/$F0
 
 The ladder went into cdc_setup() last commit and missed the other place

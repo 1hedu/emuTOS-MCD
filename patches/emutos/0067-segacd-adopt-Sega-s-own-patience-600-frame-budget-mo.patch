@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 00:10:49 +0000
-Subject: [PATCH 067/184] segacd: adopt Sega's own patience -- 600-frame
+Subject: [PATCH 067/185] segacd: adopt Sega's own patience -- 600-frame
  budget, more attempts
 
 megadev's cdrom.s carries the read loop from Sega's Mega CD sample

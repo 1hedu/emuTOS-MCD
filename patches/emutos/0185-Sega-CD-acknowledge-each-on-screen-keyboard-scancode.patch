@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Sun, 23 Aug 2026 02:32:08 +0000
+Subject: [PATCH 185/185] Sega CD: acknowledge each on-screen-keyboard scancode
+
+GA_KEY is a single latest-wins word. The servant posts one scancode per
+frame and this handler reads one per INT2, and the assumption that
+those rates never slip held until a serial keyboard could type during a
+redraw: two posts between two reads is one latch, and the earlier
+scancode is gone before it was seen. Measured on the scripted serial
+rig -- "hello world" arrived with letters missing and their Enters
+intact, which is also exactly what the Flipper Zero produced on real
+hardware.
+
+The COMFLG sub byte has been dead since the SP finished the boot
+handshake, so it becomes the acknowledgement: the seq of each processed
+scancode is echoed there, and the servant holds its queue until the
+echo matches. The on-screen keyboard's own presses are unaffected.
+---
+ bios/segacd.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 776df61..93a9fa1 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -4249,6 +4249,24 @@ void segacd_int_2_c(void)
+                 call_ikbdraw(sc);
+                 call_ikbdraw((UBYTE)(sc | 0x80));
+             }
++            /* Acknowledge, so the servant may post the next one.
++             *
++             * GA_KEY is a single latest-wins word, and the assumption
++             * that one post per frame meets one INT2 per frame held
++             * right up until a serial keyboard could type during a
++             * redraw: an interrupt arriving while the previous one is
++             * still being serviced is latched, two arriving are still
++             * one latch, and the earlier scancode is gone before it
++             * was ever read. Measured, not supposed: "hello world"
++             * through the scripted serial rig arrived as nine letters,
++             * with the two that shared a frame with a long redraw
++             * missing and their Enters intact.
++             *
++             * The COMFLG sub byte has been dead since the SP finished
++             * the boot handshake, which makes it the one free channel
++             * back: the servant now holds its queue until the seq it
++             * posted comes back through here. */
++            *(volatile UBYTE *)0xFF800F = seq;
+         }
+     }
+ 

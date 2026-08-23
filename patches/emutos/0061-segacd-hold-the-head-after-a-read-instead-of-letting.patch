@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 20:45:24 +0000
-Subject: [PATCH 061/184] segacd: hold the head after a read instead of letting
+Subject: [PATCH 061/185] segacd: hold the head after a read instead of letting
  it run to the rim
 
 Command 3 does not read a sector, it starts the drive reading, and the

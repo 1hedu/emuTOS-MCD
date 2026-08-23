@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 07:30:54 +0000
-Subject: [PATCH 136/184] The read path decides on CDD packets that failed
+Subject: [PATCH 136/185] The read path decides on CDD packets that failed
  their checksum
 
 cd_state_action() and cd_prepare() both read cdd_stat[0] with no regard

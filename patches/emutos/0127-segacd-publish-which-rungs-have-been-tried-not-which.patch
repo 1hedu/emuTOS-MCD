@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 02:22:18 +0000
-Subject: [PATCH 127/184] segacd: publish which rungs have been tried, not
+Subject: [PATCH 127/185] segacd: publish which rungs have been tried, not
  which is current
 
 First hardware log with the ladder in it read rung 0 in all three

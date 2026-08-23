@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 9 Aug 2026 03:57:22 +0000
-Subject: [PATCH 005/184] segacd: B: drive over the backup RAM cartridge proxy
+Subject: [PATCH 005/185] segacd: B: drive over the backup RAM cartridge proxy
 
 Only the Genesis-side CPU can reach the cartridge, so B: sectors move
 through a bounce buffer at the top of the shared PRG bank: the sub

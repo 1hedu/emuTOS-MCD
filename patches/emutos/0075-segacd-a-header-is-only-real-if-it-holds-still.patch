@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 07:52:42 +0000
-Subject: [PATCH 075/184] segacd: a header is only real if it holds still
+Subject: [PATCH 075/185] segacd: a header is only real if it holds still
 
 why 55 then why 1, wrong-sector frozen at 32, twelve thousand sectors
 decoded and none matching the wanted LBA -- plus 01:80:00 back on the

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 09:06:24 +0000
-Subject: [PATCH 107/184] segacd: a trace per init step, so a boot that stops
+Subject: [PATCH 107/185] segacd: a trace per init step, so a boot that stops
  says where
 
 A Mode 1 boot reached trace E005 -- the top of biosmain -- and

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 05:35:06 +0000
-Subject: [PATCH 130/184] segacd2: the timeshare was reading the wrong half of
+Subject: [PATCH 130/185] segacd2: the timeshare was reading the wrong half of
  the status word
 
 CDCSTAT does no work. It is five instructions comparing the sector

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 9 Aug 2026 09:19:34 +0000
-Subject: [PATCH 015/184] segacd: implement flopver(), which was failing every
+Subject: [PATCH 015/185] segacd: implement flopver(), which was failing every
  successful write
 
 fverify defaults on, so EmuTOS follows every floppy write with

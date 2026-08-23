@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 01:35:50 +0000
-Subject: [PATCH 022/184] segacd: report the PCM chip's own address counter, so
+Subject: [PATCH 022/185] segacd: report the PCM chip's own address counter, so
  ears are optional
 
 Still silent on hardware with every register field verified against

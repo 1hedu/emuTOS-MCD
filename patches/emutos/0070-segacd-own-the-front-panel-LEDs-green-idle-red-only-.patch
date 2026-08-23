@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 04:32:32 +0000
-Subject: [PATCH 070/184] segacd: own the front-panel LEDs -- green idle, red
+Subject: [PATCH 070/185] segacd: own the front-panel LEDs -- green idle, red
  only while reading
 
 The CDBIOS runs the lamps and we evict it mid-access, so they freeze

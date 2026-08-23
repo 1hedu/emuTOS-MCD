@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 06:03:26 +0000
-Subject: [PATCH 100/184] segacd: the log buffer takes B:'s eleven data sectors
+Subject: [PATCH 100/185] segacd: the log buffer takes B:'s eleven data sectors
 
 3584 was inherited from the older graft and the round is bigger now --
 about 305 bytes, so eleven rounds. B: is sixteen 512-byte sectors,

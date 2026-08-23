@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 23:51:38 +0000
-Subject: [PATCH 094/184] segacd: a watchdog on level 2, and a probe that can
+Subject: [PATCH 094/185] segacd: a watchdog on level 2, and a probe that can
  name the culprit
 
 The console answered the last build with i4 1 -- one level 4 for the

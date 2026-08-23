@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 05:23:58 +0000
-Subject: [PATCH 072/184] segacd: Sega's pause-to-standby -- stop the motor
+Subject: [PATCH 072/185] segacd: Sega's pause-to-standby -- stop the motor
  after 60 idle seconds
 
 The access lamp sat solid at an idle desktop and the user called it

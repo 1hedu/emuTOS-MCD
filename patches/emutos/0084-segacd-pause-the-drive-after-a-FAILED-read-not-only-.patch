@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 21:14:45 +0000
-Subject: [PATCH 084/184] segacd: pause the drive after a FAILED read, not only
+Subject: [PATCH 084/185] segacd: pause the drive after a FAILED read, not only
  a successful one
 
 The user has described the same shape three times -- boots that get

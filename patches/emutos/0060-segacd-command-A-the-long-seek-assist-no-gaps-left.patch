@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 20:32:17 +0000
-Subject: [PATCH 060/184] segacd: command $A, the long-seek assist -- no gaps
+Subject: [PATCH 060/185] segacd: command $A, the long-seek assist -- no gaps
  left
 
 The last thing Sega does that this driver did not. It carries how far

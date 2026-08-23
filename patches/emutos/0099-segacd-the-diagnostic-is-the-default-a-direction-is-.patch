@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 05:50:53 +0000
-Subject: [PATCH 099/184] segacd: the diagnostic is the default; a direction is
+Subject: [PATCH 099/185] segacd: the diagnostic is the default; a direction is
  the way out
 
 Which button registers at power-on has now cost two hardware runs.

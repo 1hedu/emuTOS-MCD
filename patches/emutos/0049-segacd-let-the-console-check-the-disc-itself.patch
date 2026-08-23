@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 10:52:11 +0000
-Subject: [PATCH 049/184] segacd: let the console check the disc itself
+Subject: [PATCH 049/185] segacd: let the console check the disc itself
 
 On hardware there is no harness to diff 2048 bytes against, and reading
 them off a status line is not a test. So the far sector is now 1400,

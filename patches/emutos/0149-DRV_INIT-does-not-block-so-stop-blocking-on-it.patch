@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 10:19:10 +0000
-Subject: [PATCH 149/184] DRV_INIT does not block, so stop blocking on it
+Subject: [PATCH 149/185] DRV_INIT does not block, so stop blocking on it
 
 Twenty seconds was indefensible and the dispatcher says why:
 

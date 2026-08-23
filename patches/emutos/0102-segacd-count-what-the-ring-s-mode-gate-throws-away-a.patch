@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 07:00:25 +0000
-Subject: [PATCH 102/184] segacd: count what the ring's mode gate throws away,
+Subject: [PATCH 102/185] segacd: count what the ring's mode gate throws away,
  and keep the byte
 
 The first hardware log from this driver: 119 sectors announced by the

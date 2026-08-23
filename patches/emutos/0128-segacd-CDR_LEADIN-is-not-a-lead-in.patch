@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 03:16:41 +0000
-Subject: [PATCH 128/184] segacd: CDR_LEADIN is not a lead-in
+Subject: [PATCH 128/185] segacd: CDR_LEADIN is not a lead-in
 
 cd_lead is 2 or 20 -- the L arm of the diagnostic, how many frames
 early to command the read. The macro wrapping it was called CDR_LEADIN,

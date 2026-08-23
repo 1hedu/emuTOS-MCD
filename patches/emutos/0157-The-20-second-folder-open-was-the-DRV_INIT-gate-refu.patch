@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 21:06:01 +0000
-Subject: [PATCH 157/184] The 20-second folder open was the DRV_INIT gate
+Subject: [PATCH 157/185] The 20-second folder open was the DRV_INIT gate
  refusing a live drive
 
 CDTEST's new per-op clocks caught it in one hardware run. The first

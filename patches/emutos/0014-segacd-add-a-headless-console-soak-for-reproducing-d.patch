@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 9 Aug 2026 08:45:31 +0000
-Subject: [PATCH 014/184] segacd: add a headless console soak for reproducing
+Subject: [PATCH 014/185] segacd: add a headless console soak for reproducing
  display bugs
 
 Heavy console output is the one screen the desktop never exercises: an

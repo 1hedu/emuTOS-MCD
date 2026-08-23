@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 10:09:06 +0000
-Subject: [PATCH 116/184] segacd: bracket the framebuffer corruption, which is
+Subject: [PATCH 116/185] segacd: bracket the framebuffer corruption, which is
  after the AES
 
 Two sticky bits, one at the end of bios_init and one at the Pexec

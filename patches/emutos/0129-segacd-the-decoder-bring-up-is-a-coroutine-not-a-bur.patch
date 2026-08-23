@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 03:43:37 +0000
-Subject: [PATCH 129/184] segacd: the decoder bring-up is a coroutine, not a
+Subject: [PATCH 129/185] segacd: the decoder bring-up is a coroutine, not a
  burst
 
 $1F3E is the routine CDCSTART calls between every step, and it is not a

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 06:29:58 +0000
-Subject: [PATCH 101/184] segacd: the timeshare is a lever in the sweep, and
+Subject: [PATCH 101/185] segacd: the timeshare is a lever in the sweep, and
  Fread shows its bytes
 
 Twelve rounds of hardware log came back with err 0, why 0000, lastfail

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 09:32:19 +0000
-Subject: [PATCH 144/184] Settle to pause before the retry, and what Doom
+Subject: [PATCH 144/185] Settle to pause before the retry, and what Doom
  actually does
 
 Two things, one shipped and one written down.

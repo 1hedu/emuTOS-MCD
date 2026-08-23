@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 09:00:35 +0000
-Subject: [PATCH 042/184] segacd: close the last two gaps against the working
+Subject: [PATCH 042/185] segacd: close the last two gaps against the working
  reference
 
 Rather than ship one fix per disc again, the whole CDD path was diffed

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 07:36:16 +0000
-Subject: [PATCH 104/184] segacd: is STAT0 bit 7 the flag that marks the chaff,
+Subject: [PATCH 104/185] segacd: is STAT0 bit 7 the flag that marks the chaff,
  or is it noise
 
 The first console log from the fixed driver: 14,378 sectors rejected

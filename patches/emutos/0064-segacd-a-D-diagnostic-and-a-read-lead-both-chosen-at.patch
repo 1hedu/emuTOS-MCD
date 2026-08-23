@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 22:58:02 +0000
-Subject: [PATCH 064/184] segacd: a D: diagnostic and a read lead, both chosen
+Subject: [PATCH 064/185] segacd: a D: diagnostic and a read lead, both chosen
  at boot
 
 There is one CD-R left, so this disc has to be able to answer questions

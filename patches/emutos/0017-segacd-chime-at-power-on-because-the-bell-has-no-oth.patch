@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 9 Aug 2026 18:03:53 +0000
-Subject: [PATCH 017/184] segacd: chime at power-on, because the bell has no
+Subject: [PATCH 017/185] segacd: chime at power-on, because the bell has no
  other trigger
 
 EmuTOS rings the bell only when a BEL character reaches the VT52

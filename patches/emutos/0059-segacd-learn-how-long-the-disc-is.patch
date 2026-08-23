@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 20:20:00 +0000
-Subject: [PATCH 059/184] segacd: learn how long the disc is
+Subject: [PATCH 059/185] segacd: learn how long the disc is
 
 Sub-command 3 is the disc's total length and the probe rotation has
 been asking for it twice a second since stage 2 -- catching the answer

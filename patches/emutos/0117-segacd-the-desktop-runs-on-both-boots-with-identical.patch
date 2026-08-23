@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 10:19:43 +0000
-Subject: [PATCH 117/184] segacd: the desktop runs on both boots, with
+Subject: [PATCH 117/185] segacd: the desktop runs on both boots, with
  identical screen geometry
 
 deskmain() is entered on a Mode 1 boot as readily as on a CD boot --

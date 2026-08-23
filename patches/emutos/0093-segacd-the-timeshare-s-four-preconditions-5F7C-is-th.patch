@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 23:09:09 +0000
-Subject: [PATCH 093/184] segacd: the timeshare's four preconditions -- $5F7C
+Subject: [PATCH 093/185] segacd: the timeshare's four preconditions -- $5F7C
  is the freeze
 
 Handing D: to the parked firmware hung the console on the EmuTOS

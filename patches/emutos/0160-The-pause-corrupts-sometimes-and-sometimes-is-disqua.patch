@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 21:34:37 +0000
-Subject: [PATCH 160/184] The pause corrupts sometimes, and sometimes is
+Subject: [PATCH 160/185] The pause corrupts sometimes, and sometimes is
  disqualifying
 
 v24 read cleanly on the console. v28 -- the same driver bytes -- listed

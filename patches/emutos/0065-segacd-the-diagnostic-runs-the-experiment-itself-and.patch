@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 23:35:15 +0000
-Subject: [PATCH 065/184] segacd: the diagnostic runs the experiment itself,
+Subject: [PATCH 065/185] segacd: the diagnostic runs the experiment itself,
  and shows its buttons
 
 The lead-2 lever went onto the last disc behind a boot button whose

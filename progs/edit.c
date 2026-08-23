@@ -448,19 +448,17 @@ static int pick(void)
 int pmain(void)
 {
 #ifdef EDIT_AUTO
-    /* Emulator only, and never on a cartridge: no menu and no keys.
-     * Load a file that is certainly on C:, draw it, and hold, so a
-     * framebuffer dump can be decoded and compared with the file. That
-     * exercises the load, the line walker and the whole screen draw --
-     * everything except the keystrokes. */
+    /* Emulator only, and never on a cartridge: no menu. Load a file
+     * that is certainly on C:, draw it, and fall into the ordinary key
+     * loop below. With nothing typed the screen is as stable as the
+     * old hold-forever was, so a framebuffer dump still compares
+     * against the file. The hold-forever version read no keys at all,
+     * so the serial-keyboard test could not type into it. */
     load("README.TXT");
     cur = 0; top = 0;
-    clrscr();
-    shadow_forget();
-    draw();
-    for (;;) ;
-#endif
+#else
     if (!pick()) { curs(0); clrscr(); return 0; }
+#endif
 
     clrscr();
     shadow_forget();

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 09:29:04 +0000
-Subject: [PATCH 111/184] segacd: a drive that answers nothing stops being
+Subject: [PATCH 111/185] segacd: a drive that answers nothing stops being
  asked
 
 A failed CD read is expensive on purpose -- Sega's patience is eight

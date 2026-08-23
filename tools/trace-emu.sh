@@ -32,6 +32,7 @@ SRC="$CACHE/gpgx"
 if [[ ! -f "$CACHE/gpgx_trace.so" ]]; then
   [[ -d "$SRC" ]] || git clone --depth 1 https://github.com/libretro/Genesis-Plus-GX "$SRC"
   git -C "$SRC" apply "$ROOT/tools/gpgx-cdtrace.patch"
+  git -C "$SRC" apply "$ROOT/tools/gpgx-uartin.patch"
   make -C "$SRC" -f Makefile.libretro platform=unix -j"$(nproc)"
   cp "$SRC/genesis_plus_gx_libretro.so" "$CACHE/gpgx_trace.so"
 fi

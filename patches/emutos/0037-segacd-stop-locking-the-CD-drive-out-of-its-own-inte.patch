@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 07:51:01 +0000
-Subject: [PATCH 037/184] segacd: stop locking the CD drive out of its own
+Subject: [PATCH 037/185] segacd: stop locking the CD drive out of its own
  interrupt
 
 Keeping the Genesis off the bus was half the idea. The sub's own

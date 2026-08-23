@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 08:57:26 +0000
-Subject: [PATCH 041/184] segacd: read the CDD status the way the BIOS reads it
+Subject: [PATCH 041/185] segacd: read the CDD status the way the BIOS reads it
 
 Every packet failing its checksum, sixteen out of sixteen, while the
 drive was visibly answering. Systematic, so not a torn read.

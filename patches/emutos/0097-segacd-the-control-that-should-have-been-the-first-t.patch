@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 01:09:50 +0000
-Subject: [PATCH 097/184] segacd: the control that should have been the first
+Subject: [PATCH 097/185] segacd: the control that should have been the first
  test
 
 Everything the parked firmware has ever been seen to read on this

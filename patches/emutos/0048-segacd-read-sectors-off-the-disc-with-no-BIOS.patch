@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 10:44:43 +0000
-Subject: [PATCH 048/184] segacd: read sectors off the disc with no BIOS
+Subject: [PATCH 048/185] segacd: read sectors off the disc with no BIOS
 
 The CDC driver, written after the whole path was read out of the
 console's own CDBIOS rather than during. docs/cdd-bios-notes.md has the

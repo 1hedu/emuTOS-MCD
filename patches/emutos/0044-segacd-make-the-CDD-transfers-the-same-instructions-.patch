@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 09:14:35 +0000
-Subject: [PATCH 044/184] segacd: make the CDD transfers the same instructions
+Subject: [PATCH 044/185] segacd: make the CDD transfers the same instructions
  as the working code
 
 The C was verified correct against its own disassembly: right widths,

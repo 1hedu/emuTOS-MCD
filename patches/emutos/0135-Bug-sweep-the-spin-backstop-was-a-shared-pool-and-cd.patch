@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 07:15:32 +0000
-Subject: [PATCH 135/184] Bug sweep: the spin backstop was a shared pool, and
+Subject: [PATCH 135/185] Bug sweep: the spin backstop was a shared pool, and
  cdc_hit had no reader
 
 Two defects on the D: read path, found by reading rather than running.

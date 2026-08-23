@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 07:06:34 +0000
-Subject: [PATCH 134/184] cdc_want was never set on the path D: uses
+Subject: [PATCH 134/185] cdc_want was never set on the path D: uses
 
 segacd_int_5_c() latches PT the moment a sector's header equals
 cdc_want -- the direct route to a sector, independent of the ring.

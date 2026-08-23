@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 19 Aug 2026 19:14:14 +0000
-Subject: [PATCH 175/184] Report the ramdisk too, so a bulk file on it need not
+Subject: [PATCH 175/185] Report the ramdisk too, so a bulk file on it need not
  be copied
 
 There is 112KB of PRG RAM between phystop and the timeshare's scratch,

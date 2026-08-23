@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sat, 15 Aug 2026 06:03:59 +0000
-Subject: [PATCH 164/184] Sega CD: drive letters that are names, not positions
+Subject: [PATCH 164/185] Sega CD: drive letters that are names, not positions
 
 A: and B: are the floppy slots and this machine has no floppy drive.
 The previous arrangement put the removable media there, which follows

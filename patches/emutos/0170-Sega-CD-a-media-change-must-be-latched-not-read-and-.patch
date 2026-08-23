@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 18 Aug 2026 03:13:10 +0000
-Subject: [PATCH 170/184] Sega CD: a media change must be latched, not
+Subject: [PATCH 170/185] Sega CD: a media change must be latched, not
  read-and-cleared
 
 The cartridge swap reached the hardware and died in this driver. The

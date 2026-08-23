@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 22:13:41 +0000
-Subject: [PATCH 091/184] segacd: D: is read by the machine's own firmware
+Subject: [PATCH 091/185] segacd: D: is read by the machine's own firmware
 
 Dfree 0, 92 of 8095 free. Fsfirst 0 [READCD.TXT]. Fopen 6. Fread 32.
 CDBIOS rd 8 fail 0. The whole filesystem stack, served by the parked

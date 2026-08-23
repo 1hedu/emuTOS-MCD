@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 19:24:19 +0000
-Subject: [PATCH 151/184] Boot never touches the disc, and a silent drive
+Subject: [PATCH 151/185] Boot never touches the disc, and a silent drive
  cannot eat the clock
 
 "It shouldn't take as long to boot, and the failure takes forever."

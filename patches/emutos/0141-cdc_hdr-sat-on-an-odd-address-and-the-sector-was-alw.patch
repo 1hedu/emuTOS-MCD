@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 08:50:32 +0000
-Subject: [PATCH 141/184] cdc_hdr sat on an odd address, and the sector was
+Subject: [PATCH 141/185] cdc_hdr sat on an odd address, and the sector was
  always arriving
 
 The emulator settles it. At the moment the transfer is triggered:

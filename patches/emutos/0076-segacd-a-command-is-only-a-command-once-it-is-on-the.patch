@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 18:53:37 +0000
-Subject: [PATCH 076/184] segacd: a command is only a command once it is on the
+Subject: [PATCH 076/185] segacd: a command is only a command once it is on the
  wire
 
 torn 0, badbcd 0, wrong 0-then-15, wait 0, seek 49, why 11: headers

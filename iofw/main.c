@@ -617,6 +617,8 @@ uint16_t pad_read(void);     /* input.c: raw pad, no comm-register writes */
 void osk_upload_tiles(void);
 void osk_post_key(uint8_t sc);
 uint8_t osk_slot_free(void);
+uint8_t osk_key_acked(void);
+uint16_t uart_pushed(void);
 void uart_poll(void);
 uint8_t uart_next(void);
 void uart_stats(uint16_t *rx, uint16_t *err, uint16_t *drop);
@@ -2165,14 +2167,22 @@ static void cart_service(void)
     base = lba * 512u;
     cart = (volatile uint8_t *)CART_DATA;
 
+    /* uart_poll() every 128 bytes: a sector over the cart bus takes
+     * milliseconds and the receive latch holds one byte for two, so
+     * this loop has to service the port. The port is on the A10000
+     * bus; the grab and the bank don't touch it. */
     if (op == 2) {                               /* write: bounce -> cart */
         cart_write_enable(1);
-        for (i = 0; i < 512; i++)
+        for (i = 0; i < 512; i++) {
+            if (!(i & 127)) uart_poll();
             cart[(base + i) * 2] = bounce[i];
+        }
         cart_write_enable(0);
     } else {                                      /* read: cart -> bounce */
-        for (i = 0; i < 512; i++)
+        for (i = 0; i < 512; i++) {
+            if (!(i & 127)) uart_poll();
             bounce[i] = cart[(base + i) * 2];
+        }
     }
     cart_last_seq = seq;
     VU16(GA_CART_ACK) = seq;   /* word write: sub reads the low byte */
@@ -2660,8 +2670,17 @@ int main(void)
              * did not already take this frame. */
             uint8_t sc;
             uart_poll();
-            if (osk_slot_free() && (sc = uart_next()) != 0)
+            if (osk_slot_free() && osk_key_acked()
+                && (sc = uart_next()) != 0) {
                 osk_post_key(sc);
+                VU16(REPORT + 0x50)++;              /* posts */
+                VU16(REPORT + 0x52) =
+                    (uint16_t)((sc << 8) | (uint8_t)VU16(GA_KEY));
+                VU8(0xFF0F80u + (VU16(REPORT + 0x50) & 31u)) = sc;
+            }
+            VU16(REPORT + 0x56) = uart_pushed();
+            VU16(REPORT + 0x54) = (uint16_t)((VU8(GA_COMFLG_S) << 8)
+                                             | (uint8_t)VU16(GA_KEY));
             /* Bytes in, bytes that arrived broken, scancodes the queue
              * had no room for. Nowhere to print them with the letterbox
              * retired, so they go where a work-RAM dump can read them:
@@ -2794,6 +2813,12 @@ int main(void)
             uint16_t line, g;
             for (line = 0; line < 25; line++) {
                 uint16_t trow40 = (uint16_t)(((base_line + line) >> 3) * 40u);
+                /* The receive latch is one byte deep and a byte lands
+                 * every 2 ms; this loop reads 4000 bytes through the
+                 * expansion window and was the frame's longest stretch
+                 * with nobody looking at the port. Once per line is
+                 * every ~150 us. */
+                uart_poll();
                 for (g = 0; g < 20; g++) {      /* one 16px group = 2 longs */
                     uint32_t a = src[0], b = src[1];
                     if (a != dst[0] || b != dst[1] || bootstrap) {
@@ -2854,8 +2879,13 @@ no_copy:
                         uint8_t b;
                         p[k] = 0;
                         for (b = 0; b < 8; b++)
-                            if (m & (uint8_t)(0x80u >> b))
+                            if (m & (uint8_t)(0x80u >> b)) {
                                 convert_tile(trow, (uint16_t)(k * 8u + b));
+                                /* a bootstrap sweep converts a thousand
+                                 * of these back to back, which is far
+                                 * longer than the receive latch lasts */
+                                uart_poll();
+                            }
                     }
                 }
             }

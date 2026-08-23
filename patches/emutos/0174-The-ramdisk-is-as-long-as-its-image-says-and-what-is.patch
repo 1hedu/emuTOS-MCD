@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 19 Aug 2026 08:40:00 +0000
-Subject: [PATCH 174/184] The ramdisk is as long as its image says, and what is
+Subject: [PATCH 174/185] The ramdisk is as long as its image says, and what is
  left is a payload's
 
 A payload that needs more than its 32000 bytes was told, by

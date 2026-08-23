@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 21:36:12 +0000
-Subject: [PATCH 087/184] segacd: mask the payload transfer -- the last
+Subject: [PATCH 087/185] segacd: mask the payload transfer -- the last
  unguarded CDC sequence
 
 'Dfree -11, Fsfirst -33, Fopen -33' is two different faults, and the

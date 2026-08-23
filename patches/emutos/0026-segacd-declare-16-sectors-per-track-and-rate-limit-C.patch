@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 02:49:42 +0000
-Subject: [PATCH 026/184] segacd: declare 16 sectors per track, and rate-limit
+Subject: [PATCH 026/185] segacd: declare 16 sectors per track, and rate-limit
  CDD commands
 
 Two hardware failures, both invisible in emulation.
