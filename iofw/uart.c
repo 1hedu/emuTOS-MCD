@@ -30,16 +30,23 @@
  * -- bit 2 RERR a framing or overrun error, bit 1 RRDY a byte waiting,
  * bit 0 TFUL the transmit register still busy. Bit 3 is the receive
  * interrupt enable, which this file does not use: the servant has run
- * with the interrupt mask at 7 since it was written, and polling once
- * a frame is enough for a person typing.
+ * with the interrupt mask at 7 since it was written, so uart_poll() is
+ * called from wait_vblank()'s spin loops instead, the same way the
+ * printer's transmit pump is.
  *
- * Enough, but not by a lot, and that is why there is a queue. At 4800
- * baud a byte takes about 2 ms and a frame is 16, so eight can arrive
- * between two looks at the port -- and the sub CPU is handed one
- * scancode per frame through a single comm register, because that is
- * the protocol the on-screen keyboard already uses and this is not the
- * change to widen it. Held keys and pasted text would otherwise be
- * dropped on the floor rather than merely arriving slowly.
+ * From the spin loops rather than once a frame because the receiver is
+ * a one-byte latch with no FIFO. At 4800 baud a byte completes every
+ * 2 ms against a 16 ms frame, so a sender that follows each character
+ * with a line ending -- a Flipper Zero, on the bench -- puts two or
+ * three bytes on the wire back to back. The second overruns the first
+ * long before the next frame, and RERR's read-and-discard eats what
+ * survived: the character is lost, the Enter is not.
+ *
+ * The queue is for the other end of the path: the sub CPU takes one
+ * scancode per frame through a single comm register, the protocol the
+ * on-screen keyboard already uses. Bytes come off the port within
+ * microseconds and leave for the sub at one per frame; the queue
+ * buffers between those rates.
  *
  * This file is distributed under the GPL, version 2 or at your option
  * any later version.  See doc/license.txt for details.
@@ -113,9 +120,12 @@ void uart_enable(uint8_t on)
 
 uint8_t uart_active(void) { return uart_on; }
 
-/* Drain the port into the queue. Called once a frame. */
+/* Drain the port into the queue. Called from wait_vblank()'s spin
+ * loops -- see the top of the file for why once a frame lost bytes --
+ * and once from the frame loop, at the cost of one status read. */
 void uart_poll(void)
 {
+    static uint8_t last_ch;
     uint8_t guard;
 
     if (!uart_on)
@@ -126,7 +136,7 @@ void uart_poll(void)
      * 4800 baud. */
     for (guard = 0; guard < 10; guard++) {
         uint8_t st = VU8(UART_SCTRL);
-        uint8_t ch, sc;
+        uint8_t ch, sc, was;
 
         if (st & SCTRL_RERR) {
             (void)VU8(UART_RXDATA);     /* reading it clears the error */
@@ -138,6 +148,13 @@ void uart_poll(void)
 
         ch = VU8(UART_RXDATA);
         uart_rx++;
+        was = last_ch;
+        last_ch = ch;
+        /* CR and LF both map to Enter, so a CR+LF sender would type
+         * two. The LF of that pair is the same keypress. A bare LF
+         * still counts. */
+        if (ch == 0x0A && was == 0x0D)
+            continue;
         if (ch >= 128)
             continue;
         sc = uart_keymap[ch];

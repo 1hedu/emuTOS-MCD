@@ -311,12 +311,18 @@ static void prn_watchdog(void)
  * finishing the frame's work and the blank arriving is worth about
  * eight bytes -- which is the whole of what 4800 baud can carry. The
  * pump loses nothing, because it had already stopped. */
+void uart_poll(void);   /* uart.c; also declared below */
+
 static void wait_vblank(void)
 {
-    while (VU16(VDP_CTRL) & VDP_ST_VBLANK)
+    while (VU16(VDP_CTRL) & VDP_ST_VBLANK) {
         prn_step();
-    while (!(VU16(VDP_CTRL) & VDP_ST_VBLANK))
+        uart_poll();
+    }
+    while (!(VU16(VDP_CTRL) & VDP_ST_VBLANK)) {
         prn_step();
+        uart_poll();
+    }
 }
 
 /* ST 3-bit RGB (0x0RGB) -> Genesis CRAM.
