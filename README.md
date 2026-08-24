@@ -11,7 +11,7 @@ An Atari ST desktop on a Mega CD, booting from CD-R or cartridge.
 | | |
 |---|---|
 | ![The ramdisk open in a window](images/c-drive.png) | ![DEMO.PI1 in SHOW.PRG](images/demo-pi1.png) |
-| `C:` in a GEM window | `SHOW.PRG` displaying `DEMO.PI1` — the Mandelbrot set, which `tools/mkpi1.py` computes because the disc ships nobody's artwork |
+| `C:` in a GEM window | `SHOW.PRG` displaying `DEMO.PI1` — the Mandelbrot set, which `tools/mkpi1.py` computes. |
 
 ## Drives
 
