@@ -6,6 +6,13 @@ An Atari ST desktop on a Mega CD, booting from CD-R or cartridge.
     EmuTOS, GEMDOS, AES, VDI  →  iofw: planar → VDP, pads → IKBD
     four block devices           serial keyboard, printer, sound
 
+![The GEM desktop on a Mega CD, with all four drives](images/desktop.png)
+
+| | |
+|---|---|
+| ![The ramdisk open in a window](images/c-drive.png) | ![DEMO.PI1 in SHOW.PRG](images/demo-pi1.png) |
+| `C:` in a GEM window | `SHOW.PRG` displaying `DEMO.PI1` — the Mandelbrot set, which `tools/mkpi1.py` computes because the disc ships nobody's artwork |
+
 ## Drives
 
 | | |
@@ -31,6 +38,21 @@ the cartridge is not.
 
 Build instructions, including how to add Sonic: [docs/build.md](docs/build.md).
 
+## Sonic
+
+![Sonic running on the Mega CD desktop](images/sonic.gif)
+
+*Shown at twice actual speed.* **Desk → Sonic** is the whole interface —
+an accessory rather than a `.PRG`, because a program launched from the
+desktop is handed the screen, and the desktop he was standing on would
+be gone. Start ends it; so does the signpost at the end of the fourth
+screen.
+
+He is not on the released disc and cannot be: the art and the movement
+constants are Sega's. What the repository carries is the pipeline that
+reads them out of dumps you already own — see
+[docs/sonic.md](docs/sonic.md) for what that port had to solve.
+
 ## Layout
 
 | | |
@@ -42,7 +64,7 @@ Build instructions, including how to add Sonic: [docs/build.md](docs/build.md).
 | `progs/` | the `.PRG`s and the accessory |
 | `payload/` | Genesis-side payloads |
 | `tools/` | build scripts, emulator harness |
-| `docs/` | documentation; `CHECKPOINT.md` is the project log |
+| `docs/` | documentation |
 
 ## UNTESTED
 pico Printer bridge
