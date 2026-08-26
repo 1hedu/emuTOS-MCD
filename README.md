@@ -51,8 +51,7 @@ screen.
 He is not on the released disc and cannot be: the art and the movement
 constants are Sega's. What the repository carries is the pipeline that
 reads them out of dumps you already own — see
-[docs/sonic.md](docs/sonic.md) for what that port had to solve.
-
+[docs/sonic.md](docs/sonic.md).
 ## Layout
 
 | | |
