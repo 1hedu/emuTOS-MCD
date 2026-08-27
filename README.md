@@ -68,4 +68,4 @@ reads them out of dumps you already own — see
 ## UNTESTED
 pico Printer bridge
 ## TODO
-MegaKey -- pico keyboard bridge for those without UART
+MegaKeys -- pico keyboard bridge for those without UART
