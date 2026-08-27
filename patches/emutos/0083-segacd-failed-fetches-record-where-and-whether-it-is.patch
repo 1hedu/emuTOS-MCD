@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 20:36:13 +0000
-Subject: [PATCH 083/185] segacd: failed fetches record where, and whether it
+Subject: [PATCH 083/190] segacd: failed fetches record where, and whether it
  is the same where
 
 The doubled retry leash rests on an unverified diagnosis -- that the

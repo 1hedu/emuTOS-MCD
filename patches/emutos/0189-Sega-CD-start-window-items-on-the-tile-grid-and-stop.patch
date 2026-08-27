@@ -1,0 +1,154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 26 Aug 2026 20:54:39 +0000
+Subject: [PATCH 189/190] Sega CD: start window items on the tile grid, and
+ stop repainting the info line
+
+Two things the ring could not pay for on its own.
+
+The item grid. A window's work area is its outer rectangle plus (1, 21),
+so it lands on the servant's 16x8 tile grid for one window position in
+sixteen, and otherwise the partial columns and rows around it repainted
+on every scroll step -- as much as the ring was saving. The window does
+not have to move for that; the items inside it do. win_bldview() pads the
+top-left of the item grid out to the next tile boundary and drops a
+column if the far edge would spill past the last whole one, so the
+outermost pixels of the work area are window background before the blit
+and after it, and the diff finds them unchanged. Measured by tile
+column: what cost 14 tiles a scroll either side now costs zero. The
+window stays where it was put, at the size it was given; the margin
+inside it grows by up to fifteen pixels on the left and seven at the
+top, recomputed whenever the window moves.
+
+The info line. wind_set(WF_INFO) redraws whatever it is handed, and
+desk_clear() calls win_sinfo() on every keyboard arrow, so holding an
+arrow key repainted the same sentence over and over: 88 tiles a step,
+about two frames, a third of a window scroll's cost and nothing to do
+with scrolling. Compare before setting. Not conditional on the machine,
+because redrawing an unchanged string is waste anywhere.
+
+Where this leaves it: 380 tiles per scroll step without the ring, 333
+with. The reason it is not more is that a window of icons is mostly
+white, and moving white over white changes no bytes at all -- the diff
+was already skipping most of the window before any of this. What is left
+is the newly exposed row of icons, which is genuinely new pixels.
+
+---
+ desk/deskwin.c | 77 ++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 74 insertions(+), 3 deletions(-)
+
+diff --git a/desk/deskwin.c b/desk/deskwin.c
+index b63568e..a39f13b 100644
+--- a/desk/deskwin.c
++++ b/desk/deskwin.c
+@@ -421,21 +421,73 @@ void win_bldview(WNODE *pwin, GRECT *r)
+     WORD  xoff, yoff, wh, sl_size, sl_value;
+     WORD  x, y, w, h;
+ 
++    WORD  xadj = 0, yadj = 0;
++#ifdef MACHINE_SEGACD
++    WORD  wfit_max;
++#endif
++
+     MAYBE_UNUSED(skipcnt);
+ 
+     r_get(r, &x, &y, &w, &h);
+ 
++#ifdef MACHINE_SEGACD
++    /* Start the items on the servant's tile grid.
++     *
++     * A window is scrolled by blitting the part that stays, and the
++     * servant can move blitted pixels without converting them -- but it
++     * works in whole tiles, eight lines tall and sixteen pixels wide,
++     * so a tile holding both moved content and the static window frame
++     * has to be repainted. A window's work area is its outer rectangle
++     * plus (1, 21), which lands on that grid for one position in
++     * sixteen, so in general the two partial columns and two partial
++     * rows around every window repainted on every scroll step: 157
++     * tiles, against the 164 the ring was saving.
++     *
++     * The window does not have to move for that -- the items inside it
++     * do. Pad the top-left of the item grid out to the next tile
++     * boundary and the outermost pixels of the work area are window
++     * background, before the blit and after it, so the servant's diff
++     * finds them unchanged and they cost nothing. The window stays
++     * exactly where it was put, at exactly the size it was given; the
++     * margin inside it grows by up to fifteen pixels on the left and
++     * seven at the top, and is recomputed whenever the window moves.
++     *
++     * Only the first row needs aligning vertically, because win_view()
++     * has already rounded the row pitch to a multiple of eight, so
++     * every row after it lands on the grid too. Columns have no such
++     * guarantee -- the icon pitch is not a multiple of sixteen -- so
++     * the far edge is handled by dropping a column rather than by
++     * padding, below. */
++    xadj = (WORD)((-(x + G.g_iwint)) & 15);
++    yadj = (WORD)((-(y + G.g_ihint)) & 7);
++#endif
++
+     /* free all this window's kids and set size */
+     obj_wfree(pwin->w_root, x, y, w, h);
+ 
+     /* make pstart point at 1st file in current view */
+-    win_ocalc(pwin, w/G.g_iwspc, h/G.g_ihspc, &pstart);
++    win_ocalc(pwin, (w-xadj)/G.g_iwspc, (h-yadj)/G.g_ihspc, &pstart);
+ #if CONF_WITH_SIZE_TO_FIT
+     o_wfit = min(pwin->w_pncol + 1, pwin->w_vncol - pwin->w_cvcol);
+ #else
+     o_wfit = pwin->w_pncol;
+ #endif
+     o_hfit = min(pwin->w_pnrow + 1, pwin->w_vnrow - pwin->w_cvrow);
++#ifdef MACHINE_SEGACD
++    /* ...and the far edge, which padding cannot reach: drop the last
++     * column if it would put item pixels past the last whole tile
++     * column of the work area. One column of icons is the price of the
++     * rest of them scrolling for nothing, and only when the window is
++     * within an icon's width of needing it. */
++    wfit_max = 1;
++    while (x + G.g_iwint + xadj + wfit_max * G.g_iwspc + G.g_iwext
++           <= ((x + w) & ~15))
++        wfit_max++;
++    if (o_wfit > wfit_max)
++        o_wfit = wfit_max;
++    /* Rows need no such test: the first is on the grid and the pitch is
++     * a multiple of eight, so the last one ends on it too. */
++#endif
+     r_cnt = c_cnt = 0;
+     while ((c_cnt < o_wfit) && (r_cnt < o_hfit) && pstart)
+     {
+@@ -449,7 +501,8 @@ void win_bldview(WNODE *pwin, GRECT *r)
+         xoff = c_cnt * G.g_iwspc;
+ 
+         /* allocate object */
+-        obid = obj_ialloc(pwin->w_root, xoff + G.g_iwint, yoff + G.g_ihint,
++        obid = obj_ialloc(pwin->w_root, xoff + G.g_iwint + xadj,
++                                 yoff + G.g_ihint + yadj,
+                                  G.g_iwext, G.g_ihext);
+         if (!obid)          /* can't allocate item object */
+         {
+@@ -922,6 +975,24 @@ void win_sinfo(WNODE *pwin, BOOL check_selected)
+         select_size = pn->p_size;
+     }
+ 
+-    sprintf(pwin->w_info, alert, select_size, select_count);
++    /*
++     * Only tell the AES if it changed.
++     *
++     * wind_set(WF_INFO) redraws the info line whatever it is handed,
++     * and desk_clear() calls this on every keyboard arrow -- so
++     * scrolling a window by holding an arrow key repainted the same
++     * sentence over and over. On a machine where a repaint is cheap
++     * that is invisible; here it was 88 tiles a scroll step, about two
++     * frames, and the third of a window scroll's whole cost that had
++     * nothing to do with the scroll.
++     */
++    {
++        char newinfo[sizeof(pwin->w_info)];
++
++        sprintf(newinfo, alert, select_size, select_count);
++        if (strcmp(newinfo, pwin->w_info) == 0)
++            return;
++        strcpy(pwin->w_info, newinfo);
++    }
+     wind_set(pwin->w_id, WF_INFO, pwin->w_info, 0, 0);
+ }

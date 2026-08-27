@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 9 Aug 2026 03:27:51 +0000
-Subject: [PATCH 003/185] segacd: inject servant mouse packets into the IKBD
+Subject: [PATCH 003/190] segacd: inject servant mouse packets into the IKBD
  path
 
 The main-CPU servant publishes relative deltas and buttons in the comm

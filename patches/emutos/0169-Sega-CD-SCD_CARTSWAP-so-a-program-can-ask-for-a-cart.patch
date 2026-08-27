@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 18 Aug 2026 00:33:06 +0000
-Subject: [PATCH 169/185] Sega CD: SCD_CARTSWAP, so a program can ask for a
+Subject: [PATCH 169/190] Sega CD: SCD_CARTSWAP, so a program can ask for a
  cartridge change
 
 The servant had grown a watcher that noticed the memory map flipping

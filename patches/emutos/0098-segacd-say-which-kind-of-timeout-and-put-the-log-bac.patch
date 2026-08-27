@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 05:44:14 +0000
-Subject: [PATCH 098/185] segacd: say which kind of timeout, and put the log
+Subject: [PATCH 098/190] segacd: say which kind of timeout, and put the log
  back on B:
 
 The first log to come off a console read `why 1111` in all six rounds:

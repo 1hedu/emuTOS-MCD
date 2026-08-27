@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 10:26:20 +0000
-Subject: [PATCH 118/185] segacd: the Word RAM image is intact, and so is
+Subject: [PATCH 118/190] segacd: the Word RAM image is intact, and so is
  everything else
 
 A checksum of 192 KB of the running EmuTOS image, taken at deskmain

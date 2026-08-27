@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 9 Aug 2026 04:32:39 +0000
-Subject: [PATCH 006/185] segacd: inject on-screen-keyboard scancodes via
+Subject: [PATCH 006/190] segacd: inject on-screen-keyboard scancodes via
  call_ikbdraw
 
 The servant posts (scancode<<8)|seq in GA_KEY when an OSK key is

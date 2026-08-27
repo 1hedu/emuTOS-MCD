@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 05:13:12 +0000
-Subject: [PATCH 029/185] segacd: filling the command registers is not sending
+Subject: [PATCH 029/190] segacd: filling the command registers is not sending
  them
 
 The drive answered 0xF -- "invalid" -- to all seven probes, including

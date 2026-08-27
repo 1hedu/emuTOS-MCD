@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 19 Aug 2026 07:26:31 +0000
-Subject: [PATCH 172/185] Sega CD: carry a Genesis-side payload across, and
+Subject: [PATCH 172/190] Sega CD: carry a Genesis-side payload across, and
  hand the machine over
 
 EmuTOS is on the sub 68000 and there is no path from here to the VDP,

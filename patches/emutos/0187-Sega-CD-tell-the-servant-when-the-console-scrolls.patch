@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 26 Aug 2026 07:29:22 +0000
+Subject: [PATCH 187/190] Sega CD: tell the servant when the console scrolls
+
+scroll_up(0) memmoves the whole bitmap up one character cell and blanks
+the bottom one. On an ST that is the cheapest thing the console does;
+here it changes every byte of the screen, and the servant's diff finds
+all 1000 tiles dirty and converts them again.
+
+It does not have to. The servant's tiles are a ring of 25 slots and
+plane A's nametable says which slot belongs on which screen row, so a
+scroll is a rotation of that nametable and the tiles it already holds
+stay where they are. All it needs is to be told, which is a count of
+cell rows in the block past the framebuffer, beside the palette and the
+cursor blocks. Written after the memmove and the blanking, so a count
+that has moved is a screen that has finished moving.
+
+Only for the geometry the servant maps -- 320x200 in four planes with an
+eight-line cell, so v_cel_wr of 1280. Anything else and the count does
+not move, which the servant reads as "no scroll".
+
+Measured, one scroll at a time with full-width text: 715 tiles converted
+per scrolled line before, 275 after.
+
+---
+ bios/conout.c | 14 ++++++++++++++
+ bios/segacd.c | 40 ++++++++++++++++++++++++++++++++++++++++
+ bios/segacd.h |  4 ++++
+ 3 files changed, 58 insertions(+)
+
+diff --git a/bios/conout.c b/bios/conout.c
+index a0ef907..f2c3d62 100644
+--- a/bios/conout.c
++++ b/bios/conout.c
+@@ -24,6 +24,7 @@
+ #include "string.h"
+ #include "conout.h"
+ #include "../vdi/vdi_defs.h"    /* for phys_work stuff */
++#include "segacd.h"
+ 
+ #define PLANE_OFFSET    2       /* interleaved planes */
+ 
+@@ -722,6 +723,14 @@ void scroll_up(UWORD top_line)
+ 
+     /* exit thru blank out, bottom line cell address y to top/left cell */
+     blank_out(0, v_cel_my , v_cel_mx, v_cel_my);
++
++#ifdef MACHINE_SEGACD
++    /* A whole-screen scroll is a rotation the servant can do for free.
++     * A partial one is not: it leaves the rows above top_line where
++     * they are, and the ring turns the whole screen or nothing. */
++    if (top_line == 0)
++        segacd_scrolled(1);
++#endif
+ }
+ 
+ 
+@@ -749,4 +758,9 @@ void scroll_down(UWORD start_line)
+ 
+     /* exit thru blank out */
+     blank_out(0, start_line , v_cel_mx, start_line);
++
++#ifdef MACHINE_SEGACD
++    if (start_line == 0)
++        segacd_scrolled(-1);
++#endif
+ }
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 93a9fa1..fff7f73 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -4195,6 +4195,46 @@ void segacd_keyclick(void)
+     pcm_beep(PCM_CLICK_FRAMES, 0x50);
+ }
+ 
++/******************************************************************************/
++/* The console scrolled                                                       */
++/******************************************************************************/
++
++/* scroll_up(0) memmoves the whole bitmap up one character cell and
++ * blanks the bottom one. On an ST that is the cheapest thing the
++ * console does. Here it is the most expensive: every byte of the screen
++ * changes, so the servant's diff finds all 1000 tiles dirty and
++ * converts them again -- 23.8 frames, measured, of which 22 are the
++ * planar-to-tile arithmetic and only 1.8 the VDP.
++ *
++ * The servant does not have to repaint any of it. Its tiles are a ring
++ * of 25 slots and plane A's nametable says which slot belongs on which
++ * screen row, so a scroll is a rotation of that nametable -- 1000 words
++ * -- and the tiles it already holds stay exactly where they are. All it
++ * needs is to be told, which is this: a count of cell rows in the block
++ * past the framebuffer, beside the palette and the cursor.
++ *
++ * Written after the memmove and the blanking, so a count that has moved
++ * is a screen that has finished moving; the servant reads both inside
++ * one bus grab.
++ *
++ * Only for the geometry the servant maps. v_cel_wr is 160 bytes a line
++ * times the cell height, and this port's screen is 320x200 in four
++ * planes with an eight-line cell, so 1280 is the one case where a cell
++ * row is a tile row. Anything else and the count simply does not move,
++ * which the servant reads as "no scroll" and repaints as before. */
++#define SCRLBLK_OFF 32208UL     /* past the cursor block at 32064 */
++
++void segacd_scrolled(WORD rows)
++{
++    volatile UWORD *sb = (volatile UWORD *)(v_bas_ad + SCRLBLK_OFF);
++
++    if (v_cel_wr != 1280 || v_cel_my != 24)
++        return;
++    sb[0] = 0x5343;             /* "SC" */
++    sb[1] = 0x524C;             /* "RL" */
++    sb[2] = (UWORD)(sb[2] + rows);
++}
++
+ /******************************************************************************/
+ /* System timer                                                               */
+ /******************************************************************************/
+diff --git a/bios/segacd.h b/bios/segacd.h
+index f329b4c..bbf5c78 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -129,6 +129,10 @@ void segacd_call_5ms(void);
+  * either side: EmuTOS's UWORD/ULONG are unsigned short/long. */
+ void segacd_buram_call(struct brmcall *c);      /* segacd2.S */
+ 
++/* Told to the servant so it can rotate its tile ring instead of
++ * repainting the screen. Signed: scroll_down goes the other way. */
++void segacd_scrolled(WORD rows);
++
+ 
+ #endif /* MACHINE_SEGACD */
+ 

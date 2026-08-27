@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 21:32:22 +0000
-Subject: [PATCH 086/185] segacd: the cache cannot be larger than the chip's
+Subject: [PATCH 086/190] segacd: the cache cannot be larger than the chip's
  buffer
 
 Pooled hardware failures -- 1608, 1617, 1618, 1620 -- land late in a

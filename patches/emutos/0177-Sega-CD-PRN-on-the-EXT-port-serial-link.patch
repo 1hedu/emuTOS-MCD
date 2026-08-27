@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 20 Aug 2026 02:09:08 +0000
-Subject: [PATCH 177/185] Sega CD: PRN: on the EXT-port serial link
+Subject: [PATCH 177/190] Sega CD: PRN: on the EXT-port serial link
 
 CONF_WITH_PRINTER_PORT is off on this machine and the stock bconout0
 discards every byte, so the desktop's printer icon has always run its

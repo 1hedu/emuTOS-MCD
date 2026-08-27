@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 22:07:31 +0000
-Subject: [PATCH 090/185] segacd: the timeshare reads -- verified sector via
+Subject: [PATCH 090/190] segacd: the timeshare reads -- verified sector via
  the parked CDBIOS
 
 CDBIOS probe 0000 read 0000, on both cores. The machine's own firmware,

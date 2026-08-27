@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 01:01:33 +0000
-Subject: [PATCH 021/185] segacd: verify the PCM driver against MAME; two more
+Subject: [PATCH 021/190] segacd: verify the PCM driver against MAME; two more
  bugs out of it
 
 Checked every field against MAME's rf5c68.cpp rather than leaving it

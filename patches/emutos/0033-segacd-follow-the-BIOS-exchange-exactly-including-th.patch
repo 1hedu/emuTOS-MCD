@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 06:16:33 +0000
-Subject: [PATCH 033/185] segacd: follow the BIOS exchange exactly, including
+Subject: [PATCH 033/190] segacd: follow the BIOS exchange exactly, including
  the order
 
 Reading two routines out of the BIOS was not the same as reading the

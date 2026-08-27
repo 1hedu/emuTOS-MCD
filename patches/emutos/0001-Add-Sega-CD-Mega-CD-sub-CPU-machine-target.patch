@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 9 Aug 2026 02:43:50 +0000
-Subject: [PATCH 001/185] Add Sega CD (Mega CD) sub-CPU machine target
+Subject: [PATCH 001/190] Add Sega CD (Mega CD) sub-CPU machine target
 
 EmuTOS runs on the Sega CD's sub 68000, whose address 0 is PRG-RAM, so
 the ST low-memory ABI holds byte-authentic. The OS image links at

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 09:54:25 +0000
-Subject: [PATCH 147/185] The CTRL ladder was never a ladder: $A7/$F0 is mode 0
+Subject: [PATCH 147/190] The CTRL ladder was never a ladder: $A7/$F0 is mode 0
 
 Four control pairs were read out of the BIOS as an escalation ladder --
 try $A7/$F0, drop to $A4/$D8 when the decoder produces nothing, then

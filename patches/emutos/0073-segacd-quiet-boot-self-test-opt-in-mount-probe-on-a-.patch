@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 05:34:13 +0000
-Subject: [PATCH 073/185] segacd: quiet boot -- self-test opt-in, mount probe
+Subject: [PATCH 073/190] segacd: quiet boot -- self-test opt-in, mount probe
  on a short leash
 
 The access storm that began the instant the HUD appeared was partly

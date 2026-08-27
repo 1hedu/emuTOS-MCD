@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 11:33:15 +0000
-Subject: [PATCH 120/185] segacd: the cartridge's save RAM is a drive of its
+Subject: [PATCH 120/190] segacd: the cartridge's save RAM is a drive of its
  own
 
 It used to be an alternative B:. segacd_floppy_init probed the cart

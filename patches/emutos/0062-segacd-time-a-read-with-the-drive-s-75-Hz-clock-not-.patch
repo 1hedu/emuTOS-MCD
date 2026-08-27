@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 21:55:45 +0000
-Subject: [PATCH 062/185] segacd: time a read with the drive's 75 Hz clock, not
+Subject: [PATCH 062/190] segacd: time a read with the drive's 75 Hz clock, not
  with CPU spins
 
 The wait loop is ~480 cycles a turn, so the 1200000-turn budget

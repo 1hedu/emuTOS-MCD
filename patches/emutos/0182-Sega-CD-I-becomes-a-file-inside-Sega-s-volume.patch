@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 20 Aug 2026 20:58:22 +0000
-Subject: [PATCH 182/185] Sega CD: I: becomes a file inside Sega's volume
+Subject: [PATCH 182/190] Sega CD: I: becomes a file inside Sega's volume
 
 Our FAT12 went over the whole of the backup memory, footer and all, so a
 cartridge could carry our files or a game's saves and not both. Now the

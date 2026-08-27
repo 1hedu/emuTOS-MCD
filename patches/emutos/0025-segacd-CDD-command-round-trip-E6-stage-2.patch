@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 02:36:25 +0000
-Subject: [PATCH 025/185] segacd: CDD command round-trip (E6 stage 2)
+Subject: [PATCH 025/190] segacd: CDD command round-trip (E6 stage 2)
 
 Sends command 0x02 sub-command 0x00, "report the current absolute
 position", and reports the answer. That command was chosen because it

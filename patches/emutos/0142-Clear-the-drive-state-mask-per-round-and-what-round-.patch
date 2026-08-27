@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 08:59:15 +0000
-Subject: [PATCH 142/185] Clear the drive-state mask per round, and what round
+Subject: [PATCH 142/190] Clear the drive-state mask per round, and what round
  1 says
 
 The patience change landed. Round 1 with DRV_INIT on came back "bad 4

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 07:44:41 +0000
-Subject: [PATCH 137/185] Record every drive state seen, and the first one
+Subject: [PATCH 137/190] Record every drive state seen, and the first one
 
 The loader's own report letter reads R this boot: Sega's firmware read
 LBA 1600 off this disc on the first attempt, with the drive in state 2,

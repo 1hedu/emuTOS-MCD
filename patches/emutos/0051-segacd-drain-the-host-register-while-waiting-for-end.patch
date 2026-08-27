@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 11:51:35 +0000
-Subject: [PATCH 051/185] segacd: drain the host register while waiting for end
+Subject: [PATCH 051/190] segacd: drain the host register while waiting for end
  of transfer
 
 CDCTRN's wait is 'move.w (a2),d0 / btst #7,(a3) / dbne' -- it reads a

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 19:40:09 +0000
-Subject: [PATCH 153/185] The firmware visit was being halted mid-exchange by
+Subject: [PATCH 153/190] The firmware visit was being halted mid-exchange by
  the screen pump
 
 Why is even the working path slow? Every firmware read under the

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 08:31:57 +0000
-Subject: [PATCH 105/185] segacd: boot traces between E001 and E002, and a
+Subject: [PATCH 105/190] segacd: boot traces between E001 and E002, and a
  write-protect probe
 
 A Mode 1 boot from the cartridge reached E001 and stopped, with no

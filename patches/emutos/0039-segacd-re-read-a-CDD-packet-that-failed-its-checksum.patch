@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 08:36:31 +0000
-Subject: [PATCH 039/185] segacd: re-read a CDD packet that failed its checksum
+Subject: [PATCH 039/190] segacd: re-read a CDD packet that failed its checksum
 
 The drive is answering now -- hardware returned RS1 = 3, naming the
 sub-command it was asked -- but the score read zero, so the answers

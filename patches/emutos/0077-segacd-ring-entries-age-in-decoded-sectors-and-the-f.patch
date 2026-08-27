@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 19:11:58 +0000
-Subject: [PATCH 077/185] segacd: ring entries age in decoded sectors, and the
+Subject: [PATCH 077/190] segacd: ring entries age in decoded sectors, and the
  freshest one wins
 
 wait 9 on hardware -- the first read commands ever confirmed reaching

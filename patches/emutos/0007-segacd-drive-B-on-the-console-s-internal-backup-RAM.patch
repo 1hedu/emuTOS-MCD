@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 9 Aug 2026 05:03:49 +0000
-Subject: [PATCH 007/185] segacd: drive B: on the console's internal backup RAM
+Subject: [PATCH 007/190] segacd: drive B: on the console's internal backup RAM
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

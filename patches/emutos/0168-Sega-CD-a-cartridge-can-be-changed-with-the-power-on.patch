@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 18 Aug 2026 00:00:38 +0000
-Subject: [PATCH 168/185] Sega CD: a cartridge can be changed with the power on
+Subject: [PATCH 168/190] Sega CD: a cartridge can be changed with the power on
  after all
 
 segacd_cart_ioctl() answered GET_MEDIACHANGE with MEDIANOCHANGE and a

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 07:42:36 +0000
-Subject: [PATCH 036/185] segacd: keep the Genesis off the bus during a CDD
+Subject: [PATCH 036/190] segacd: keep the Genesis off the bus during a CDD
  exchange
 
 One command sent and then silence -- the same signature as the very

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 09:46:48 +0000
-Subject: [PATCH 047/185] segacd: restart the CDD when it stops reporting
+Subject: [PATCH 047/190] segacd: restart the CDD when it stops reporting
 
 Established by elimination rather than guessed at. The watchdog fired,
 so the interrupt stopped -- but the storm guard did not mask it (that

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 05:30:32 +0000
-Subject: [PATCH 031/185] segacd: let the drive pick the way to talk to it
+Subject: [PATCH 031/190] segacd: let the drive pick the way to talk to it
 
 Four discs, four guesses of mine about how a command reaches the CDD,
 four wrong. Spending somebody else's CD-Rs one hypothesis at a time is

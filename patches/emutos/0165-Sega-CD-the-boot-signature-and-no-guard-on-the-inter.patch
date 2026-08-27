@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 16 Aug 2026 06:54:43 +0000
-Subject: [PATCH 165/185] Sega CD: the boot signature, and no guard on the
+Subject: [PATCH 165/190] Sega CD: the boot signature, and no guard on the
  internal memory
 
 A FAT volume with no partition table reaches check_for_no_partitions()

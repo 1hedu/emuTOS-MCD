@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 23 Aug 2026 02:32:08 +0000
-Subject: [PATCH 185/185] Sega CD: acknowledge each on-screen-keyboard scancode
+Subject: [PATCH 185/190] Sega CD: acknowledge each on-screen-keyboard scancode
 
 GA_KEY is a single latest-wins word. The servant posts one scancode per
 frame and this handler reads one per INT2, and the assumption that

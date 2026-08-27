@@ -1,0 +1,274 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 26 Aug 2026 05:54:55 +0000
+Subject: [PATCH 186/190] Sega CD: the mouse pointer is a hardware sprite
+
+The VDI draws the cursor by saving the framebuffer under it, drawing,
+and restoring on the next move. On an ST that is cheap. Here it is the
+most expensive thing an idle machine does: the servant does not push
+the framebuffer to the VDP, it diffs it, so a 16x16 cursor removed and
+redrawn dirties up to eighteen tiles a frame -- and every one of those
+is a conversion and an upload that the rest of an idle desktop does
+not cost.
+
+The VDP has eighty sprites and iofw parks the whole table at startup.
+So cur_display() now publishes where the pointer is and what it looks
+like into a block past the framebuffer -- beside the palette block, on
+the same terms, in memory the screen reserves and does not use -- and
+returns without drawing. The servant writes four words of sprite
+table. The framebuffer is never touched.
+
+Two details worth keeping:
+
+The form is converted to VDP tiles here, not there. iofw has 24 KB
+between its link address and the planar cache, and the pixel loop in
+that file pushed its BSS 308 bytes past the wall -- caught by the
+build check the printer bug paid for. This side has a quarter of a
+megabyte spare, so EmuTOS hands over four finished tiles and the
+servant only copies them.
+
+Visibility is not HIDE_CNT in cur_display(). dis_cur() draws first and
+decrements after, so at that point the count still reads 1 and the
+first show published "hidden" -- the pointer then stayed invisible
+until something moved it, which on an untouched desktop is forever.
+cur_display() is only called when the pointer is meant to be seen, so
+it says so unconditionally; cur_replace() is the one that asks
+HIDE_CNT, because there it separates hide_cur() from vb_draw().
+
+Measured, both cores: the desktop renders to the same frame hash as
+the software cursor, 856ffb907a9819f6 -- the sprite lands on exactly
+the pixels the VDI used to draw. Sweeping the pointer diagonally
+across the desktop then changes 0 of the framebuffer's 32000 bytes,
+where before it dirtied tiles the whole way.
+---
+ vdi/vdi_mouse.c | 196 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 196 insertions(+)
+
+diff --git a/vdi/vdi_mouse.c b/vdi/vdi_mouse.c
+index e547408..2f34fe6 100644
+--- a/vdi/vdi_mouse.c
++++ b/vdi/vdi_mouse.c
+@@ -30,6 +30,7 @@
+ #define MOUSE_WIDTH     16      /* in pixels */
+ #define MOUSE_HEIGHT    16
+ 
++
+ /* Mouse / sprite structure */
+ typedef struct Mcdb_ Mcdb;
+ struct Mcdb_ {
+@@ -47,6 +48,187 @@ extern void     (*user_cur)(void);      /* user cursor vector */
+ extern void     (*user_mot)(void);      /* user motion vector */
+ extern Mcdb     mouse_cdb;              /* storage for mouse sprite */
+ 
++#ifdef MACHINE_SEGACD
++/* The pointer is a hardware sprite on this machine.
++ *
++ * Drawing it in software costs far more here than it does on an ST.
++ * The servant does not push the framebuffer to the VDP, it diffs it:
++ * a tile whose bytes changed since the last frame is re-converted and
++ * re-uploaded, and everything else is free. Removing and redrawing a
++ * 16x16 cursor dirties up to nine tiles twice a frame, so simply
++ * moving the mouse across an idle desktop was one of the most
++ * expensive things this machine did.
++ *
++ * The VDP has eighty sprites and iofw parks the whole table at
++ * startup, so the pointer becomes one of them: EmuTOS publishes where
++ * it is and what it looks like, the servant writes four words into the
++ * sprite table, and the framebuffer is never touched at all.
++ *
++ * The block lives past the framebuffer, in the 768 bytes the screen
++ * reserves and does not use -- beside the palette block, on the same
++ * terms and for the same reason: the pump has that bank selected and
++ * the bus already grabbed, so reading it costs nothing.
++ *
++ * A servant that does not implement this ignores the block, and the
++ * software path below still runs. That is what CONF_WITH_SPRITE_MOUSE
++ * being off gets you, and it is also what an old iofw gets.
++ */
++#define CURBLK_OFF  32064UL     /* framebuffer is 32000; palette at +0 */
++
++struct curblk {
++    UWORD   magic0, magic1;     /* "CU" "R!" */
++    UWORD   shape;              /* bumped when the form or colours move */
++    WORD    x, y;               /* top-left in ST pixels, hotspot applied */
++    UWORD   visible;
++    UWORD   bg_col, fg_col;     /* ST colour numbers, not VDP entries */
++    UWORD   tile[64];           /* four finished 8x8 tiles, VDP order */
++};
++
++/* The form is converted here rather than by the servant, and the
++ * reason is memory rather than tidiness. iofw links at 0xFF1000 with
++ * the planar cache at 0xFF7000 -- twenty-four kilobytes for everything
++ * it has -- and the first version of this put the pixel loop over
++ * there and pushed its BSS 308 bytes past the wall. This side has a
++ * quarter-megabyte spare. So EmuTOS hands over four finished tiles and
++ * the servant does nothing but copy them into VRAM.
++ *
++ * Sprite tiles run down each column before starting the next, so a 2x2
++ * is top-left, bottom-left, top-right, bottom-right -- not reading
++ * order. Getting it wrong transposes the arrow, which looks like a
++ * shape bug rather than an ordering one.
++ *
++ * Pixel 1 is the border and pixel 2 the interior, in a palette line of
++ * the sprite's own. They cannot be the ST colour numbers directly: the
++ * form's two colours may be ST colour 0, which is transparent on that
++ * VDP whatever CRAM holds, and the default arrow is exactly that -- a
++ * colour-0 border round a colour-1 interior. Drawn in the screen's own
++ * palette line the border would be a hole.
++ */
++static void sprite_build(const Mcdb *sprite, struct curblk *cb)
++{
++    WORD half, row, x, t = 0;
++
++    for (half = 0; half < 2; half++) {
++        for (row = 0; row < 16; row++) {
++            UWORD m = sprite->maskdata[row * 2] << (half * 8);
++            UWORD d = sprite->maskdata[row * 2 + 1] << (half * 8);
++            ULONG out = 0;
++            for (x = 0; x < 8; x++) {
++                out <<= 4;
++                if (m & 0x8000)
++                    out |= (d & 0x8000) ? 2 : 1;
++                m <<= 1;
++                d <<= 1;
++            }
++            cb->tile[t++] = (UWORD)(out >> 16);
++            cb->tile[t++] = (UWORD)out;
++        }
++    }
++}
++
++/* The form the servant was last told about, so a shape that has not
++ * changed does not make it rebuild four tiles. Compared rather than
++ * hooked into vsc_form(), because the cursor can also be set through
++ * line-A and through the AES, and a comparison cannot miss a path. */
++static UWORD sprite_cache[35];  /* bg, fg, then maskdata[32], then a flag */
++#define SPRITE_CACHED   sprite_cache[34]
++static UBYTE *sprite_base;      /* the screen this block was written into */
++
++/* Written out rather than memcmp()'d: this file is compiled without a
++ * string.h in scope and the VDI has no business acquiring one for
++ * thirty-two words. */
++static BOOL sprite_form_same(const Mcdb *sprite)
++{
++    WORD i;
++    for (i = 0; i < 32; i++)
++        if (sprite_cache[2 + i] != sprite->maskdata[i])
++            return FALSE;
++    return TRUE;
++}
++
++static struct curblk *curblk(void)
++{
++    return (struct curblk *)(v_bas_ad + CURBLK_OFF);
++}
++
++/* Tell the servant where the pointer is, and what it is.
++ *
++ * Returns TRUE when it has been handed over, in which case the caller
++ * must not draw anything. Only 4-plane ST-low is claimed: that is the
++ * only mode this machine has, and a sprite is 16 colours whatever the
++ * screen is.
++ */
++static BOOL sprite_cursor(Mcdb *sprite, WORD x, WORD y)
++{
++    struct curblk *cb = curblk();
++    WORD i;
++
++    if (v_planes != 4)
++        return FALSE;
++
++    /* Setscreen moves the framebuffer, and the block moves with it --
++     * so a form cached against the old address says nothing about what
++     * is at the new one. Republish everything when the screen moves. */
++    if (sprite_base != v_bas_ad) {
++        sprite_base = v_bas_ad;
++        SPRITE_CACHED = 0;
++    }
++
++    /* The form, only when it has actually moved. The payload goes
++     * down before the magic and the generation, so a servant reading
++     * mid-write sees the old shape rather than half of the new one --
++     * the rule the palette block already runs on. */
++    if (!SPRITE_CACHED
++        || sprite_cache[0] != (UWORD)sprite->bg_col
++        || sprite_cache[1] != (UWORD)sprite->fg_col
++        || !sprite_form_same(sprite)) {
++        sprite_cache[0] = (UWORD)sprite->bg_col;
++        sprite_cache[1] = (UWORD)sprite->fg_col;
++        for (i = 0; i < 32; i++)
++            sprite_cache[2 + i] = sprite->maskdata[i];
++        SPRITE_CACHED = 1;
++        sprite_build(sprite, cb);
++        cb->bg_col = sprite_cache[0];
++        cb->fg_col = sprite_cache[1];
++        cb->shape++;
++    }
++
++    /* cur_display() subtracts the hotspot to find the top-left of the
++     * block it draws; the sprite is positioned the same way, so the
++     * two paths put the pointer in the same place to the pixel. */
++    cb->x = x - sprite->xhot;
++    cb->y = y - sprite->yhot;
++    /* Unconditionally visible: cur_display() is only ever called when
++     * the pointer is meant to be on the screen. Not HIDE_CNT, which
++     * lies here -- dis_cur() draws first and decrements after, so at
++     * this point the count still reads 1 and the very first show
++     * published "hidden". The pointer then stayed off until something
++     * moved it, which on a desktop nobody has touched is forever. */
++    cb->visible = 1;
++    cb->magic0 = 0x4355;                /* "CU" */
++    cb->magic1 = 0x5221;                /* "R!" */
++    return TRUE;
++}
++
++/* The other half, and here HIDE_CNT is the right question to ask.
++ * cur_replace() is called from two places that want opposite things:
++ * hide_cur() has just raised the count and means it, and vb_draw() is
++ * about to redraw one line further on and has it at zero. That is what
++ * tells them apart, and it is why neither of those functions needs a
++ * hook of its own.
++ */
++static BOOL sprite_cursor_replace(void)
++{
++    struct curblk *cb = curblk();
++
++    if (v_planes != 4 || !SPRITE_CACHED || sprite_base != v_bas_ad)
++        return FALSE;
++    cb->visible = (HIDE_CNT == 0);
++    return TRUE;
++}
++
++#endif /* MACHINE_SEGACD */
++
+ /* prototypes */
+ static void vb_draw(void);             /* user button vector */
+ 
+@@ -892,6 +1074,15 @@ void cur_display (Mcdb *sprite, MCS *mcs, WORD x, WORD y)
+     }
+ #endif
+ 
++#ifdef MACHINE_SEGACD
++    /* The VDP draws it. Nothing is saved, so cur_replace()'s own
++     * MCS_VALID test makes it a no-op without needing to be told. */
++    if (sprite_cursor(sprite, x, y)) {
++        mcs->stat = 0x00;
++        return;
++    }
++#endif
++
+     x -= sprite->xhot;          /* x = left side of destination block */
+     y -= sprite->yhot;          /* y = top of destination block */
+ 
+@@ -1080,6 +1271,11 @@ void cur_replace (MCS *mcs)
+     }
+ #endif
+ 
++#ifdef MACHINE_SEGACD
++    if (sprite_cursor_replace())
++        return;
++#endif
++
+     if (!(mcs->stat & MCS_VALID))   /* does save area contain valid data ? */
+         return;
+     mcs->stat &= ~MCS_VALID;        /* yes but (like TOS) don't allow reuse */

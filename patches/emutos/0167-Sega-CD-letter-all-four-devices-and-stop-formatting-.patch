@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Mon, 17 Aug 2026 23:29:50 +0000
-Subject: [PATCH 167/185] Sega CD: letter all four devices, and stop formatting
+Subject: [PATCH 167/190] Sega CD: letter all four devices, and stop formatting
  the backup RAM
 
 A drive with no filesystem on it got no drive letter, so there was no

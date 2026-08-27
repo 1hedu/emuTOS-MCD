@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 01:05:07 +0000
-Subject: [PATCH 096/185] segacd: the mask is exonerated, and one stage code
+Subject: [PATCH 096/190] segacd: the mask is exonerated, and one stage code
  was the instrument lying
 
 ls CB from the console: bits 4 and 5 never switched off during a visit.

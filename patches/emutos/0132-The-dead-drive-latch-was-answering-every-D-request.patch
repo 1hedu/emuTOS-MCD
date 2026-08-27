@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 06:48:33 +0000
-Subject: [PATCH 132/185] The dead-drive latch was answering every D: request
+Subject: [PATCH 132/190] The dead-drive latch was answering every D: request
 
 segacd_cd_rw() stops asking the drive after three consecutive failed
 blocks and returns EREADF from the block layer instead. disk_init_all()

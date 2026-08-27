@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 09:26:51 +0000
-Subject: [PATCH 045/185] segacd: stop one character meaning three different
+Subject: [PATCH 045/190] segacd: stop one character meaning three different
  failures
 
 There is no cdd_valid bug. Annotating the current object file against

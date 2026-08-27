@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 22:28:53 +0000
-Subject: [PATCH 063/185] segacd: send only the three commands the console's
+Subject: [PATCH 063/190] segacd: send only the three commands the console's
  own BIOS sends
 
 A trace of the CDBIOS reading this disc on real hardware -- three long

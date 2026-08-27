@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 09:44:10 +0000
-Subject: [PATCH 112/185] segacd: follow the traces into the AES, and stop
+Subject: [PATCH 112/190] segacd: follow the traces into the AES, and stop
  colliding with comm words
 
 All eight sub-to-main comm words are spoken for -- 0x20 screen base,

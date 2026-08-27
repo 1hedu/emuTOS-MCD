@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 09:42:06 +0000
-Subject: [PATCH 046/185] segacd: make the command counter wrap, because
+Subject: [PATCH 046/190] segacd: make the command counter wrap, because
  saturated is not alive
 
 It saturated at 255 and was displayed masked to three bits. 255 masked

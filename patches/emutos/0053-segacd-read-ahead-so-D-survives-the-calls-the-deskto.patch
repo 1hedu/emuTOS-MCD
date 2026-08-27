@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 19:01:58 +0000
-Subject: [PATCH 053/185] segacd: read ahead, so D: survives the calls the
+Subject: [PATCH 053/190] segacd: read ahead, so D: survives the calls the
  desktop makes
 
 Dfree walks the whole file allocation table -- eight CD sectors -- and

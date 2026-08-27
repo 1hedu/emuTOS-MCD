@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 21:25:08 +0000
-Subject: [PATCH 085/185] segacd: age 1 made streaming impossible; window it at
+Subject: [PATCH 085/190] segacd: age 1 made streaming impossible; window it at
  3 and cache twelve
 
 Tightening ring entries to age one, two builds ago, cost far more than

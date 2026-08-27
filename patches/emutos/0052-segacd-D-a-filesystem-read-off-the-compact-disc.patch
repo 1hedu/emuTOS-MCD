@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 12:07:31 +0000
-Subject: [PATCH 052/185] segacd: D: -- a filesystem read off the compact disc
+Subject: [PATCH 052/190] segacd: D: -- a filesystem read off the compact disc
 
 A blocking reader on stage 3's machinery, a CD bus in the disk layer,
 and 512-byte GEMDOS blocks mapped onto 2048-byte CD sectors with one

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 21:56:15 +0000
-Subject: [PATCH 088/185] segacd: the CDBIOS lives -- exchanged back in,
+Subject: [PATCH 088/190] segacd: the CDBIOS lives -- exchanged back in,
  called, exchanged out
 
 Phase one of the timeshare. The loader photographs the CDBIOS into

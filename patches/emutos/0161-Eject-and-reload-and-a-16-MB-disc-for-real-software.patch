@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 22:09:58 +0000
-Subject: [PATCH 161/185] Eject and reload, and a 16 MB disc for real software
+Subject: [PATCH 161/190] Eject and reload, and a 16 MB disc for real software
 
 SCD_EJECT sends drive command $D down our own commander -- no firmware
 queue, no visit, none of the one-slot races the pause taught us about.

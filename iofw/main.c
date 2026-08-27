@@ -46,10 +46,24 @@
 #define IOFW_HUD 0
 #endif
 
+/* Frames between injected down-arrows; 0 for none. Harness only. */
+#ifndef SCROLLKEY
+#define SCROLLKEY 0
+#endif
+
 /* Lines of blank frame above the ST screen. 224 - 200 = 24, so 12 and
  * 12: not a whole number of tile rows, which is why this is a vertical
  * scroll of plane A and not a different nametable origin. */
 #define SCREEN_YOFF 12u
+
+/* The sixteen ST colours as they stand now: the defaults until a
+ * program sets its own through the palette block. File scope because
+ * the cursor is drawn in two of them and has to follow Setcolor. */
+uint16_t st_palette[16] = {
+    0x777, 0x700, 0x070, 0x770, 0x007, 0x707, 0x077, 0x555,
+    0x333, 0x733, 0x373, 0x773, 0x337, 0x737, 0x377, 0x000
+};
+
 
 #define SCREEN_BANK 2u          /* PRG bank holding 0x40000-0x5FFFF */
 #define SCREEN_WOFF 0x18000u    /* 0x58000 within bank 2 */
@@ -311,7 +325,7 @@ static void prn_watchdog(void)
  * finishing the frame's work and the blank arriving is worth about
  * eight bytes -- which is the whole of what 4800 baud can carry. The
  * pump loses nothing, because it had already stopped. */
-void uart_poll(void);   /* uart.c; also declared below */
+void uart_poll(void);   /* uart.c; also declared with its siblings below */
 
 static void wait_vblank(void)
 {
@@ -354,24 +368,136 @@ static uint16_t st2cram(uint16_t st)
  * tiles the mapping used to point at, quite happily and quite
  * invisibly, and the console shows an empty backdrop while EmuTOS runs
  * perfectly well behind it. */
+/* Cell rows the console has scrolled up, modulo the 25 on screen.
+ *
+ * The screen's tiles are a ring. ST tile row r lives in slot
+ * (r + srot) % 25 -- in the planar cache, and in the 40 VRAM tiles that
+ * slot owns -- and plane A's nametable is what puts slot s back on
+ * screen row s - srot. A scroll then moves nothing at all: srot goes up
+ * by one, the nametable is rewritten, and the cache the pump has spent
+ * eight frames building is still correct, because EmuTOS moved the
+ * screen by exactly the amount the ring turned. */
+static uint16_t srot;
+
+/* And a second ring, scoped to a rectangle: the one the AES last blitted
+ * around the screen. Same idea, and it composes with the one above --
+ * the rectangle permutes screen rows, srot then turns the whole screen
+ * -- but the two never move together in practice, so a console scroll
+ * simply flattens this one.
+ *
+ * Columns are held in 16-pixel groups because that is the unit the diff
+ * compares in; a window whose edge falls inside a group leaves that
+ * group outside the ring, and its two tile columns repaint the ordinary
+ * way. rct_h of zero means no rectangle. */
+static uint16_t rct_c0, rct_c1;         /* tile columns, [c0, c1) */
+static uint16_t rct_y0, rct_h;          /* tile rows,    [y0, y0+h) */
+static uint16_t rct_k;                  /* the rotation, 0..h-1 */
+static uint16_t rct_seq;
+static uint8_t  rct_valid;
+
+/* Where a screen cell's tile actually lives: through the rectangle, if
+ * it is in one, then through the whole-screen ring. */
+static uint16_t slot_of(uint16_t trow, uint16_t tcol)
+{
+    uint16_t r = trow;
+
+    if (rct_h && tcol >= rct_c0 && tcol < rct_c1
+        && trow >= rct_y0 && trow < (uint16_t)(rct_y0 + rct_h)) {
+        r = (uint16_t)(trow - rct_y0 + rct_k);
+        if (r >= rct_h) r = (uint16_t)(r - rct_h);
+        r = (uint16_t)(r + rct_y0);
+    }
+    r = (uint16_t)(r + srot);
+    if (r >= 25u) r = (uint16_t)(r - 25u);
+    return r;
+}
+
+/* Plane A rows 0..24, each pointing at the slot that belongs on it.
+ * 25 address commands and 1000 words -- against the 1000 tile
+ * conversions, 32000 bytes of VDP traffic and 22 frames of arithmetic
+ * that repainting the same scroll costs. */
+static void screen_scroll_apply(void)
+{
+    uint16_t row, col;
+    for (row = 0; row < 25u; row++) {
+        VU32(VDP_CTRL) = vdp_vram_w((uint16_t)(NAMETABLE + row * 128u));
+        for (col = 0; col < 40u; col++)
+            VU16(VDP_DATA) = (uint16_t)(slot_of(row, col) * 40u + col);
+    }
+}
+
+/* Give up the rectangle. The nametable goes back to what slot_of() says
+ * with no rectangle in it, and the cache rows that were permuted no
+ * longer match the screen -- so the diff repaints them, which is the
+ * cost of the ring being dropped and the reason it is only dropped when
+ * a blit arrives that it cannot use. */
+static void blit_flatten(void)
+{
+    if (!rct_h) return;
+    rct_h = 0;
+    screen_scroll_apply();
+}
+
+/* Adopt (or turn) the ring for a vertical blit.
+ *
+ * dx,dy,w,h is where the pixels landed and dpix is how far up they came
+ * from, so the rows that took part span both ends. Only whole tile rows
+ * inside that span and whole 16-pixel groups inside the width can be
+ * rotated; the partial edges fall outside the ring and repaint. */
+static void blit_ring(int16_t dx, int16_t dy, int16_t w, int16_t h,
+                      int16_t dpix)
+{
+    int16_t top = dy < (int16_t)(dy + dpix) ? dy : (int16_t)(dy + dpix);
+    int16_t bot = (int16_t)(dy + h);
+    int16_t y0, rows, c0, c1, drows;
+
+    if ((int16_t)(dy + dpix + h) > bot) bot = (int16_t)(dy + dpix + h);
+    if (top < 0) top = 0;
+    if (bot > 200) bot = 200;
+
+    y0   = (int16_t)((top + 7) >> 3);
+    rows = (int16_t)((bot >> 3) - y0);
+    c0   = (int16_t)(((dx + 15) >> 4) * 2);     /* whole 16px groups */
+    c1   = (int16_t)(((dx + w) >> 4) * 2);
+    drows = (int16_t)(dpix >> 3);
+
+    /* Two rows is the least that can be a ring, and a span shorter than
+     * the distance moved is not a scroll of anything. */
+    if (rows < 2 || c1 - c0 < 2 || drows >= rows || -drows >= rows) {
+        blit_flatten();
+        return;
+    }
+
+    if (!rct_h || rct_y0 != (uint16_t)y0 || rct_h != (uint16_t)rows
+        || rct_c0 != (uint16_t)c0 || rct_c1 != (uint16_t)c1) {
+        /* A different rectangle. Flattening first is what keeps the old
+         * permutation from being reinterpreted under the new one. */
+        blit_flatten();
+        rct_y0 = (uint16_t)y0; rct_h = (uint16_t)rows;
+        rct_c0 = (uint16_t)c0; rct_c1 = (uint16_t)c1;
+        rct_k  = 0;
+    }
+    {   int16_t k = (int16_t)(rct_k + drows);
+        while (k < 0) k = (int16_t)(k + rows);
+        while (k >= rows) k = (int16_t)(k - rows);
+        rct_k = (uint16_t)k;
+    }
+    screen_scroll_apply();
+    VU16(REPORT + 0x7A)++;
+}
+
 static void screen_nametab(void)
 {
-    uint16_t row, col, idx = 0;
+    uint16_t row, col;
     VU32(VDP_CTRL) = vdp_vram_w(NAMETABLE);
     for (row = 0; row < 32; row++)
-        for (col = 0; col < 64; col++) {
-            if (row < 25 && col < 40) VU16(VDP_DATA) = idx++;
-            else                      VU16(VDP_DATA) = TILE_BLANK;
-        }
+        for (col = 0; col < 64; col++)
+            VU16(VDP_DATA) = TILE_BLANK;
+    screen_scroll_apply();
 }
 
 static void vdp_init(void)
 {
-    /* EmuTOS default ST-low palette (TOS order) */
-    static const uint16_t stpal[16] = {
-        0x777, 0x700, 0x070, 0x770, 0x007, 0x707, 0x077, 0x555,
-        0x333, 0x733, 0x373, 0x773, 0x337, 0x737, 0x377, 0x000
-    };
     uint16_t i;
 
     /* Wipe VRAM: the Sega CD BIOS leaves its own fonts, logo tiles and
@@ -395,7 +521,7 @@ static void vdp_init(void)
     vdp_reg(18, 0x00);          /* window plane: no vertical extent */
 
     VU32(VDP_CTRL) = vdp_cram_w(0);
-    for (i = 0; i < 16; i++) VU16(VDP_DATA) = st2cram(stpal[i]);
+    for (i = 0; i < 16; i++) VU16(VDP_DATA) = st2cram(st_palette[i]);
 
     /* Palette line 1 is ours: nothing on the ST side addresses it.
      *
@@ -417,7 +543,7 @@ static void vdp_init(void)
     VU32(VDP_CTRL) = vdp_cram_w(2 * 16);
     VU16(VDP_DATA) = 0x0000;                /* 0: black, the frame */
     VU16(VDP_DATA) = 0x00E0;                /* 1: green, the diagnostic */
-    VU16(VDP_DATA) = st2cram(stpal[0]);     /* 2: ST colour 0, the paper */
+    VU16(VDP_DATA) = st2cram(st_palette[0]); /* 2: ST colour 0, the paper */
 
     /* One tile, every pixel value 2. */
     VU32(VDP_CTRL) = vdp_vram_w(TILE_PAPER * 32u);
@@ -473,6 +599,53 @@ static void vdp_init(void)
     VU16(VDP_DATA) = 0; VU16(VDP_DATA) = 0;
 }
 
+/* ---- the mouse pointer, as a hardware sprite -------------------------
+ *
+ * EmuTOS's VDI stopped drawing the pointer into the framebuffer and
+ * publishes it at CURBLK_OFF past the screen instead: position,
+ * visibility, and four finished 8x8 tiles. Sixteen by sixteen is one
+ * 2x2 VDP sprite, so all this side does is copy them into VRAM and
+ * keep one sprite entry pointed at where the pointer is.
+ *
+ * The conversion is deliberately on the other side. There is a
+ * quarter-megabyte free over there and twenty-four kilobytes here, and
+ * the first version of this had the pixel loop in this file and pushed
+ * BSS past the planar cache -- caught by the build check the printer
+ * bug bought us. See vdi/vdi_mouse.c for the form and the tile order.
+ *
+ * Palette line 3: line 1 is the frame and the paper, line 2 is the
+ * on-screen keyboard, and nothing had claimed 3. Entry 1 is the
+ * cursor's border colour and entry 2 its interior, so a form drawn in
+ * ST colour 0 is opaque here instead of transparent.
+ */
+#define CURBLK_OFF  32064u
+#define SCRLBLK_OFF 32208u   /* past the cursor block */
+#define BLTBLK_OFF  32216u   /* ...and past that */
+static uint16_t scr_seen;
+static uint8_t  scr_valid;
+#define CUR_TILE    1080u       /* four tiles: OSK glyphs end at 1074 */
+
+static uint16_t cur_shape = 0xFFFFu;    /* forces a load from the first block */
+static int16_t  cursor_x, cursor_y;
+static uint8_t  cursor_on;
+
+/* One sprite entry, every frame. Four words is cheaper than working
+ * out whether it was worth writing.
+ *
+ * Sprite coordinates are absolute and unscrolled, so the screen's
+ * twelve-line letterbox offset is added here -- plane A is scrolled
+ * into place and sprites are not. 128 is the VDP's origin on both
+ * axes; y 0 puts the sprite off the top, which is how it hides. */
+static void cursor_sprite(void)
+{
+    VU32(VDP_CTRL) = vdp_vram_w(SATBASE);
+    VU16(VDP_DATA) = cursor_on
+                     ? (uint16_t)(cursor_y + SCREEN_YOFF + 128) : 0;
+    VU16(VDP_DATA) = 0x0500u;                        /* 2x2 tiles, link 0 */
+    VU16(VDP_DATA) = (uint16_t)(0x6000u | CUR_TILE); /* palette line 3 */
+    VU16(VDP_DATA) = (uint16_t)(cursor_x + 128);
+}
+
 /* Planar->tile conversion. One table per bitplane, indexed by a whole
  * source byte: each entry is the 8 pixels of a finished tile row with
  * that plane's bit set. Four lookups and three ORs produce a tile row,
@@ -509,11 +682,17 @@ void scd_tile(const uint8_t *src, uint32_t vdpcmd);   /* convert.S */
 
 static void convert_tile(uint16_t trow, uint16_t tcol)
 {
-    const uint8_t *s = (const uint8_t *)(CACHE
-        + (uint32_t)trow * 1280u          /* 8 lines x 160 bytes */
+    /* Screen row to ring slot. Both operands are under 25, so the wrap
+     * is one subtraction. */
+    uint16_t rr = slot_of(trow, tcol);
+    const uint8_t *s;
+    uint16_t tile;
+
+    s = (const uint8_t *)(CACHE
+        + (uint32_t)rr * 1280u            /* 8 lines x 160 bytes */
         + (uint32_t)(tcol >> 1) * 8u      /* 16px group */
         + (tcol & 1));                    /* which half of it */
-    uint16_t tile = (uint16_t)(trow * 40u + tcol);
+    tile = (uint16_t)(rr * 40u + tcol);
 #ifdef DIAG_BENCH_NOVDP
     uint8_t r;
 #endif
@@ -1215,7 +1394,6 @@ static uint8_t cart_measure(void)
  * CD's. The servant runs masked at 7 and takes no interrupts, so
  * nothing vectors through the gap. */
 static uint32_t m1_boot_first;  /* our own cartridge's first long */
-static uint8_t  swap_streak;    /* consecutive frames it has been missing */
 uint8_t cart_swapped;           /* the map has flipped */
 uint8_t cart_swap_seq;          /* bumped whenever the cartridge changes */
 
@@ -1774,50 +1952,17 @@ static void cart_probe(void)
     }
 }
 
-/* Lay down a fresh FAT12 filesystem on the cartridge. Emulators either
- * wipe the cart (GPGX reformats it to Sega BRAM layout at load) or
- * start it empty, and a real cart out of the packet is unformatted
- * too — so the servant formats whatever it finds without our
- * signature. Geometry: 512-byte sectors, 4 per cluster, 1 FAT sector,
- * 64 root entries. */
-static void cart_format(void)
-{
-    uint16_t total = cart_sectors > 1024 ? 1024 : cart_sectors;
-    uint32_t i;
-
-    for (i = 0; i < 512u * 7u; i++)      /* boot + 2 FAT + 4 root */
-        cart_wr(i, 0);
-
-    cart_wr(0, 0x60); cart_wr(1, 0x38);              /* bra.s */
-    cart_wr(2, 'E'); cart_wr(3, 'm'); cart_wr(4, 'u');
-    cart_wr(5, 'T'); cart_wr(6, 'O'); cart_wr(7, 'S');
-    cart_wr(8, 0x24); cart_wr(9, 0x08); cart_wr(10, 0x26);   /* serial */
-    cart_wr(11, 0x00); cart_wr(12, 0x02);            /* 512 bytes/sector */
-    cart_wr(13, 4);                                  /* sectors/cluster */
-    cart_wr(14, 1); cart_wr(15, 0);                  /* reserved */
-    cart_wr(16, 2);                                  /* FATs */
-    cart_wr(17, 64); cart_wr(18, 0);                 /* root entries */
-    cart_wr(19, (uint8_t)total); cart_wr(20, (uint8_t)(total >> 8));
-    cart_wr(21, 0xF8);                               /* media */
-    cart_wr(22, 1); cart_wr(23, 0);                  /* sectors/FAT */
-    cart_wr(24, 16); cart_wr(25, 0);                 /* sectors/track */
-    cart_wr(26, 1); cart_wr(27, 0);                  /* sides */
-    /* The two bytes EmuTOS actually looks for: atari_partition() calls
-     * a root sector without them a non-ATARI one and allocates no drive
-     * letter, so a perfectly good FAT12 volume gets no drive. The CD
-     * branch found that and fixed all three formatters; this one is the
-     * copy that never got it. */
-    cart_wr(510, 0x55); cart_wr(511, 0xAA);
-
-    cart_wr(512, 0xF8); cart_wr(513, 0xFF); cart_wr(514, 0xFF);   /* FAT 1 */
-    cart_wr(1024, 0xF8); cart_wr(1025, 0xFF); cart_wr(1026, 0xFF);/* FAT 2 */
-
-    {   /* volume label in the first root entry */
-        static const char lbl[11] = {'M','E','G','A','C','D',' ',' ',' ',' ',' '};
-        for (i = 0; i < 11; i++) cart_wr(1536 + i, (uint8_t)lbl[i]);
-        cart_wr(1536 + 11, 0x08);
-    }
-}
+/* cart_format() was here.
+ *
+ * Retired when disk.c began giving every Sega CD device a drive letter
+ * whether or not it carries a filesystem. Formatting at boot stopped
+ * being the only moment it could be done, and on a branch where the
+ * cartridge is also the boot device and a thing you swap, doing it
+ * unasked was a standing offer to delete somebody's files. FORMATS.PRG
+ * owns this now; the decision is in docs/CHECKPOINT.md and the body
+ * simply outlived it. The compiler had been saying so for weeks, and
+ * taking it out is what paid for the sprite cursor's code.
+ */
 
 /* ---- native payloads ------------------------------------------------
  *
@@ -2167,10 +2312,11 @@ static void cart_service(void)
     base = lba * 512u;
     cart = (volatile uint8_t *)CART_DATA;
 
-    /* uart_poll() every 128 bytes: a sector over the cart bus takes
-     * milliseconds and the receive latch holds one byte for two, so
-     * this loop has to service the port. The port is on the A10000
-     * bus; the grab and the bank don't touch it. */
+    /* uart_poll() every 128 bytes: a sector over the cart bus is in the
+     * milliseconds, the receive latch holds one byte for two, and this
+     * runs while someone is saving from the editor they are typing in.
+     * The port is on the A10000 bus; the grab and the bank don't touch
+     * it. */
     if (op == 2) {                               /* write: bounce -> cart */
         cart_write_enable(1);
         for (i = 0; i < 512; i++) {
@@ -2206,7 +2352,6 @@ static void cart_service(void)
  * command 5, because after that EmuTOS owns PRG-RAM and the SP's image
  * is gone -- and it has to come out through the bank window, because
  * the trace lives in bank 0 while everything else here uses bank 2. */
-static uint16_t cdtrace_n;
 
 /* Bus grabs here are kept to a few hundred cycles each, and there are a
  * lot of them, which is the opposite of how it was written the first
@@ -2222,155 +2367,6 @@ static uint16_t cdtrace_n;
  * inside an exchange rather than across twenty of them. */
 #define CDTRACE_BURST 128u
 
-static uint32_t cdtrace_peek(uint32_t off, uint16_t words, uint16_t *dst)
-{
-    uint8_t save;
-    uint16_t i;
-
-    sub_bus_grab();
-    save = VU8(GA_MEMMODE);
-    VU8(GA_MEMMODE) = (uint8_t)(save & ~0xC2u);         /* bank 0 */
-    for (i = 0; i < words; i++)
-        dst[i] = VU16(PRG_WINDOW + off + 2u * i);
-    VU8(GA_MEMMODE) = (uint8_t)(save & ~0x02u);
-    sub_bus_release();
-    return off;
-}
-
-static void cdtrace_fetch(void)
-{
-    static uint16_t buf[CDTRACE_BURST];
-    uint32_t off;
-
-    cdtrace_n = 0;
-    for (off = CDTRACE_SCAN0; off < CDTRACE_SCAN1;
-         off += 2u * (CDTRACE_BURST - 5u)) {
-        uint16_t j;
-
-        cdtrace_peek(off, CDTRACE_BURST, buf);
-        /* The tag can straddle a burst, so each one overlaps the last
-         * by the five words a tag-plus-count needs. */
-        for (j = 0; j + 5u <= CDTRACE_BURST; j++) {
-            uint16_t n, i;
-            if (buf[j] != (uint16_t)(CDTRACE_TAG0 >> 16)) continue;
-            if (buf[j + 1] != (uint16_t)CDTRACE_TAG0) continue;
-            if (buf[j + 2] != (uint16_t)(CDTRACE_TAG1 >> 16)) continue;
-            if (buf[j + 3] != (uint16_t)CDTRACE_TAG1) continue;
-            n = buf[j + 4];
-            if (n > CDTRACE_ENTS) n = CDTRACE_ENTS;
-            VU16(0xFF0F60u) = (uint16_t)(off + 2u * j);
-            for (i = 0; i < (uint16_t)(n * (CDTRACE_SIZE / 2u));
-                 i += CDTRACE_BURST) {
-                uint16_t k, want = (uint16_t)(n * (CDTRACE_SIZE / 2u) - i);
-                if (want > CDTRACE_BURST) want = CDTRACE_BURST;
-                cdtrace_peek(off + 2u * j + 12u + 2u * i, want, buf);
-                for (k = 0; k < want; k++)
-                    VU16(CDTRACE_WRAM + 2u * (i + k)) = buf[k];
-            }
-            cdtrace_n = n;
-            VU16(0xFF0F62u) = (uint16_t)(0x5A00u | cdtrace_n);
-            return;
-        }
-    }
-    VU16(0xFF0F62u) = 0x5A00u;
-}
-
-static char hexd(uint8_t v)
-{
-    v = (uint8_t)(v & 15);
-    return (char)(v < 10 ? '0' + v : 'A' + v - 10);
-}
-
-/* One entry, one 40-column line:
- *
- *   NO M COMMAND    STATUS     WHERE  XCHG
- *
- * The two packets print one character per byte because that is what
- * they are -- ten bytes each carrying one nibble, which is how the CDD
- * link is wired. WHERE is the position the drive had reached when the
- * entry closed; XCHG is how many 1/75 s exchanges it covered. */
-static void cdtrace_line(uint16_t k, char *out)
-{
-    const volatile uint8_t *e =
-        (const volatile uint8_t *)(CDTRACE_WRAM + (uint32_t)k * CDTRACE_SIZE);
-    uint16_t i, p = 0, x;
-
-    out[p++] = hexd((uint8_t)(k >> 4));
-    out[p++] = hexd((uint8_t)k);
-    out[p++] = ' ';
-    out[p++] = hexd(e[26]);
-    out[p++] = ' ';
-    for (i = 0; i < 10; i++) out[p++] = hexd(e[i]);
-    out[p++] = ' ';
-    for (i = 0; i < 10; i++) out[p++] = hexd(e[10 + i]);
-    out[p++] = ' ';
-    for (i = 0; i < 6; i++) out[p++] = hexd(e[20 + i]);
-    out[p++] = ' ';
-    x = (uint16_t)(((uint16_t)e[28] << 8) | e[29]);
-    out[p++] = hexd((uint8_t)(x >> 12));
-    out[p++] = hexd((uint8_t)(x >> 8));
-    out[p++] = hexd((uint8_t)(x >> 4));
-    out[p++] = hexd((uint8_t)x);
-    out[p] = 0;
-}
-
-#define TRACE_ROWS 23u          /* rows 1..23; 24 is the footer, 25-27 the
-                                   status lines, and 27 is under the CRT's
-                                   overscan on the user's television */
-
-static void cdtrace_show(void)
-{
-    char line[48];
-    uint16_t page = 0, prev = 0xFFFF, redraw = 1;
-    uint16_t pages = (uint16_t)((cdtrace_n + TRACE_ROWS - 1u) / TRACE_ROWS);
-
-    if (!pages) pages = 1;
-    for (;;) {
-        uint16_t pad;
-
-        if (redraw) {
-            uint16_t r;
-            osk_row(0, "NO M COMMAND    STATUS     WHERE  XCHG");
-            for (r = 0; r < TRACE_ROWS; r++) {
-                uint16_t k = (uint16_t)(page * TRACE_ROWS + r);
-                if (k < cdtrace_n) {
-                    cdtrace_line(k, line);
-                    osk_row((uint16_t)(r + 1), line);
-                } else {
-                    osk_row((uint16_t)(r + 1), "");
-                }
-            }
-            if (!cdtrace_n)
-                osk_row(1, "NO TRACE IN THE LOADER IMAGE");
-            line[0] = 'P'; line[1] = 'A'; line[2] = 'G'; line[3] = 'E';
-            line[4] = ' ';
-            line[5] = (char)('1' + page);
-            line[6] = ' '; line[7] = 'O'; line[8] = 'F'; line[9] = ' ';
-            line[10] = (char)('0' + pages);
-            {
-                static const char tail[] =
-                    "   A PAGES   START BOOTS";
-                uint16_t t;
-                for (t = 0; tail[t]; t++) line[11 + t] = tail[t];
-                line[11 + t] = 0;
-            }
-            osk_row(24, line);
-            redraw = 0;
-        }
-
-        wait_vblank();
-        pad = pad_read();
-        if ((pad & 0x40) && !(prev & 0x40)) {   /* A: next page */
-            if (++page >= pages) page = 0;
-            redraw = 1;
-        }
-        if ((pad & 0x80) && !(prev & 0x80))     /* Start: on with the boot */
-            break;
-        prev = pad;
-    }
-    screen_nametab();           /* undo the damage, see the comment there */
-}
-
 /* One bit per screen tile. A bitmap rather than a list because it
  * cannot overflow however much changes at once: dropping updates
  * starves whole bands of the screen, which is exactly what a heavy
@@ -2380,6 +2376,21 @@ static void cdtrace_show(void)
 #define TILE_ROWS 25u
 #define TILE_BYTES (TILE_COLS / 8)      /* 5 bitmap bytes per tile row */
 static uint8_t tdirty[TILE_BYTES * TILE_ROWS];
+
+/* One 16-pixel group: compare against the cache, and if it moved, take
+ * it and mark both its tiles. Shared by the three runs the copy loop
+ * splits into. */
+#define DIFF_GROUP() do {                                       \
+        uint32_t a_ = sp[0], b_ = sp[1];                        \
+        if (a_ != dp[0] || b_ != dp[1] || bootstrap) {          \
+            uint16_t t_ = (uint16_t)(trow40 + (g << 1));        \
+            dp[0] = a_; dp[1] = b_;                             \
+            /* t is even, so both its tiles share a byte */     \
+            tdirty[t_ >> 3] |= (uint8_t)(0xC0u >> (t_ & 7));    \
+            ndirty++;                                           \
+        }                                                       \
+        sp += 2; dp += 2;                                       \
+    } while (0)
 
 static uint8_t  screen_bank = SCREEN_BANK;
 static uint32_t screen_woff = SCREEN_WOFF;
@@ -2510,8 +2521,6 @@ int main(void)
          * "ready", and the next block waits for a status that has
          * already been and gone -- which deadlocked the handoff and put
          * the console on a blank screen with EmuTOS never started. */
-        cdtrace_fetch();
-        cdtrace_show();
     }
 
     cart_probe();
@@ -2523,7 +2532,13 @@ int main(void)
              * space and is data loss now that it carries a filesystem:
              * the last sector is ordinary cluster space, so those 256
              * bytes belong to whatever file happens to end up there. */
-            static uint8_t keep[256];
+            /* On the stack, not in BSS. This runs once at boot and
+             * again on a cartridge swap, and the servant's BSS has to
+             * end below the planar cache at 0xFF7000 -- 256 bytes of
+             * boot scratch is a poor use of a budget the pump's code
+             * shares. The stack is at 0xFFFC00 with three kilobytes
+             * under it and cart_probe is two frames deep. */
+            uint8_t keep[256];
             uint32_t off = (uint32_t)(cart_sectors - 1) * 512u;
             uint16_t k, bad = 0;
             for (k = 0; k < 256; k++) keep[k] = cart_rd(off + k);
@@ -2635,19 +2650,68 @@ int main(void)
         uint16_t ndirty = 0;
         uint16_t base_line = (uint16_t)(chunk * 25);
         static uint16_t bootstrap = 24;   /* 3 full sweeps convert all */
-        /* ...and again periodically, as a cross-check.
+        /* ...and again as a cross-check, but only once the pointer has
+         * been still for five seconds, and one pass rather than three.
          *
-         * The dirty tracking only converts a tile whose bytes changed
-         * since the cache last saw them, so a tile the cache captured
-         * wrongly once is never revisited. Everything measured says
-         * the memory itself is dirty rather than the tracking, but
-         * that rests on one read through the same window, and forcing
-         * a full sweep every few seconds costs nothing at idle and
-         * settles it: if the picture comes clean and stays clean, the
-         * memory was fine and the tracking was not. */
+         * The per-frame diff compares the whole screen against the
+         * cache every eight frames, so nothing a program writes can be
+         * missed. What it cannot see is a tile whose VRAM copy stopped
+         * matching the cache, and this is the cross-check for that. It
+         * used to run unconditionally every 300 frames, three whole
+         * screens back to back, on the grounds that it "cost nothing
+         * at idle".
+         *
+         * It costs a great deal, and not only at idle. Converting a
+         * chunk's worth of tiles runs past the vertical blank, and
+         * wait_vblank() then waits out the blank it landed in *and*
+         * the whole next frame, so the iteration costs two. This loop
+         * paces everything: input_update() samples the mouse once per
+         * iteration and GA_IFL2 raises the sub's VBL once per
+         * iteration, and the sub takes one mouse delta per INT2. A
+         * stalled pump is a pointer that crawls -- which is what a
+         * regular slowdown every few seconds, through software cursor
+         * and hardware sprite alike, turned out to be.
+         *
+         * Measured on the desktop, idle, 5000 emulator frames:
+         *
+         *   sweep every 300 frames   2713 loop iterations
+         *   one tile row per frame   2970
+         *   no periodic sweep        3417
+         *
+         * -- 704 frames, arriving as a ~1.7 s crawl every ~6 s. The
+         * middle row is why this is not simply spread out instead: a
+         * forced tile row is 40 conversions and costs about a whole
+         * frame on its own, so spreading turns the hitch into a flat
+         * 13% tax. The expense is the repainting, not its shape, so
+         * the only real economy is to spend it where it cannot be
+         * felt.
+         *
+         * A nonzero mouse delta means the pointer is moving. It both
+         * restarts the wait and abandons a pass already under way, and
+         * the abandoning is the half that matters. Postponing alone
+         * leaves the pass free-running on its own clock, so parking
+         * the pointer for a few seconds and then moving it lands in
+         * one as often as not -- which is the symptom as reported: a
+         * slowdown you can steer into or dodge by timing when you
+         * touch the mouse. Nothing is lost by cancelling; the pass is
+         * a cross-check, and it runs the next time the machine is left
+         * alone.
+         *
+         * The pass rides in bootstrap, which is also boot's and
+         * pump_resync's -- occasions where the cache is genuinely
+         * unusable and an abandoned pass leaves the screen wrong. What
+         * keeps those safe is the count: theirs is 24, three passes,
+         * and cancelling is only allowed once it is down to eight, by
+         * which point two have finished and the third is the spare.
+         * The periodic one is eight to begin with, so it is
+         * cancellable from its first frame, which is the whole
+         * point. */
         {
             static uint16_t resweep;
-            if (++resweep >= 300) { resweep = 0; bootstrap = 24; }
+            if (VU16(GA_CMD2)) {
+                resweep = 0;
+                if (bootstrap <= 8u) bootstrap = 0;
+            } else if (++resweep >= 300) { resweep = 0; bootstrap = 8; }
         }
 
         wait_vblank();
@@ -2690,6 +2754,29 @@ int main(void)
                        (uint16_t *)REPORT + 0x1E,
                        (uint16_t *)REPORT + 0x1F);
         }
+#if SCROLLKEY
+        {   /* Emulator only: hold the down arrow, so a window scroll can
+             * be measured. The desktop turns arrow keys into WM_ARROWED
+             * (deskmain.c), which is the same path the scroll arrows
+             * take, and posting a scancode here is the same path the
+             * on-screen and serial keyboards take. Steering the pointer
+             * onto a scroll arrow by dead reckoning is the alternative,
+             * and it is a worse instrument. Never set in a build that
+             * leaves this machine. */
+            static uint16_t sk;
+            static uint8_t nsc;
+            if (VU16(REPORT + 6) > 1400u && nsc < 20u && ++sk >= SCROLLKEY) {
+                sk = 0; nsc++;
+                /* Alternating, because a list that has reached its
+                 * bottom stops scrolling and stops measuring with it. */
+                static uint8_t dn;
+                if (osk_slot_free() && osk_key_acked()) {
+                    osk_post_key((uint8_t)((dn ^= 1) ? 0x50 : 0x48));
+                }
+            }
+        }
+#endif
+        cursor_sprite();        /* four words: where the pointer is now */
         prn_fill();             /* the page, a chunk a frame, with the bus */
         prn_watchdog();         /* every frame, not only when the cart speaks */
 
@@ -2709,8 +2796,10 @@ int main(void)
         {
             uint32_t sb = (uint32_t)VU16(GA_STAT0) << 8;
             if (sb >= 0x1000u && sb < 0x80000u) {
+                uint32_t woff = sb & 0x1FFFFu;
+                if (woff != screen_woff) scr_valid = 0;
                 screen_bank = (uint8_t)((sb >> 17) & 3);
-                screen_woff = sb & 0x1FFFFu;
+                screen_woff = woff;
             }
         }
 
@@ -2800,35 +2889,200 @@ int main(void)
 
                 pal_gen = pb[2];
                 VU32(VDP_CTRL) = vdp_cram_w(0);
-                for (i = 0; i < 16; i++)
-                    VU16(VDP_DATA) = st2cram(pb[3 + i]);
+                for (i = 0; i < 16; i++) {
+                    st_palette[i] = pb[3 + i];
+                    VU16(VDP_DATA) = st2cram(st_palette[i]);
+                }
                 VU32(VDP_CTRL) = vdp_cram_w(2 * 18);
-                VU16(VDP_DATA) = st2cram(pb[3]);
+                VU16(VDP_DATA) = st2cram(st_palette[0]);
+                /* The pointer is drawn in two of those sixteen, in a
+                 * palette line of its own, so its entries have to be
+                 * rewritten from the new colours. Forcing the form to
+                 * look stale does both that and the tiles; the tiles
+                 * are four, and a palette change is rare. */
+                cur_shape = 0xFFFFu;
             }
         }
+
+        /* The mouse pointer, as a sprite.
+         *
+         * Same arrangement as the palette above and for the same
+         * reason: a block past the framebuffer, read inside the grab
+         * the pump already holds. EmuTOS's VDI stopped drawing the
+         * cursor into the bitmap and publishes it here instead, so the
+         * pointer costs four words of sprite table a frame rather than
+         * up to eighteen tile conversions.
+         *
+         * Blind to the block if EmuTOS is older than this: the magic
+         * fails, cursor_on stays clear, and the sprite is parked. That
+         * side has the mirror of it -- a servant older than the VDI
+         * change never reads the block, and the VDI draws in software
+         * as it always did. Neither half requires the other. */
+        if (screen_woff + CURBLK_OFF + 144u <= 0x20000u) {
+            const volatile uint16_t *cb = (const volatile uint16_t *)
+                (PRG_WINDOW + screen_woff + CURBLK_OFF);
+
+            if (cb[0] == 0x4355u && cb[1] == 0x5221u) {     /* "CUR!" */
+                if (cb[2] != cur_shape) {
+                    uint16_t k;
+                    cur_shape = cb[2];
+                    VU32(VDP_CTRL) = vdp_vram_w(CUR_TILE * 32u);
+                    for (k = 0; k < 64u; k++)
+                        VU16(VDP_DATA) = cb[8 + k];
+                    VU32(VDP_CTRL) = vdp_cram_w(2 * (48 + 1));
+                    VU16(VDP_DATA) = st2cram(st_palette[cb[6] & 15u]);
+                    VU16(VDP_DATA) = st2cram(st_palette[cb[7] & 15u]);
+                }
+                cursor_x  = (int16_t)cb[3];
+                cursor_y  = (int16_t)cb[4];
+                cursor_on = cb[5] ? 1 : 0;
+            } else {
+                cursor_on = 0;
+            }
+            VU16(REPORT + 0x60) = cb[0];
+            VU16(REPORT + 0x62) = cb[1];
+            VU16(REPORT + 0x64) = cb[2];
+            VU16(REPORT + 0x66) = (uint16_t)cursor_x;
+            VU16(REPORT + 0x68) = (uint16_t)cursor_y;
+            VU16(REPORT + 0x6A) = cursor_on;
+            VU16(REPORT + 0x6C) = cb[8];      /* first tile word */
+        }
+        /* The console scrolled.
+         *
+         * EmuTOS's scroll_up() memmoves the whole bitmap up one cell row
+         * and blanks the bottom one, which changes every byte of the
+         * screen and used to mean every one of the 1000 tiles converted
+         * again -- 23.8 frames, measured, of which 22 are the planar
+         * arithmetic. It publishes a count of the cell rows instead,
+         * and turning the ring by that many puts the cache back in
+         * agreement with the screen without moving a byte. The diff
+         * then finds only the blanked bottom row changed: 40 tiles.
+         *
+         * The count and the bitmap are read in one bus grab, and EmuTOS
+         * writes the count after the memmove, so a count that has moved
+         * is a screen that has finished moving. Nothing here trusts it
+         * further than that: if the rotation were ever wrong the diff
+         * would simply find more rows changed and repaint them, which
+         * is the old cost and not a wrong picture.
+         *
+         * scr_seen is dropped whenever the framebuffer moves, because
+         * the block moves with it and the count at the new address is
+         * whatever was in that memory. */
+        if (screen_woff + SCRLBLK_OFF + 6u <= 0x20000u) {
+            const volatile uint16_t *sb = (const volatile uint16_t *)
+                (PRG_WINDOW + screen_woff + SCRLBLK_OFF);
+
+            if (sb[0] == 0x5343u && sb[1] == 0x524Cu) {     /* "SCRL" */
+                if (!scr_valid) { scr_seen = sb[2]; scr_valid = 1; }
+                else if (sb[2] != scr_seen) {
+                    /* The subtraction first, in sixteen bits, then
+                     * the modulo. Promoting a wrapped difference to int
+                     * makes it negative, and a negative one modulo an
+                     * unsigned 25 is converted before the divide --
+                     * which answers 20 where the modular answer is 24. */
+                    uint16_t d = (uint16_t)((uint16_t)(sb[2] - scr_seen)
+                                            % 25u);
+                    scr_seen = sb[2];
+                    srot = (uint16_t)(srot + d);
+                    if (srot >= 25u) srot = (uint16_t)(srot - 25u);
+                    screen_scroll_apply();
+                    VU16(REPORT + 0x7A)++;      /* scrolls taken */
+                }
+            } else scr_valid = 0;
+            VU16(REPORT + 0x7C) = scr_seen;
+            VU16(REPORT + 0x7E) = srot;
+        }
+
+        /* The AES blitted a rectangle of screen around.
+         *
+         * Almost all of them are unusable and are meant to be: this
+         * takes only a pure vertical move -- same x, a whole number of
+         * tile rows -- which is what a window scroll is, and lets the
+         * diff handle everything else exactly as before. What it does
+         * with one is turn a ring inside the rectangle, so the pixels
+         * that moved need no conversion and only the strip that is
+         * genuinely new is repainted.
+         *
+         * The rectangle covers both ends of the blit, source and
+         * destination: those are the rows that took part, and rotating
+         * that span by the distance moved reproduces the blit exactly,
+         * leaving the vacated rows holding what scrolled out of view --
+         * which the AES is about to redraw and the diff will catch.
+         *
+         * A permutation only has to be agreed between the cache and the
+         * nametable to be correct; it is an optimisation only when it
+         * happens to match how the pixels moved. So a hint that is
+         * wrong costs a repaint, never a wrong picture. */
+        if (screen_woff + BLTBLK_OFF + 18u <= 0x20000u) {
+            const volatile uint16_t *bb = (const volatile uint16_t *)
+                (PRG_WINDOW + screen_woff + BLTBLK_OFF);
+
+            if (bb[0] == 0x424Cu && bb[1] == 0x4954u) {     /* "BLIT" */
+                if (!rct_valid) { rct_seq = bb[2]; rct_valid = 1; }
+                else if (bb[2] != rct_seq) {
+                    int16_t sx = (int16_t)bb[3], sy = (int16_t)bb[4];
+                    int16_t dx = (int16_t)bb[5], dy = (int16_t)bb[6];
+                    int16_t bw = (int16_t)bb[7], bh = (int16_t)bb[8];
+                    int16_t dpix = (int16_t)(sy - dy);
+                    rct_seq = bb[2];
+                    VU16(REPORT + 0x40) = (uint16_t)sx;
+                    VU16(REPORT + 0x42) = (uint16_t)sy;
+                    VU16(REPORT + 0x44) = (uint16_t)dx;
+                    VU16(REPORT + 0x46) = (uint16_t)dy;
+                    VU16(REPORT + 0x48) = (uint16_t)bw;
+                    VU16(REPORT + 0x4A) = (uint16_t)bh;
+                    if (sx == dx && dpix && !(dpix & 7) && bw > 0 && bh > 0)
+                        blit_ring(dx, dy, bw, bh, dpix);
+                    else
+                        blit_flatten();
+                }
+            } else rct_valid = 0;
+            VU16(REPORT + 0x74) = rct_seq;
+            VU16(REPORT + 0x76) = rct_h;
+            VU16(REPORT + 0x78) = rct_k;
+        }
+
         {
-            const volatile uint32_t *src = (const volatile uint32_t *)
-                (PRG_WINDOW + screen_woff + (uint32_t)base_line * 160u);
-            uint32_t *dst = (uint32_t *)(CACHE + (uint32_t)base_line * 160u);
             uint16_t line, g;
+            uint16_t rotl = (uint16_t)(srot * 8u);   /* the ring, in lines */
+            uint16_t gA = rct_h ? (uint16_t)(rct_c0 >> 1) : 20u;
+            uint16_t gB = rct_h ? (uint16_t)(rct_c1 >> 1) : 20u;
             for (line = 0; line < 25; line++) {
-                uint16_t trow40 = (uint16_t)(((base_line + line) >> 3) * 40u);
+                uint16_t sl = (uint16_t)(base_line + line);
+                uint16_t cl = (uint16_t)(sl + rotl);
+                uint16_t trow40;
+                const volatile uint32_t *sp;
+                uint32_t *dp;
+
+                if (cl >= 200u) cl = (uint16_t)(cl - 200u);
+                trow40 = (uint16_t)((sl >> 3) * 40u);
+                sp = (const volatile uint32_t *)
+                    (PRG_WINDOW + screen_woff + (uint32_t)sl * 160u);
+                dp = (uint32_t *)(CACHE + (uint32_t)cl * 160u);
                 /* The receive latch is one byte deep and a byte lands
                  * every 2 ms; this loop reads 4000 bytes through the
                  * expansion window and was the frame's longest stretch
                  * with nobody looking at the port. Once per line is
                  * every ~150 us. */
                 uart_poll();
-                for (g = 0; g < 20; g++) {      /* one 16px group = 2 longs */
-                    uint32_t a = src[0], b = src[1];
-                    if (a != dst[0] || b != dst[1] || bootstrap) {
-                        uint16_t t = (uint16_t)(trow40 + (g << 1));
-                        dst[0] = a; dst[1] = b;
-                        /* t is even, so both its tiles share a byte */
-                        tdirty[t >> 3] |= (uint8_t)(0xC0u >> (t & 7));
-                        ndirty++;
-                    }
-                    src += 2; dst += 2;
+                /* Three runs of groups rather than one, because the
+                 * rectangle ring permutes rows for its own columns and
+                 * not for the rest of the line, so which cache row a
+                 * group belongs in depends on where it sits across the
+                 * screen. Written out three times rather than looped
+                 * over a table of bounds: this is 4000 bytes of
+                 * comparison a frame, second only to the converter, and
+                 * the table cost more than the duplication saves. With
+                 * no rectangle gA is 20 and the first run is the whole
+                 * line, which is the old loop exactly. */
+                for (g = 0; g < gA; g++) DIFF_GROUP();
+                if (gB > gA) {
+                    dp = (uint32_t *)(CACHE
+                        + (uint32_t)slot_of((uint16_t)(sl >> 3), rct_c0) * 1280u
+                        + (uint32_t)(sl & 7u) * 160u) + gA * 2u;
+                    for (; g < gB; g++) DIFF_GROUP();
+                    dp = (uint32_t *)(CACHE + (uint32_t)cl * 160u) + gB * 2u;
+                    for (; g < 20u; g++) DIFF_GROUP();
                 }
             }
         }
@@ -2870,6 +3124,7 @@ no_copy:
              * bit individually cost enough to push the whole loop past a
              * vblank, which halved the frame rate at idle. */
             uint16_t trow;
+            uint16_t nconv = 0;
             uint8_t *p = tdirty;
             for (trow = 0; trow < TILE_ROWS; trow++, p += TILE_BYTES) {
                 uint8_t k;
@@ -2881,6 +3136,7 @@ no_copy:
                         for (b = 0; b < 8; b++)
                             if (m & (uint8_t)(0x80u >> b)) {
                                 convert_tile(trow, (uint16_t)(k * 8u + b));
+                                nconv++;
                                 /* a bootstrap sweep converts a thousand
                                  * of these back to back, which is far
                                  * longer than the receive latch lasts */
@@ -2889,6 +3145,12 @@ no_copy:
                     }
                 }
             }
+            /* Tiles converted since boot, added up once a frame rather
+             * than once a tile: this is the one number that says what a
+             * change to the pump was worth, and convert.S is 22 of the
+             * 23.8 frames a whole screen costs, so an instrument inside
+             * that loop would be measuring itself. */
+            VU32(REPORT + 0x70) += nconv;
         }
 
         if (bootstrap) bootstrap--;

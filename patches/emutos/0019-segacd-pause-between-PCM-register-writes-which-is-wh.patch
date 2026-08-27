@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 9 Aug 2026 18:32:43 +0000
-Subject: [PATCH 019/185] segacd: pause between PCM register writes, which is
+Subject: [PATCH 019/190] segacd: pause between PCM register writes, which is
  why it was silent
 
 The RF5C164 needs settling time between control-register writes and

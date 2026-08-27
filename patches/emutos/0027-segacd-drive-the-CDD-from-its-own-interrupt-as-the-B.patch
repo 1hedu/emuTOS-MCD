@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 03:26:46 +0000
-Subject: [PATCH 027/185] segacd: drive the CDD from its own interrupt, as the
+Subject: [PATCH 027/190] segacd: drive the CDD from its own interrupt, as the
  BIOS does
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

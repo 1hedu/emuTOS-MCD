@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 08:45:03 +0000
-Subject: [PATCH 040/185] segacd: lower the bus-interlock flag again
+Subject: [PATCH 040/190] segacd: lower the bus-interlock flag again
 
 An edit a few builds ago removed the line that clears it, so it was
 raised on the first exchange and stayed raised. Nothing complained,

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 20 Aug 2026 08:22:12 +0000
-Subject: [PATCH 178/185] Sega CD: a door to the machine's own Backup RAM
+Subject: [PATCH 178/190] Sega CD: a door to the machine's own Backup RAM
  manager
 
 This port lays a FAT12 volume over the whole of the backup memory, and

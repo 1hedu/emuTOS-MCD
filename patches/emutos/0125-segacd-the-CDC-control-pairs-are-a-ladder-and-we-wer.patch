@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 01:56:26 +0000
-Subject: [PATCH 125/185] segacd: the CDC control pairs are a ladder, and we
+Subject: [PATCH 125/190] segacd: the CDC control pairs are a ladder, and we
  were on one rung
 
 The header registers read a constant 01 80 00 60 on hardware -- twelve

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 06:52:23 +0000
-Subject: [PATCH 133/185] Put the latch in the status line's D field
+Subject: [PATCH 133/190] Put the latch in the status line's D field
 
 cd_dtest's two bits are sticky -- bit 0 the first time cd_read_block()
 is entered, bit 1 the first time a block is handed over -- and neither

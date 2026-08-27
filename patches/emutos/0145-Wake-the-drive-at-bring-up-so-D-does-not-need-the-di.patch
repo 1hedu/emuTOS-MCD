@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 09:41:01 +0000
-Subject: [PATCH 145/185] Wake the drive at bring-up, so D: does not need the
+Subject: [PATCH 145/190] Wake the drive at bring-up, so D: does not need the
  diagnostic
 
 D: has only ever been readable after a person launched CDTEST and let

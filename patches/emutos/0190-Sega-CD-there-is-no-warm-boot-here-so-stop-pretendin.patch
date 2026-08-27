@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 26 Aug 2026 22:22:56 +0000
+Subject: [PATCH 190/190] Sega CD: there is no warm boot here, so stop
+ pretending there is
+
+Every start reads the whole OS image off the disc or out of the
+cartridge, so the code that is running has never run before. What does
+survive a reset is sub PRG-RAM -- the console does not clear it -- and
+_warm_magic sits in it, at a .w address in low memory. So EmuTOS read
+back the magic a previous run had written and concluded this was a warm
+boot.
+
+That is wrong on its face here, and it has two consequences. The visible
+one is the welcome screen: show_initinfo is FIRST_BOOT, so a reset came
+up with no EmuTOS splash at all. The quieter one is that bootdev and the
+user vectors were carried over from a run of an OS image that is no
+longer the one executing.
+
+Clear the magic before the test. Every boot is a first boot, because
+every boot is.
+
+Splash and desktop unchanged in the emulator, which was always taking
+the cold path: cart splash 8d837bd972e1f693, desktop 856ffb907a9819f6.
+
+---
+ bios/memory.S | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/bios/memory.S b/bios/memory.S
+index 19f930e..6896aae 100644
+--- a/bios/memory.S
++++ b/bios/memory.S
+@@ -172,6 +172,20 @@ memchk:
+ 
+ memory_reused:
+ #if CONF_DETECT_FIRST_BOOT_WITHOUT_MEMCONF
++#ifdef MACHINE_SEGACD
++        // There is no warm boot on this machine.
++        //
++        // Every start reads the whole OS image off the disc or out of
++        // the cartridge, so the code that is running has never run
++        // before. What does survive a reset is sub PRG-RAM -- the
++        // console does not clear it -- and the magic sitting in it
++        // belongs to a previous run of a program that is no longer the
++        // one here. Believing it cost the welcome screen on every reset
++        // (power-cycle and it came back, which is what made it look
++        // intermittent) and, less visibly, carried a stale bootdev and
++        // a stale set of user vectors into freshly loaded code.
++        clr.l   _warm_magic.w
++#endif
+         // If _warm_magic == WARM_MAGIC, this is explicitly not a first boot
+         lea     _warm_magic.w, a0
+         move.l  #0x5741524D, d1         // WARM_MAGIC

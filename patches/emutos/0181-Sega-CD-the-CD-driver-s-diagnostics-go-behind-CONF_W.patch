@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 20 Aug 2026 20:33:18 +0000
-Subject: [PATCH 181/185] Sega CD: the CD driver's diagnostics go behind
+Subject: [PATCH 181/190] Sega CD: the CD driver's diagnostics go behind
  CONF_WITH_SCD_DIAG
 
 scd_snapshot and the counter accessors that fill it, the boot-sector

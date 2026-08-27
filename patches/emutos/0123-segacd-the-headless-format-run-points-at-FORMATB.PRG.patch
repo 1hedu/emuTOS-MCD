@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 23:28:07 +0000
-Subject: [PATCH 123/185] segacd: the headless format run points at FORMATB.PRG
+Subject: [PATCH 123/190] segacd: the headless format run points at FORMATB.PRG
 
 FORMAT.PRG is built twice now, once per drive, so the name changed.
 ---

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Thu, 13 Aug 2026 10:55:19 +0000
-Subject: [PATCH 119/185] segacd: the boot stops paying Sega's eight seconds
+Subject: [PATCH 119/190] segacd: the boot stops paying Sega's eight seconds
  per failed block
 
 A Mode 1 boot took 57 seconds of emulated time between the version

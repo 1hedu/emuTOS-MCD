@@ -1,0 +1,162 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Wed, 26 Aug 2026 08:20:09 +0000
+Subject: [PATCH 188/190] Sega CD: hand the servant every screen-to-screen
+ blit, on a tile grid
+
+Two halves of the same thing, for window scrolling.
+
+bb_screen() is the AES's screen-to-screen blit, and the desktop scrolls
+a window with it: blit the part that stays, redraw only the strip that is
+new (deskwin.c win_blt). Measured on a C: window with the arrow key held,
+379 tiles converted per scroll step -- about eight frames of the
+servant's pump, and the pixels that merely moved are most of it. The blit
+is now published where the servant can see it, so it can move them by
+permuting its tiles instead of converting them.
+
+That only works if the distance is a whole number of eight-line tile
+rows, and it never was: the desktop's row pitch is the item height plus
+its gap, 42 for icons and 10 for text, so every scroll landed two pixels
+off the grid. win_view() now rounds the pitch down to a multiple of
+eight -- 40 and 8 -- which takes the gap and nothing else, both still at
+least as tall as the thing they space.
+
+With both, the servant's ring engages and the rows that moved cost
+nothing: inside it, exactly the newly exposed strip converts, 164 tiles
+for the five tile rows a scroll step exposes.
+
+What it does not yet pay for is the edges. A window's work area is its
+outer rectangle plus (1, 21) -- see wm_calc -- so it never lands on the
+tile grid, and the two partial columns and two partial rows around it
+repaint every scroll: another 157 tiles. Net is about 15%, which is
+inside the run-to-run noise. Finishing it means landing work areas on a
+16x8 grid, which is a change to where windows are allowed to sit.
+
+---
+ aes/gemgraf.c  |  6 ++++++
+ bios/segacd.c  | 39 +++++++++++++++++++++++++++++++++++++++
+ bios/segacd.h  |  4 ++++
+ desk/deskwin.c | 21 +++++++++++++++++++++
+ 4 files changed, 70 insertions(+)
+
+diff --git a/aes/gemgraf.c b/aes/gemgraf.c
+index 3e9e741..5a6ff6c 100644
+--- a/aes/gemgraf.c
++++ b/aes/gemgraf.c
+@@ -28,6 +28,9 @@
+ #include "gemdos.h"
+ 
+ #include "gemgraf.h"
++#ifdef MACHINE_SEGACD
++#include "../bios/segacd.h"
++#endif
+ #include "gemgsxif.h"
+ #include "optimopt.h"
+ #include "gsx2.h"
+@@ -360,6 +363,9 @@ void bb_screen(WORD scsx, WORD scsy, WORD scdx, WORD scdy,
+     gsx_blt(NULL, scsx, scsy,
+             scdx, scdy,
+             scw, sch, S_ONLY, -1, -1);
++#ifdef MACHINE_SEGACD
++    segacd_blitted(scsx, scsy, scdx, scdy, scw, sch);
++#endif
+ }
+ 
+ 
+diff --git a/bios/segacd.c b/bios/segacd.c
+index fff7f73..dc29e98 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -4235,6 +4235,45 @@ void segacd_scrolled(WORD rows)
+     sb[2] = (UWORD)(sb[2] + rows);
+ }
+ 
++/* ...and the other thing that moves a lot of screen at once: bb_screen(),
++ * the AES's screen-to-screen blit. The desktop scrolls a window with it
++ * (deskwin.c win_blt: blit the part that stays, redraw only the strip
++ * that is new), and so do the file selector and the window manager.
++ *
++ * Measured on a C: window of eleven items, the arrow key held: 310 tiles
++ * converted per scroll step, about seven frames of the servant's pump.
++ * The pixels that moved are the whole of that; the strip that is
++ * genuinely new is a fraction of it.
++ *
++ * The servant can move them without converting anything -- the same ring
++ * as the console scroll, scoped to a rectangle instead of the screen --
++ * so hand it the blit verbatim and let it work out what it can use.
++ * Published after the blit, so a sequence number that has moved is a
++ * screen that has finished moving.
++ *
++ * Every blit, not only the desktop's: this says what happened, and what
++ * to make of it is the servant's business. It ignores the ones it cannot
++ * use, which is most of them. */
++#define BLTBLK_OFF  32216UL     /* past the scroll block at 32208 */
++
++void segacd_blitted(WORD sx, WORD sy, WORD dx, WORD dy, WORD w, WORD h)
++{
++    volatile UWORD *bb = (volatile UWORD *)(v_bas_ad + BLTBLK_OFF);
++
++    if (v_lin_wr != 160)
++        return;                 /* not the screen the servant maps */
++    bb[3] = (UWORD)sx;
++    bb[4] = (UWORD)sy;
++    bb[5] = (UWORD)dx;
++    bb[6] = (UWORD)dy;
++    bb[7] = (UWORD)w;
++    bb[8] = (UWORD)h;
++    bb[0] = 0x424C;             /* "BL" */
++    bb[1] = 0x4954;             /* "IT" */
++    bb[2] = (UWORD)(bb[2] + 1); /* last, so the fields are there first */
++}
++
++
+ /******************************************************************************/
+ /* System timer                                                               */
+ /******************************************************************************/
+diff --git a/bios/segacd.h b/bios/segacd.h
+index bbf5c78..c35924e 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -133,6 +133,10 @@ void segacd_buram_call(struct brmcall *c);      /* segacd2.S */
+  * repainting the screen. Signed: scroll_down goes the other way. */
+ void segacd_scrolled(WORD rows);
+ 
++/* Every screen-to-screen blit, verbatim. The servant turns the ones it
++ * can into a rotation and ignores the rest. */
++void segacd_blitted(WORD sx, WORD sy, WORD dx, WORD dy, WORD w, WORD h);
++
+ 
+ #endif /* MACHINE_SEGACD */
+ 
+diff --git a/desk/deskwin.c b/desk/deskwin.c
+index efd7d10..b63568e 100644
+--- a/desk/deskwin.c
++++ b/desk/deskwin.c
+@@ -88,6 +88,27 @@ void win_view(void)
+     }
+     G.g_iwspc = G.g_iwext + G.g_iwint;
+     G.g_ihspc = G.g_ihext + G.g_ihint;
++#ifdef MACHINE_SEGACD
++    /* Snap the row pitch to the servant's tile grid.
++     *
++     * A window is scrolled by blitting the part that stays and
++     * redrawing the strip that is new, and the servant can move the
++     * blitted part without converting a pixel of it -- but only if the
++     * distance is a whole number of eight-line tile rows, because a
++     * tile is the unit it holds the screen in. The pitch decides that
++     * distance: it is 42 for icons and 10 for text, so every scroll
++     * step landed two pixels off the grid and every one of them was
++     * repainted in full. 310 tiles a step, measured on a C: window.
++     *
++     * Down rather than up, and the whitespace is all that goes: 42
++     * becomes 40 and 10 becomes 8, both still at least the height of
++     * the thing they space, so nothing is clipped and nothing
++     * overlaps. Two pixels of gap for a scroll that costs a fraction
++     * of what it did. */
++    G.g_ihspc &= ~7;
++    if (G.g_ihspc < G.g_ihext)
++        G.g_ihspc = (G.g_ihext + 7) & ~7;
++#endif
+ #if CONF_WITH_SIZE_TO_FIT
+     {
+     GRECT t;

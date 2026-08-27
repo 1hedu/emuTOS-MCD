@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 01:36:10 +0000
-Subject: [PATCH 124/185] segacd: publish the report block, and stop hijacking
+Subject: [PATCH 124/190] segacd: publish the report block, and stop hijacking
  the boot
 
 scd_snap gains rep[32]: the CD report block verbatim, the same block

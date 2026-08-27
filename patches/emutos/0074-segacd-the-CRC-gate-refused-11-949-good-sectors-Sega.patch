@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 07:24:09 +0000
-Subject: [PATCH 074/185] segacd: the CRC gate refused 11,949 good sectors;
+Subject: [PATCH 074/190] segacd: the CRC gate refused 11,949 good sectors;
  Sega never checks it
 
 The DOWN screen on hardware: refused 11949, wrong-sector 0, why 11.

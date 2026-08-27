@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 03:43:57 +0000
-Subject: [PATCH 069/185] segacd: the CDC address register is one register, and
+Subject: [PATCH 069/190] segacd: the CDC address register is one register, and
  two contexts used it
 
 cdc_grab programs the transfer -- byte count, buffer address, trigger,

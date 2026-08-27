@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 9 Aug 2026 09:53:58 +0000
-Subject: [PATCH 016/185] segacd: PCM bell and keyclick, straight to the
+Subject: [PATCH 016/190] segacd: PCM bell and keyclick, straight to the
  RF5C164
 
 The PCM chip's registers and wave RAM are on the sub CPU's own bus,

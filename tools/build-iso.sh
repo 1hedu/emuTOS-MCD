@@ -99,6 +99,10 @@ cbin() { # cbin <dir> <base> <out.bin>
            "0xFF7000 by $((0x$end - 0xFF7000)) bytes" >&2
       exit 1
     fi
+    # ...and how much is left, because "it fits" and "it fits by twenty
+    # bytes" are different facts and only one of them warns you that the
+    # next feature will not.
+    echo "$(basename "$out"): $((0xFF7000 - 0x$end)) bytes free under the cache"
   fi
   m68k-elf-objcopy -O binary "$out.elf" "$out"
   rm -f "${objs[@]}" "$out.elf"

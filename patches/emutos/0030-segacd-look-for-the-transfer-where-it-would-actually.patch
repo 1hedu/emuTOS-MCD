@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 05:21:36 +0000
-Subject: [PATCH 030/185] segacd: look for the transfer where it would actually
+Subject: [PATCH 030/190] segacd: look for the transfer where it would actually
  happen
 
 Hardware reported the transfer-status bits as 8 and A alternating: a

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 19:23:12 +0000
-Subject: [PATCH 078/185] segacd: ring age tightened to 2; wrong grabs record
+Subject: [PATCH 078/190] segacd: ring age tightened to 2; wrong grabs record
  their delta
 
 wrong went 37 to 44 across two hardware runs with the age bound at 4:

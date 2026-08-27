@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 19 Aug 2026 03:28:02 +0000
-Subject: [PATCH 171/185] Sega CD: keep the desktop's settings on I:, which
+Subject: [PATCH 171/190] Sega CD: keep the desktop's settings on I:, which
  both boots share
 
 EmuTOS keeps EMUDESK.INF on the boot drive. On this machine that is C:,

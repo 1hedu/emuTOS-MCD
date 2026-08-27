@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sun, 9 Aug 2026 06:29:51 +0000
-Subject: [PATCH 011/185] segacd: publish the BRAM filesystem signature, off
+Subject: [PATCH 011/190] segacd: publish the BRAM filesystem signature, off
  the timer register
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

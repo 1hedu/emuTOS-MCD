@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 20:34:42 +0000
-Subject: [PATCH 082/185] segacd: the retry fill gets double patience
+Subject: [PATCH 082/190] segacd: the retry fill gets double patience
 
 Reads now land most of the time -- three errors a round, mispairs
 corrected -- but a FAT walk needs eight consecutive clean blocks, and

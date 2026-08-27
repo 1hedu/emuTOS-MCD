@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 12 Aug 2026 22:21:01 +0000
-Subject: [PATCH 092/185] segacd: the timeshare is opt-in -- Right held, never
+Subject: [PATCH 092/190] segacd: the timeshare is opt-in -- Right held, never
  by default
 
 Engaging the firmware automatically put its first visit inside

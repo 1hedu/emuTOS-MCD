@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Mon, 17 Aug 2026 22:45:08 +0000
-Subject: [PATCH 166/185] Sega CD: the VBL status rotation could overwrite an
+Subject: [PATCH 166/190] Sega CD: the VBL status rotation could overwrite an
  unsent command
 
 The 32-frame status question is suspended while a sector read is

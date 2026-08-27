@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 06:13:59 +0000
-Subject: [PATCH 131/185] segacd2: sample the drive state where the read fails
+Subject: [PATCH 131/190] segacd2: sample the drive state where the read fails
 
 Two hardware logs have reported the timeshare failing at 0300, and I
 have twice read that 00 as "the drive was in state 0". It is not.

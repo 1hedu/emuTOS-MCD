@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Sat, 15 Aug 2026 03:39:30 +0000
-Subject: [PATCH 162/185] Sega CD: boot from A:, the ROM system disk, not C:
+Subject: [PATCH 162/190] Sega CD: boot from A:, the ROM system disk, not C:
 
 DEFAULT_BOOTDEV is C: because on an ST the hard disk is where a system
 lives. Here C: is a save chip on whatever cartridge happens to be in

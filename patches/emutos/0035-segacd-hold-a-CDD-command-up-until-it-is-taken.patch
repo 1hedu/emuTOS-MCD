@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 11 Aug 2026 07:31:35 +0000
-Subject: [PATCH 035/185] segacd: hold a CDD command up until it is taken
+Subject: [PATCH 035/190] segacd: hold a CDD command up until it is taken
 
 The BIOS loads a retry count of 75 and re-sends the identical command
 packet on every exchange until the drive answers it, giving up only
