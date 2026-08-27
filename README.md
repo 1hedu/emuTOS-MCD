@@ -6,7 +6,7 @@ An Atari ST desktop on a Mega CD, booting from CD-R or cartridge.
     EmuTOS, GEMDOS, AES, VDI  →  iofw: planar → VDP, pads → IKBD
     four block devices           serial keyboard, printer, sound
 
-![The GEM desktop on a Mega CD, with all four drives](images/desktop.png)
+![EmuTOS booting on a Sega CD: machine Sega CD, 384 KB ST-RAM, GEMDOS drives CDIS](images/welcome.png)
 
 | | |
 |---|---|
