@@ -236,8 +236,9 @@ It needs `m68k-atari-mint-gcc` and GEMlib, which Vincent Rivière's
 script fetches the source and libcmini at pinned commits into `.cache/`
 and builds `-mshort`, because the game was written for AHCC's 16-bit
 `int`. Best scores go to `I:\SOKOSCOR.TXT`, so they persist on both
-boots. The game is played with the cursor keys: the serial keyboard, or
-Start for the on-screen one.
+boots. The game is played with the cursor keys: on the pad, hold C and
+use the d-pad (C + d-pad sends the arrow keys everywhere, not just here),
+or the serial keyboard, or Start for the on-screen one.
 
 ## Adding NEOchrome
 

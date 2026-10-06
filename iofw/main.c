@@ -220,7 +220,7 @@ enum { PRN_IDLE = 0, PRN_SYNCB, PRN_MODE, PRN_LENH, PRN_LENL,
  * up to sixty-four bytes -- rather than one of each per byte, which at
  * four kilobytes a page would be four thousand grabs. */
 void prn_fill(void);
-void prn_fill(void)
+__attribute__((optimize("Os"))) void prn_fill(void)
 {
     uint32_t left;
     uint16_t n;
@@ -248,7 +248,7 @@ void prn_fill(void)
 
 /* Offer the port one byte of the frame. Returns 0 when there is nothing
  * to send or the transmitter is full, so the caller can stop asking. */
-static uint8_t prn_step(void)
+__attribute__((optimize("Os"))) static uint8_t prn_step(void)
 {
     uint8_t b;
 

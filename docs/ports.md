@@ -127,9 +127,10 @@ program as not GEM, so the AES started a GEM program with the pointer
 hidden and no mouse. It now follows the extension, and `AUTORUN_GEM`
 overrides it.
 
-Not done: play needs the cursor keys, which on a pad means the on-screen
-keyboard (Start). A "d-pad as arrow keys" mode in the servant would make
-it a pad game, but the servant has 112 bytes free.
+Play is with the cursor keys. On a pad, hold C and use the d-pad: while
+C is held the d-pad sends the arrow keys, repeating, instead of moving
+the pointer. That is in the servant, so it works for any program driven
+from the keyboard. Verified in gpgx: C + down moves the player a square.
 
 **Cyber Paint: builds, parked at the memory limit.** Jim Kent's
 low-resolution paint and cel-animation program (Antic, 1987; BSD
