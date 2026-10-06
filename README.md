@@ -18,8 +18,9 @@ An Atari ST desktop on a Mega CD, booting from CD-R or cartridge.
 | | |
 |---|---|
 | `C:` | ramdisk, system drive |
-| `D:` | the disc, or on a cartridge the romdisk: the same files, in ROM |
+| `D:` | the disc, on either boot |
 | `I:` | internal backup RAM, 8 KB |
+| `R:` | on a cartridge, the romdisk: the disc's programs, in ROM |
 | `S:` | cartridge save RAM or CD Backup RAM Cart |
 
 Options → Save Desktop writes to `I:`, which both boots read. `I:` and
@@ -33,8 +34,8 @@ EXT port — see `docs/printer.md` and `hardware/pico-printer/`.
 ## Running it
 
 Burn the `.cue`/`.iso` (slow burns read more reliably on real hardware),
-or flash `m1emu.bin` and leave the tray empty. The disc is region-locked,
-the cartridge is not.
+or flash `m1emu.bin`. The cartridge boots with or without a disc in the
+tray. The disc is region-locked, the cartridge is not.
 
 Build instructions, including how to add Sonic: [docs/build.md](docs/build.md).
 

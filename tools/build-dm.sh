@@ -7,7 +7,7 @@
 # The version has to be the one your data files came from: DM 1.1 or 1.2,
 # English. ReDMCSB lists every disk by MD5 in Documentation/ReDMCSB.xlsx,
 # sheet Files, so a DUNGEON.DAT can be checked against it. Then put your
-# own DUNGEON.DAT and GRAPHICS.DAT in vendor/stsoft/ beside it. Either build of the system carries them on D:
+# own DUNGEON.DAT and GRAPHICS.DAT in vendor/stsoft/ beside it. Either build of the system carries them, on D: or R:
 # -- the disc's filesystem, or the cartridge's romdisk -- and DM reads
 # them from the drive it was started from.
 #

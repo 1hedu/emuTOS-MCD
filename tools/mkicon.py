@@ -451,6 +451,7 @@ DRIVE_ICON = {
     'D': IG_DISC,       # the disc
     'I': IG_HARD,       # the console's own 8K, a fixed internal store
     'S': IG_FLOPPY,     # the cartridge: media you slot in and take out
+    'R': IG_HARD,       # the cartridge's romdisk: fixed, read-only
 }
 
 INF_HEAD = ("#R 02\r\n"
@@ -471,7 +472,12 @@ INF_TAIL = ("#F FF 07 @ *.*@\r\n"
             "#F 06 FF *.TOS@ @\r\n")
 
 
-def write_inf(path, drives='CDIS', xcnt=8, ycnt=6):
+# R: is listed for both boots. A disc boot has no romdisk, and the
+# desktop leaves out the icon of a drive that is not there.
+# Four across: ST low resolution's desktop grid is 320 / 80 pixels wide,
+# and an icon placed past the fourth column is moved back onto it --
+# which with a fifth drive put R: on top of S:.
+def write_inf(path, drives='CDISR', xcnt=4, ycnt=6):
     s = INF_HEAD
     for i, d in enumerate(drives):
         s += "#M %02X %02X %02X FF %c DISK %c@ @\r\n" % (

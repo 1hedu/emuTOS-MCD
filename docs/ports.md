@@ -66,10 +66,11 @@ obstacle: see "Devpac 3: runs as it is" below.
 Devpac 3.10's files are small: the editor `DEVPAC.PRG` is 93 KB, the
 assembler `BIN\GEN.TTP` 70 KB, and the debugger `BIN\MON.PRG` 36 KB.
 Each fits a 264 KB TPA many times over, and nothing needed patching.
-`tools/install-devpac.sh` puts them on D:, keeping the folders, because
-Devpac finds its tools and includes by path, and rewrites those paths
-in `HISOFTED.INF` from A: to D:. The romdisk and the disc's D: both
-carry one level of folders from `vendor/stsoft/` for this.
+`tools/install-devpac.sh` puts them in `vendor/stsoft/`, keeping the
+folders, because Devpac finds its tools and includes by path, and
+rewrites those paths in `HISOFTED.INF` from A: to D:, the disc.
+`tools/build-rom.sh` rewrites the cartridge's copy to R:, the romdisk.
+Both carry one level of folders from `vendor/stsoft/` for this.
 
 Verified in gpgx from the cartridge:
 
@@ -326,8 +327,10 @@ payload in a 512 KB image (`docs/mode1.md`), and a Mode 1 cart can map
 `$200000`, and about 1.6 MB of space is free there. Both DM files fit
 several times over.
 
-So the cartridge now has a D: of its own: the romdisk (`docs/build.md`).
-Every file in `vendor/stsoft/` goes on D: on both boots. On the disc
+So the cartridge now has a drive of its own: the romdisk, R:
+(`docs/build.md`). It was D: at first, which hid a disc in the tray on a
+cartridge boot. Every file in `vendor/stsoft/` goes on D: on a disc boot
+and R: on a cartridge. On the disc
 it is part of the disc's filesystem; on the cartridge it is a FAT image
 in the ROM at 512 KB, which the servant reads a sector at a time for the
 sub. That is cart op 11: the S: read loop with a step of one byte
@@ -338,7 +341,7 @@ that was.
 
 On the cartridge a cache miss costs a ROM copy with no seek, so the
 cartridge build can play DM better than the disc. Verified in gpgx: an
-AUTO test (`ROMDAUTO=1`) lists D: on a cart boot and reads a file back
+AUTO test (`ROMDAUTO=1`) lists the romdisk on a cart boot and reads a file back
 from the ROM. The disc boot's desktop is byte-identical with and without
 the change.
 

@@ -3,7 +3,7 @@
 #
 #   tools/build-sokoban.sh        -> vendor/stsoft/SOKOBAN.PRG, SOKOBAN.RSC
 #
-# Both builds carry vendor/stsoft/ on D:. The game is pure GEM: a menu
+# Both builds carry vendor/stsoft/: on D:, or R: on a cartridge. The game is pure GEM: a menu
 # bar, windows, the VDI, nothing of the hardware. It has the 50 classic
 # levels built in and keeps its best scores in I:\SOKOSCOR.TXT, the
 # console's own backup RAM, so they survive a power-off on either boot.

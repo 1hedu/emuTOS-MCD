@@ -1,0 +1,147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 6 Oct 2026 07:00:45 +0000
+Subject: [PATCH 196/196] Sega CD: the romdisk is R:, and D: is the disc on
+ both boots
+
+The cartridge's romdisk took D: on a Mode 1 boot, which hid a disc in
+the tray: a cartridge boot can have one too. The romdisk is now a device
+of its own, SEGACD_DEV_ROMDISK, on R:, and D: is the CD driver on every
+boot. A disc boot has no romdisk, so no R:.
+
+One EMUDESK.INF serves both boots, so it lists R: for both, and the
+desktop now leaves out the icon of a drive that is not there. The entry
+stays in its list, so a desktop saved on a disc boot still has R: on the
+next cartridge boot.
+---
+ bios/disk.c    |  8 ++++++--
+ bios/machine.h |  1 +
+ bios/segacd.c  | 18 +++++-------------
+ desk/deskapp.c | 21 +++++++++++++++++++++
+ 4 files changed, 33 insertions(+), 15 deletions(-)
+
+diff --git a/bios/disk.c b/bios/disk.c
+index 05005b2..62df996 100644
+--- a/bios/disk.c
++++ b/bios/disk.c
+@@ -119,7 +119,8 @@ static const int majors[] =
+     24, 25, 26, 27, 28, 29, 30, 31,     /* SD/MMC */
+ #endif
+ #ifdef MACHINE_SEGACD
+-    32, 33, 34, 35,                     /* ramdisk, disc, internal, cart --
++    32, 33, 34, 35, 36,                 /* ramdisk, disc, internal, cart,
++                                         * romdisk --
+                                          * the order here is not the order
+                                          * of the drive letters; see
+                                          * SEGACD_LETTERS below */
+@@ -366,8 +367,11 @@ void disk_init_all(void)
+          *   D: the disc
+          *   I: internal backup RAM
+          *   S: the cartridge's save RAM
++         *   R: the cartridge's romdisk, on a Mode 1 boot. Not D:, which
++         *      it used to be: D: is the disc, and a cartridge boot can
++         *      have one in the tray as well.
+          */
+-        static const char letters[] = { 'C', 'D', 'I', 'S' };
++        static const char letters[] = { 'C', 'D', 'I', 'S', 'R' };
+         LONG all = devices_available;
+         LONG want = (i < (int)sizeof(letters))
+                     ? 1L << (letters[i] - 'A') : 0L;
+diff --git a/bios/machine.h b/bios/machine.h
+index 3fc02d4..2f46535 100644
+--- a/bios/machine.h
++++ b/bios/machine.h
+@@ -48,6 +48,7 @@
+ #define SEGACD_DEV_DISC     1
+ #define SEGACD_DEV_BRAM     2
+ #define SEGACD_DEV_CART     3
++#define SEGACD_DEV_ROMDISK  4     /* the cartridge's romdisk, Mode 1 only */
+ 
+ #ifdef MACHINE_SEGACD
+ # define MAX_BUS            SEGACD_BUS
+diff --git a/bios/segacd.c b/bios/segacd.c
+index e2fb458..ef716b7 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -5270,7 +5270,7 @@ static UWORD bram_fs_signature(void)
+     return (UWORD)((bram_rd(0) << 8) | bram_rd(19));
+ }
+ 
+-static UWORD romdisk_sectors;   /* D: is the romdisk when this is set */
++static UWORD romdisk_sectors;   /* R: exists when this is set */
+ static void romdisk_probe(void);
+ static LONG romdisk_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
+ static LONG romdisk_ioctl(WORD op, void *arg);
+@@ -5381,13 +5381,9 @@ LONG segacd_disk_rw(WORD dev, WORD rw, LONG sector, WORD count, UBYTE *buf)
+     case SEGACD_DEV_RAMDISK: return segacd_ramdisk_rw(rw, sector, count, buf);
+     case SEGACD_DEV_BRAM:    return segacd_bram_rw(rw, sector, count, buf);
+ #if CONF_WITH_SEGACD_CD
+-    case SEGACD_DEV_DISC:
+-        if (romdisk_sectors)
+-            return romdisk_rw(rw, sector, count, buf);
+-        return segacd_cd_rw(rw, sector, count, buf);
+-#else
+-    case SEGACD_DEV_DISC:    return romdisk_rw(rw, sector, count, buf);
++    case SEGACD_DEV_DISC:    return segacd_cd_rw(rw, sector, count, buf);
+ #endif
++    case SEGACD_DEV_ROMDISK: return romdisk_rw(rw, sector, count, buf);
+ #if CONF_WITH_SEGACD_CART
+     case SEGACD_DEV_CART:    return segacd_cart_rw(rw, sector, count, buf);
+ #endif
+@@ -5401,13 +5397,9 @@ LONG segacd_disk_ioctl(WORD dev, WORD op, void *arg)
+     case SEGACD_DEV_RAMDISK: return segacd_ramdisk_ioctl(op, arg);
+     case SEGACD_DEV_BRAM:    return segacd_bram_ioctl(op, arg);
+ #if CONF_WITH_SEGACD_CD
+-    case SEGACD_DEV_DISC:
+-        if (romdisk_sectors)
+-            return romdisk_ioctl(op, arg);
+-        return segacd_cd_ioctl(op, arg);
+-#else
+-    case SEGACD_DEV_DISC:    return romdisk_ioctl(op, arg);
++    case SEGACD_DEV_DISC:    return segacd_cd_ioctl(op, arg);
+ #endif
++    case SEGACD_DEV_ROMDISK: return romdisk_ioctl(op, arg);
+ #if CONF_WITH_SEGACD_CART
+     case SEGACD_DEV_CART:    return segacd_cart_ioctl(op, arg);
+ #endif
+diff --git a/desk/deskapp.c b/desk/deskapp.c
+index 48cab97..8c00646 100644
+--- a/desk/deskapp.c
++++ b/desk/deskapp.c
+@@ -1441,8 +1441,26 @@ void app_blddesk(void)
+      */
+     app_revit();
+ 
++#ifdef MACHINE_SEGACD
++    /* One EMUDESK.INF serves both boots, and they do not have the same
++     * drives: R:, the cartridge's romdisk, exists only on a cartridge
++     * boot. An icon for a drive that is not there is not drawn. It
++     * stays in the list, so a desktop saved on a disc boot still has it
++     * on the next cartridge boot. */
++    {
++        LONG present = dos_sdrv(dos_gdrv());
++#endif
+     for(pa = G.g_ahead; pa; pa = pa->a_next)
+     {
++#ifdef MACHINE_SEGACD
++        if ((pa->a_flags & AF_ISDESK) && (pa->a_type == AT_ISDISK)
++         && (pa->a_letter >= 'A') && (pa->a_letter <= 'Z')
++         && !(present & (1L << (pa->a_letter - 'A'))))
++        {
++            pa->a_obid = 0;
++            continue;
++        }
++#endif
+         if (pa->a_flags & AF_ISDESK)
+         {
+             obid = obj_ialloc(DROOT, pa->a_xspot, pa->a_yspot,
+@@ -1483,6 +1501,9 @@ void app_blddesk(void)
+             pic->ib_char |= pa->a_letter;
+         }
+     }
++#ifdef MACHINE_SEGACD
++    }
++#endif
+ 
+     app_revit();    /* back to normal ... */
+ 

@@ -224,7 +224,7 @@ if [[ -z "$PAYLOAD" ]]; then
     # What Sega's own Backup RAM manager sees. Read-only.
     [[ -n "${BRAMAUTO:-}" ]] && prg "$ROOT/progs/bramtest.c" BRAMAUT.PRG -DBRAM_AUTO=1
     [[ -n "${DIAG:-}" ]]     && prg "$ROOT/progs/bramtest.c" BRAMTEST.PRG
-    # D: on a cartridge is the romdisk; this lists it and reads a file
+    # R: on a cartridge is the romdisk; this lists it and reads a file
     # back. Emulator-only, like the rest. See progs/romdisk.c.
     [[ -n "${ROMDAUTO:-}" ]] && prg "$ROOT/progs/romdisk.c" ROMDAUTO.PRG -DROMD_AUTO=1
     # D: read + verify, bounded, from AUTO. See progs/diskmark.c.
@@ -364,8 +364,10 @@ MANDEL.PRG draws that same picture on this
 machine, as you watch, then saves it as
 C:\MANDEL.PI1 for SHOW.  Any button returns.
 
-SHOW, EDIT and DEMO.PI1 are on D: -- the disc,
-or on a cartridge its ROM -- and run from there.
+SHOW, EDIT and DEMO.PI1 are on D:, the disc,
+or on a cartridge on R:, its ROM -- and run from
+there.  A cartridge boot can have a disc in the
+tray as well, and it is D: then.
 C: is rebuilt at every start, so copy anything
 to it you like: it is back to this next time.
 
@@ -445,8 +447,8 @@ INF
     CADD+=(--add "$B/FORMATS.PRG:FORMATS.PRG"
            --add "$B/FORMATI.PRG:FORMATI.PRG"
            --add "$B/SRAMTOOL.PRG:SRAMTOOL.PRG")
-    # SHOW, EDIT and DEMO.PI1 live on D: -- the disc, or the cartridge's
-    # romdisk -- and not on C:. C: is rebuilt on every boot, so a copy
+    # SHOW, EDIT and DEMO.PI1 live on D: -- the disc -- or R:, the
+    # cartridge's romdisk, and not on C:. C: is rebuilt on every boot, so a copy
     # made there can be deleted and made again; a copy put there by
     # default only spends PRG RAM. FULLC=1 puts them back. (SLIMC=1, which
     # used to be how to leave them off, is now simply what happens.)

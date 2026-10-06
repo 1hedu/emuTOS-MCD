@@ -1,9 +1,9 @@
-/* ROMDTEST.PRG -- does D: read the romdisk?
+/* ROMDTEST.PRG -- does R: read the romdisk?
  *
- * On a cartridge boot D: is a FAT image in the ROM at 512 KB, read a
- * sector at a time by the servant (cart op 11). This lists D:, then
+ * On a cartridge boot R: is a FAT image in the ROM at 512 KB, read a
+ * sector at a time by the servant (cart op 11). This lists R:, then
  * types the first .TXT it finds, which is everything a program run
- * from D: will ask of it: a directory, a file opened by name, and its
+ * from R: will ask of it: a directory, a file opened by name, and its
  * bytes read back.
  *
  * Built as ROMDAUTO.PRG for AUTO with -DROMD_AUTO, emulator-only: it
@@ -67,9 +67,9 @@ int pmain(void)
     long r, fh, n;
     int count = 0;
 
-    con_ws("\033E" "ROMDISK TEST: D:\\*.*\r\n\r\n");
+    con_ws("\033E" "ROMDISK TEST: R:\\*.*\r\n\r\n");
     dos_fsetdta(&the_dta);
-    r = dos_fsfirst("D:\\*.*", 0);
+    r = dos_fsfirst("R:\\*.*", 0);
     if (r < 0) {
         con_ws("Fsfirst failed: -");
         putu((ULONG)-r);
@@ -94,7 +94,7 @@ int pmain(void)
     if (txt[0]) {
         char path[20] OSBUF;
         int i;
-        path[0] = 'D'; path[1] = ':'; path[2] = '\\';
+        path[0] = 'R'; path[1] = ':'; path[2] = '\\';
         for (i = 0; txt[i]; i++) path[3 + i] = txt[i];
         path[3 + i] = 0;
         con_ws("\r\n");

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 26 Aug 2026 22:22:56 +0000
-Subject: [PATCH 190/195] Sega CD: there is no warm boot here, so stop
+Subject: [PATCH 190/196] Sega CD: there is no warm boot here, so stop
  pretending there is
 
 Every start reads the whole OS image off the disc or out of the

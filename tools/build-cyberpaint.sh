@@ -3,7 +3,7 @@
 #
 #   tools/build-cyberpaint.sh     -> vendor/stsoft/CYP.PRG
 #
-# Both builds carry vendor/stsoft/ on D:. Cyber Paint is a low-resolution
+# Both builds carry vendor/stsoft/: on D:, or R: on a cartridge. Cyber Paint is a low-resolution
 # paint and cel-animation program; Kent released the source under a BSD
 # licence. Source: Atari_ST_Sources (ggnkua), C/Jim Kent/Cyber Paint,
 # pinned, fetched rather than carried.

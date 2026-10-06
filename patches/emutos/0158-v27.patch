@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Fri, 14 Aug 2026 21:16:30 +0000
-Subject: [PATCH 158/195] v27
+Subject: [PATCH 158/196] v27
 
 ---
  bios/scdapi.h | 2 +-

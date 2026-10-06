@@ -89,19 +89,19 @@ m68k-elf-as -m68000 --register-prefix-optional \
 m68k-elf-ld -Ttext 0x0 --oformat binary -o "$OUT" "$B/boot.o" "$B/rom.o"
 rm -f "$B/rom.o" "$B/boot.o"
 
-# The romdisk: D: on a cartridge boot.
+# The romdisk: R: on a cartridge boot.
 #
 # The disc build puts its own programs on D: -- SHOW, EDIT, DEMO.PI1 --
 # and two drop folders: vendor/stsoft/ for ordinary Atari ST programs and
-# DDISK_DIR for this project's own applications. A cartridge has no disc.
-# So the EmuTOS loader's ROM carries the same files as a FAT image at
-# 512 KB, after the payloads,
-# and the servant reads it for D: a sector at a time (docs/ports.md).
+# DDISK_DIR for this project's own applications. A cartridge carries the
+# same files as a FAT image in its ROM at 512 KB, after the payloads, and
+# the servant reads it a sector at a time (docs/ports.md). It is R:, not
+# D:: D: is the disc, and a cartridge boot can have one in the tray too.
 # Only for m1emu.S, the one ROM that boots EmuTOS.
 ROMDISK=""
 if [[ "$(basename "$SRC")" = m1emu.S ]]; then
-  # The disc's own programs first: on a disc they are on D:, and here D:
-  # is this image. build-iso.sh made them; only what exists is added.
+  # The disc's own programs first: on a disc they are on D:, and here
+  # they are on R:. build-iso.sh made them; only what exists is added.
   RDADD=()
   for f in SHOW.PRG EDIT.PRG MANDEL.PRG DEMO.PI1; do
     if [[ -f "$B/$f" ]]; then RDADD+=(--add "$B/$f:$f"); fi
@@ -115,6 +115,16 @@ if [[ "$(basename "$SRC")" = m1emu.S ]]; then
       bn=${f#"$dir"/}
       [[ "$bn" = README.md ]] && continue
       bn=$(echo "$bn" | tr '[:lower:]' '[:upper:]')
+      # Devpac's settings name its tools by drive (install-devpac.sh
+      # points them at D:, the disc). Here they are on R:.
+      if [[ "$bn" = HISOFTED.INF ]]; then
+        python3 - "$f" "$B/HISOFTED.R" <<'PY'
+import sys
+d = open(sys.argv[1], 'rb').read()
+open(sys.argv[2], 'wb').write(d.replace(b'd:\\', b'r:\\').replace(b'D:\\', b'R:\\'))
+PY
+        f="$B/HISOFTED.R"
+      fi
       RDADD+=(--add "$f:$bn")
     done < <(find "$dir" -mindepth 1 -maxdepth 2 -type f -print0 | sort -z)
   done

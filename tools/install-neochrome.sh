@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Put NEOchrome 1.0 on D: -- the disc's, or the cartridge's romdisk.
+# Put NEOchrome 1.0 on D: (the disc) and R: (the cartridge's romdisk).
 #
 #   tools/install-neochrome.sh <NEOchrome 1.0 disk image, .st>
 #
 # Copies NEONEW.PRG off the disk into vendor/stsoft/NEOCHROM/, which
-# both builds carry on D:, and builds NEO.PRG beside it: the launcher
+# both builds carry (D: on a disc, R: on a cartridge), and builds
+# NEO.PRG beside it: the launcher
 # that patches NEOchrome in memory for this machine and starts it
 # (progs/neo.c says what it changes and why). Run NEO.PRG, not
 # NEONEW.PRG; NEONEW.PRG on its own would take the CD drive's
@@ -32,4 +33,4 @@ $CC -c "$ROOT/progs/neo.c" -o "$T/neo.o"
 m68k-elf-ld -T "$ROOT/tools/prg.ld" -o "$T/neo.elf" "$T/tosbind.o" "$T/neo.o"
 python3 "$ROOT/tools/mkprg.py" "$T/neo.elf" "$T/NEO.PRG" >/dev/null
 cp "$T/NEO.PRG" "$D/NEO.PRG"
-echo "NEOchrome on D:\\NEOCHROM -- run NEO.PRG ($(stat -c%s "$D/NEO.PRG") bytes), which starts NEONEW.PRG"
+echo "NEOchrome in \\NEOCHROM (D: or R:) -- run NEO.PRG ($(stat -c%s "$D/NEO.PRG") bytes), which starts NEONEW.PRG"

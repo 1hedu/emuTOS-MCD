@@ -77,22 +77,25 @@ boot forever, which on a television is a console that does some test
 instead of booting -- which is exactly how it was reported the one time
 such a build reached hardware.
 
-**The romdisk.** A cartridge has no disc, so `build-rom.sh` gives it
-the files a disc keeps on D:. Whatever is in `vendor/stsoft/` (and in
-`DDISK_DIR`, when that is set) goes into a FAT image in the ROM at
-512 KB, after the payloads, and EmuTOS mounts it as D:. A program put in
-`vendor/stsoft/` is therefore on D: on either boot, and so is one level
-of folders under it -- `vendor/stsoft/BIN/GEN.TTP` is `D:\BIN\GEN.TTP`. The image is sized to
+**The romdisk.** `build-rom.sh` gives a cartridge the files a disc
+keeps on D:. Whatever is in `vendor/stsoft/` (and in `DDISK_DIR`, when
+that is set) goes into a FAT image in the ROM at 512 KB, after the
+payloads, and EmuTOS mounts it as R:. Not D:: a cartridge boot can have
+a disc in the tray as well, and D: is that disc. A program put in
+`vendor/stsoft/` is on D: on a disc boot and R: on a cartridge, and so
+is one level of folders under it -- `vendor/stsoft/BIN/GEN.TTP` is
+`R:\BIN\GEN.TTP` on the cartridge. The image is sized to
 its files in 16 KB steps and can be at most 1.5 MB, because the save RAM
 is mapped over the ROM from 2 MB. An empty `vendor/stsoft/` builds the
 same ROM as before. The servant reads it a sector at a time for the sub
 (cart op 11), and EmuTOS only uses it when sector 0 carries the stamp
-this builder writes, so a disc boot's D: is still the disc.
+this builder writes; a disc boot has no R:, and its icon is not drawn.
 
 ## Running it
 
 On hardware: burn the `.cue`/`.iso` pair, or flash `m1emu.bin` to a
-cartridge and leave the tray empty. Both boot to the same desktop.
+cartridge. Both boot to the same desktop, and the cartridge does so with
+or without a disc in the tray.
 
 In emulation:
 
@@ -115,7 +118,7 @@ more frames than it will survive.
 
 `tools/build-iso.sh` reads these from the environment. The first four
 are the ones worth knowing. SHOW, EDIT, MANDEL and DEMO.PI1 are on D:
-on both boots and not on C: unless `FULLC` asks (MANDEL.PRG computes
+on a disc and R: on a cartridge and not on C: unless `FULLC` asks (MANDEL.PRG computes
 the picture in DEMO.PI1 on the machine, in about 37 seconds, and saves
 it as C:\MANDEL.PI1); `SLIMC=1`, which used to leave
 them off, is now what happens anyway.
@@ -200,7 +203,7 @@ Not working yet: it builds, but has not been run against real data.
     # copy DUNGEON.DAT and GRAPHICS.DAT from that disk into
     # vendor/stsoft/, then either build:
     ADISK_SIZE=0x8000 tools/build-iso.sh U
-    tools/build-rom.sh boot/m1emu.S   # the cartridge: D: is the romdisk
+    tools/build-rom.sh boot/m1emu.S   # the cartridge: R: is the romdisk
 
 `build-dm.sh` fetches ReDMCSB, cuts DM 1.2 English out of it
 (`tools/dm-reduce.py`), applies `patches/dm/s12e-megacd.patch` and builds

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Put HiSoft Devpac 3 on D: -- the disc's, or the cartridge's romdisk.
+# Put HiSoft Devpac 3 on D: (the disc) and R: (the cartridge's romdisk).
 #
 #   tools/install-devpac.sh <Devpac 3 disk image, .st>
 #
 # Copies the editor, the assembler and its tools, the include files and
-# the examples into vendor/stsoft/, which both builds carry on D:, with
-# their folders: Devpac looks for \BIN\GEN.TTP and \INCDIR by path.
+# the examples into vendor/stsoft/, which both builds carry, with their
+# folders: Devpac looks for \BIN\GEN.TTP and \INCDIR by path.
 # HISOFTED.INF, the editor's settings, names those paths on A:; they are
-# rewritten to D:, which is where they are here.
+# rewritten to D:, where they are on a disc. tools/build-rom.sh rewrites
+# the cartridge's copy again, to R:.
 #
 # Devpac is HiSoft's and is not in this repository; vendor/ is
 # git-ignored. Needs mtools.
@@ -35,4 +36,4 @@ d = open(sys.argv[1], 'rb').read()
 d = d.replace(b'a:\\', b'd:\\').replace(b'A:\\', b'D:\\')
 open(sys.argv[2], 'wb').write(d)
 PY
-echo "Devpac on D: -- $(find "$D/DEVPAC.PRG" "$D/BIN" "$D/INCDIR" "$D/EXAMPLES" -type f | wc -l) files in vendor/stsoft/"
+echo "Devpac (D: or R:) -- $(find "$D/DEVPAC.PRG" "$D/BIN" "$D/INCDIR" "$D/EXAMPLES" -type f | wc -l) files in vendor/stsoft/"

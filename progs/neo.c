@@ -33,7 +33,8 @@
  *
  * Every patch site is checked against the bytes NEOchrome 1.0 has there
  * before anything is written; any other NEONEW.PRG is refused.
- * tools/install-neochrome.sh puts both programs on D:.
+ * tools/install-neochrome.sh puts both programs in \NEOCHROM, which is
+ * on D: on a disc boot and R: on a cartridge.
  */
 typedef unsigned char UBYTE;
 typedef unsigned short UWORD;
@@ -339,6 +340,8 @@ static void fail(const char *why)
 static long load(void)
 {
     long bp = dos_pexec(3, "NEONEW.PRG", "", 0);
+    if (bp < 0)
+        bp = dos_pexec(3, "R:\\NEOCHROM\\NEONEW.PRG", "", 0);
     if (bp < 0)
         bp = dos_pexec(3, "D:\\NEOCHROM\\NEONEW.PRG", "", 0);
     return bp;
