@@ -111,25 +111,34 @@ recommended.
 
 ### iofw
 
-Measured with the project's flags: 24,436 of 24,576 bytes used, **140
-free**. The `C64!` handler prototyped here costs ~690 bytes (350–450
-tightened). Space to recover, measured:
+Measured on the dev branch with the project's flags: 24,508 of 24,576
+bytes used, **68 free**. The `C64!` handler prototyped here
+(`phase0/iofw-c64-prototype.diff`, regenerated for this tree) costs
+~724 bytes, so the build is 656 over until space is recovered:
 
 | | bytes |
 |---|---|
-| `tab8` (4 KB conversion table) moved to fixed WRAM above the planar cache, which ends at `$FFED00`; `$FFED00`–`$FFF9FF` is unused | +4,096 |
-| telemetry stores out of a release build | +834 |
-| `cdd_watch`, boot-trace ring, CD sector capture, frame-900 probe | +712 |
+| telemetry stores out of a release build | ~+1,014 |
+| `cdd_watch`, boot-trace ring, CD sector capture, frame-900 probe | ~+700 (measured on `main`, code unchanged) |
+| whole-tree `-Os` (much of the cold code already is) | ~+2,600 |
+| `tab8` (4 KB) moved above the planar cache | only if split in four or the raster event lists halved |
 
-Freeing a palette line: move the ordinary keyboard keys to line 1
-(`osk.c:200,215,236`, `0x4000` → `0x2000`) and the cursor to line 3
-entries 4–5 (one line in EmuTOS's `sprite_build`). Line 2 becomes the
-C64's. Plane A's screen nametable is written only by
-`screen_scroll_apply` (`main.c:419`), so the palette bit goes in there,
-keyed by screen cell, and survives both the scroll and blit rings.
-C64 colour 0 is transparent in a tile, so cells under a GEOS window get
-an opaque black plane-B tile. The tile grid is aligned to ST
-coordinates; the −12-line letterbox is display-only.
+The raster palette now holds `$FFED00`–`$FFF53F` and the line
+interrupt, and the stack reaches about `$FFF940`, so the 3.3 KB that
+was free above the cache on `main` is down to about 1 KB.
+
+Palette lines: the raster palette rewrites only line 0 and line 1
+entry 2 mid-frame, and the cursor already moved to line 3 entries 4–5.
+What is left to free line 2 for the C64 is moving the ordinary keyboard
+keys to line 1 (`osk.c`, `0x4000` → `0x2000`). Plane A's screen
+nametable is written only by `screen_scroll_apply`, so the palette bit
+goes in there, keyed by screen cell, and survives both the scroll and
+blit rings; its VDP writes must run with interrupts off, as that
+function's now do, because the raster handler moves the VDP address.
+The block goes at offset 32256 — `RST!` holds 32240. C64 colour 0 is
+transparent in a tile, so cells under a GEOS window get an opaque black
+plane-B tile. The tile grid is aligned to ST coordinates; the −12-line
+letterbox is display-only.
 
 ### Found along the way
 
