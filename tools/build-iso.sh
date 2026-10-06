@@ -354,7 +354,12 @@ SHOW.PRG displays Atari ST pictures -- .PI1
 (Degas) and .NEO (NEOchrome), low resolution,
 uncompressed.  It lists what is in the folder
 you run it from; a letter shows one, any key
-comes back.  DEMO.PI1 is here to try it on.
+comes back.  DEMO.PI1 is there to try it on.
+
+SHOW, EDIT and DEMO.PI1 are on D: -- the disc,
+or on a cartridge its ROM -- and run from there.
+C: is rebuilt at every start, so copy anything
+to it you like: it is back to this next time.
 
 NATIVE.PRG runs Genesis-side code off a disc
 -- a .MDP file.  EmuTOS is on the Mega CD's
@@ -411,11 +416,10 @@ INF
     # default for a system disc and the wrong one for a disc carrying a
     # .MDD: the driver takes the ramdisk's length from this image's own
     # boot sector, so shrinking it here is what frees the rest.
-    # What goes on C:. SLIMC leaves out everything that is also on D:
-    # and everything a data disc has no use for -- the format tools, the
-    # picture, the editor -- because the ramdisk's length is what
-    # decides how much PRG RAM is left for a payload's bulk data, and a
-    # full one leaves none. See ADISK_SIZE above and docs/payload.md.
+    # What goes on C:: only what is not also on D:, because the
+    # ramdisk's length is what decides how much PRG RAM is left for a
+    # payload's bulk data, and a full one leaves none. See ADISK_SIZE
+    # above and docs/payload.md.
     CADD=(--add "$B/readme.txt:README.TXT"
           --add "$B/EMUICON.RSC:EMUICON.RSC"
           --add "$B/EMUDESK.INF:EMUDESK.INF"
@@ -424,7 +428,12 @@ INF
     CADD+=(--add "$B/FORMATS.PRG:FORMATS.PRG"
            --add "$B/FORMATI.PRG:FORMATI.PRG"
            --add "$B/SRAMTOOL.PRG:SRAMTOOL.PRG")
-    if [[ -z "${SLIMC:-}" ]]; then
+    # SHOW, EDIT and DEMO.PI1 live on D: -- the disc, or the cartridge's
+    # romdisk -- and not on C:. C: is rebuilt on every boot, so a copy
+    # made there can be deleted and made again; a copy put there by
+    # default only spends PRG RAM. FULLC=1 puts them back. (SLIMC=1, which
+    # used to be how to leave them off, is now simply what happens.)
+    if [[ -n "${FULLC:-}" ]]; then
       CADD+=(--add "$B/SHOW.PRG:SHOW.PRG"
              --add "$B/EDIT.PRG:EDIT.PRG"
              --add "$B/DEMO.PI1:DEMO.PI1")

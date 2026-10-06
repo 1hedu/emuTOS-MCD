@@ -16,13 +16,13 @@ is on the screen at that moment, and the icons and the menu bar and any
 open window are what he lands on.
 
     tools/build-sonic.sh
-    SLIMC=1 SONICACC=1 ADISK_DIR=$PWD/datadisc ADISK_SIZE=0x1C000 \
+    SONICACC=1 ADISK_DIR=$PWD/datadisc ADISK_SIZE=0x1C000 \
         tools/build-iso.sh U
     tools/build-rom.sh boot/m1emu.S          # or keep the ISO
 
 `ADISK_DIR` puts files on C: the way `DDISK_DIR` puts them on D:,
-`SONICACC` adds the accessory, and `SLIMC` drops SHOW, EDIT and DEMO.PI1
-to make room. The ramdisk is the whole region then — 114688 bytes,
+and `SONICACC` adds the accessory. SHOW, EDIT and DEMO.PI1 are on D:,
+not C:, which is the room this needs. The ramdisk is the whole region then — 114688 bytes,
 nothing left over — which is fine, because a file already on C: is not
 copied anywhere. See "The art is where it lies" below.
 

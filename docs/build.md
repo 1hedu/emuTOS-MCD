@@ -113,11 +113,13 @@ more frames than it will survive.
 ## Flags
 
 `tools/build-iso.sh` reads these from the environment. The first four
-are the ones worth knowing:
+are the ones worth knowing. SHOW, EDIT and DEMO.PI1 are on D: on both
+boots and not on C: unless `FULLC` asks; `SLIMC=1`, which used to leave
+them off, is now what happens anyway.
 
 | | |
 |---|---|
-| `SLIMC=1` | leave SHOW, EDIT and DEMO.PI1 off C:, freeing ramdisk |
+| `FULLC=1` | put SHOW, EDIT and DEMO.PI1 on C: as well as D: |
 | `ADISK_DIR=<dir>` | put a directory's files on C: |
 | `ADISK_SIZE=0x…` | how big C: is, and so how much PRG RAM a payload has left |
 | `SONICACC=1` | add the Sonic accessory (see below) |
@@ -155,7 +157,7 @@ first; `tools/sonic-tools/smd_to_bin.py` does it.
 Then:
 
     tools/build-sonic.sh
-    SLIMC=1 SONICACC=1 ADISK_DIR=$PWD/datadisc ADISK_SIZE=0x1C000 \
+    SONICACC=1 ADISK_DIR=$PWD/datadisc ADISK_SIZE=0x1C000 \
         tools/build-iso.sh U
     tools/build-rom.sh boot/m1emu.S             # if you want it on the cart
 
@@ -174,8 +176,8 @@ The `.MDD` is the general facility and not a Sonic one: `NATIVE.PRG`
 loads whatever `.MDD` sits beside the `.MDP` it is running and knows
 nothing about what is in it.
 
-`ADISK_DIR` puts both on C:, `SONICACC` adds the accessory, and `SLIMC`
-drops SHOW, EDIT and DEMO.PI1 to make room. The ramdisk is then the
+`ADISK_DIR` puts both on C:, and `SONICACC` adds the accessory. SHOW,
+EDIT and DEMO.PI1 are on D:, not C:, which is the room this needs. The ramdisk is then the
 whole region — 114688 bytes, nothing left over — which is fine, because
 a file already on C: is not copied anywhere.
 
@@ -194,7 +196,7 @@ Not working yet: it builds, but has not been run against real data.
     tools/build-dm.sh S11E            # or S12E: the version your disk is
     # copy DUNGEON.DAT and GRAPHICS.DAT from that disk into
     # vendor/stsoft/, then either build:
-    ADISK_SIZE=0x8000 SLIMC=1 tools/build-iso.sh U
+    ADISK_SIZE=0x8000 tools/build-iso.sh U
     tools/build-rom.sh boot/m1emu.S   # the cartridge: D: is the romdisk
 
 `build-dm.sh` fetches ReDMCSB, cuts DM 1.2 English out of it
@@ -203,7 +205,7 @@ it with ReDMCSB's own Megamax C toolchain under Hatari. It needs
 `unifdef`, `hatari` and either `7z` or Python's `py7zr`. ReDMCSB is
 cached in `.cache/`, which is git-ignored like the data files.
 
-`ADISK_SIZE=0x8000 SLIMC=1` is there for memory. DM takes all of the
+`ADISK_SIZE=0x8000` is there for memory. DM takes all of the
 TPA, and its permanent allocations go in the bulk arena: the PRG-RAM
 between the end of C: and the servant's scratch. A 32 KB C: leaves 80 KB
 there, and the default 112 KB C: leaves nothing.

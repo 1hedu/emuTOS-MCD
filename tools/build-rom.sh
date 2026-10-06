@@ -91,17 +91,21 @@ rm -f "$B/rom.o" "$B/boot.o"
 
 # The romdisk: D: on a cartridge boot.
 #
-# The disc build puts two drop folders on D: -- vendor/stsoft/ for
-# ordinary Atari ST programs and DDISK_DIR for this project's own
-# applications -- and a cartridge has no disc. So the EmuTOS loader's ROM
-# carries the same files as a FAT image at 512 KB, after the payloads,
+# The disc build puts its own programs on D: -- SHOW, EDIT, DEMO.PI1 --
+# and two drop folders: vendor/stsoft/ for ordinary Atari ST programs and
+# DDISK_DIR for this project's own applications. A cartridge has no disc.
+# So the EmuTOS loader's ROM carries the same files as a FAT image at
+# 512 KB, after the payloads,
 # and the servant reads it for D: a sector at a time (docs/ports.md).
-# Only for m1emu.S, the one ROM that boots EmuTOS, and only when there is
-# something to put in it: a ROM built from empty folders is the same ROM
-# it always was.
+# Only for m1emu.S, the one ROM that boots EmuTOS.
 ROMDISK=""
 if [[ "$(basename "$SRC")" = m1emu.S ]]; then
+  # The disc's own programs first: on a disc they are on D:, and here D:
+  # is this image. build-iso.sh made them; only what exists is added.
   RDADD=()
+  for f in SHOW.PRG EDIT.PRG DEMO.PI1; do
+    if [[ -f "$B/$f" ]]; then RDADD+=(--add "$B/$f:$f"); fi
+  done
   for dir in "$ROOT/vendor/stsoft" ${DDISK_DIR:+"$DDISK_DIR"}; do
     [[ -d "$dir" ]] || continue
     while IFS= read -r -d '' f; do
