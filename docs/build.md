@@ -238,3 +238,19 @@ and builds `-mshort`, because the game was written for AHCC's 16-bit
 `int`. Best scores go to `I:\SOKOSCOR.TXT`, so they persist on both
 boots. The game is played with the cursor keys: the serial keyboard, or
 Start for the on-screen one.
+
+## Adding NEOchrome
+
+Atari's NEOchrome 1.0 (Dave Staugas, 1986), the low-resolution paint
+program. It is not in this repository; the disk image is yours, for
+instance "NEOchrome v1.0" from planetemu's Atari ST applications:
+
+    tools/install-neochrome.sh NEOchrome.st   # -> vendor/stsoft/NEOCHROM/
+
+That copies `NEONEW.PRG` off the disk and builds `NEO.PRG` beside it.
+Run `D:\NEOCHROM\NEO.PRG`, not `NEONEW.PRG`: the launcher loads NEOchrome,
+patches it in memory for this machine (`progs/neo.c` lists what and
+why) and starts it. It works on both boots. Draw with A. The FULL SCREEN
+button at the toolbox's left edge hides the toolbox; push the pointer to
+the bottom edge of the screen and press A to bring it back. Save to C:, I: or S:; D: is read-only.
+

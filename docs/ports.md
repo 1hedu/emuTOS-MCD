@@ -99,6 +99,7 @@ or pad.
 | QED 4.53, the editor | no. 18 of its 31 dialogs are wider than 40 columns, up to 86: it was laid out for 640-pixel screens. |
 | Peter Lane's Sokoban | **yes**, and it runs. |
 | Jim Kent's Cyber Paint | no, on memory. It builds, but needs about 400 KB; parked (below). |
+| NEOchrome 1.0 (binary, not from the archive) | **yes**, through a launcher; it runs on both boots (below). |
 
 **Sokoban.** It is pure GEM: a menu bar, windows, VDI drawing, the 50
 classic levels built in, about 2,300 lines of C. Its licence, the Open
@@ -179,6 +180,53 @@ byte-identical, on the disc and on the cartridge.
 One limit remains, the same as before: a program that moves the
 physical screen to its own buffer has to leave 768 bytes free past the
 picture for the blocks, 32,768 bytes from a 256-byte boundary.
+
+**NEOchrome 1.0.** Atari's paint program, as a binary from planetemu,
+like Devpac. It is 204 KB with its BSS, so it fits the 264 KB TPA, and
+nearly all of it is plain TOS: GEMDOS, Setscreen, Line-A for drawing,
+the VDI for the mouse, the AES for its file selector. Three things in it
+are ST hardware:
+
+- Its VBL routine goes in vector `$70`, which here is the CD drive's
+  interrupt. The routine copies NEOchrome's palette to the shifter every
+  frame, counts frames, and starts MFP Timer B for the toolbox's colour
+  bands.
+- It enables Timer B in the MFP, whose addresses alias the gate array.
+- It reads the shifter palette at `$FF8240`, to restore it at exit.
+
+`progs/neo.c` is a 2.4 KB launcher. It loads `NEONEW.PRG` with Pexec 3,
+checks every patch site against NEOchrome 1.0's own bytes, patches them
+in memory, and starts it with Pexec 4. The VBL work moves into the VBL
+queue, run from the launcher, which stays resident underneath. The
+MFP writes become NOPs, and the palette read becomes a copy taken
+through `Setcolor`. One palette per frame: while the toolbox shows,
+colours 14 and 15 are the toolbox's; with it hidden the picture's
+sixteen are exact. The toolbox's colour bands are not drawn.
+
+The launcher also places NEOchrome's screens itself. NEOchrome lays its
+buffers out back to back, 32,000 bytes apart, and this machine needs two
+things of a screen: 768 bytes free past it for the palette and pointer
+blocks, and no 128 KB boundary inside it, because the servant reads the
+screen through one 128 KB bank of sub RAM. The launcher spaces the two
+screens 32,256 bytes apart within the same region NEOchrome would have
+used. If the load address puts a boundary where no layout fits, it
+loads NEOchrome a little higher and tries again.
+
+NEOchrome draws off-screen with `Setscreen(buf, -1, -1)` and page-flips
+between its two screens, which is what EmuTOS patch 0193 (show the
+physical screen) is for.
+
+Verified in gpgx, on the cartridge and on the disc: the toolbox
+renders, a stroke drawn with the pad lands in the picture, FULL SCREEN
+shows the picture alone in its own palette, strokes still draw there,
+and A at the bottom edge brings the toolbox back. Not yet tried:
+loading and saving pictures.
+
+Running it from the disc found a bug in `AUTORUN`. On a CD boot, D:
+refuses reads until the desktop has started, because the boot-time
+reads have never worked on the hardware. An autorun program runs
+instead of the desktop, so it found no D: at all. EmuTOS patch 0194
+ends that window when the AES starts an autorun program too.
 
 ## Dungeon Master: fits, with three subsystems to replace
 

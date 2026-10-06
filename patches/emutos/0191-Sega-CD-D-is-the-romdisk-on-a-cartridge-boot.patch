@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 6 Oct 2026 01:25:22 +0000
-Subject: [PATCH 191/193] Sega CD: D: is the romdisk on a cartridge boot
+Subject: [PATCH 191/194] Sega CD: D: is the romdisk on a cartridge boot
 
 A cartridge boot has no disc, and D: is where the disc build keeps
 vendor/stsoft and the data disc's applications. tools/build-rom.sh now

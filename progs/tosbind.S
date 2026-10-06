@@ -45,6 +45,40 @@ acc_stack:
         .space  4096
 acc_stack_top:
         .text
+#elif defined(SHRINK_STARTUP)
+| A program that starts another one, and so has to give the memory back
+| first. TOS hands a program the whole of the free memory and its stack
+| at the top of it, so the stack moves into the program's own BSS before
+| Mshrink gives back everything past basepage + text + data + bss.
+| The basepage is kept in prg_basepage for whoever needs it.
+_start:
+        move.l  4(%sp),%a0
+        lea     shr_stack_top(%pc),%sp
+        lea     prg_basepage(%pc),%a1
+        move.l  %a0,(%a1)
+        move.l  12(%a0),%d0             | p_tlen
+        add.l   20(%a0),%d0             | p_dlen
+        add.l   28(%a0),%d0             | p_blen
+        add.l   #0x100,%d0              | the basepage itself
+        move.l  %d0,-(%sp)
+        move.l  %a0,-(%sp)
+        clr.w   -(%sp)
+        move.w  #0x4A,-(%sp)            | Mshrink
+        trap    #1
+        lea     12(%sp),%sp
+        bsr     pmain
+        clr.w   -(%sp)                  | Pterm0
+        trap    #1
+
+        .bss
+        .align  4
+        .globl  prg_basepage
+prg_basepage:
+        .space  4
+shr_stack:
+        .space  4096
+shr_stack_top:
+        .text
 #else
 _start:
         bsr     pmain                   | bsr: always PC-relative, unlike jsr
@@ -419,5 +453,33 @@ xbios_vsync:
         move.w  #37,-(%sp)
         trap    #14
         addq.l  #2,%sp
+        movem.l (%sp)+,%d2/%a2
+        rts
+
+| long dos_pexec(long mode, const char *name, const void *cmd, const void *env)
+| GEMDOS 0x4B. Mode 3 loads without starting and returns the basepage;
+| mode 4 starts a basepage that mode 3 loaded.
+        .globl  dos_pexec
+dos_pexec:
+        movem.l %d2/%a2,-(%sp)
+        move.l  24(%sp),-(%sp)          | env
+        move.l  24(%sp),-(%sp)          | cmd
+        move.l  24(%sp),-(%sp)          | name
+        move.l  24(%sp),%d0
+        move.w  %d0,-(%sp)              | mode
+        move.w  #0x4B,-(%sp)
+        trap    #1
+        lea     16(%sp),%sp
+        movem.l (%sp)+,%d2/%a2
+        rts
+
+| long dos_mfree(void *block)          GEMDOS 0x49
+        .globl  dos_mfree
+dos_mfree:
+        movem.l %d2/%a2,-(%sp)
+        move.l  12(%sp),-(%sp)
+        move.w  #0x49,-(%sp)
+        trap    #1
+        addq.l  #6,%sp
         movem.l (%sp)+,%d2/%a2
         rts

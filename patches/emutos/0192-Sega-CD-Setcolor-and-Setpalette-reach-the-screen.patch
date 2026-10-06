@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Tue, 6 Oct 2026 01:25:30 +0000
-Subject: [PATCH 192/193] Sega CD: Setcolor and Setpalette reach the screen
+Subject: [PATCH 192/194] Sega CD: Setcolor and Setpalette reach the screen
 
 There are no palette registers on this side of the machine. The servant
 keeps the sixteen colours in CRAM and takes new ones from the block just

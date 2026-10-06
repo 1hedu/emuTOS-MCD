@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 6 Oct 2026 05:05:19 +0000
+Subject: [PATCH 194/194] Sega CD: an autorun program ends the boot, as the
+ desktop does
+
+On a CD boot, D: refuses every read until deskmain() is entered: the
+boot-time probe's reads have never succeeded on the hardware, and each
+one is expensive. An autorun program (#Z in EMUDESK.INF) runs instead
+of the desktop, so deskmain() never came and the program found no D:
+at all -- the AES's "cannot find the folder or file" for any program
+autorun from the disc. The cartridge's romdisk was never affected.
+
+The AES now tells the BIOS when it is about to start an autorun
+program, and that ends the boot window the same way.
+---
+ aes/geminit.c | 11 +++++++++++
+ bios/segacd.c |  7 +++++++
+ bios/segacd.h |  1 +
+ 3 files changed, 19 insertions(+)
+
+diff --git a/aes/geminit.c b/aes/geminit.c
+index a218b3e..3d2027d 100644
+--- a/aes/geminit.c
++++ b/aes/geminit.c
+@@ -404,6 +404,10 @@ static void process_inf1(void)
+  *      FALSE if initial program is character-mode (only if an autorun
+  *      entry exists, and it is for a character-mode program).
+  */
++#ifdef MACHINE_SEGACD
++void segacd_autorun(void);    /* bios/segacd.h is not on the AES's path */
++#endif
++
+ static BOOL process_inf2(BOOL *isauto)
+ {
+     WORD    env, isgem = TRUE;
+@@ -739,6 +743,13 @@ void run_accs_and_desktop(void)
+     dsptch();                       /* off we go !!! */
+     wait_for_accs(AP_MESAG);        /* wait until DAs have initialised */
+ 
++#ifdef MACHINE_SEGACD
++    /* An autorun program runs instead of the desktop, so it is the end
++     * of the boot that deskmain() would otherwise mark: without this,
++     * a program autorun from D: on a CD boot finds no D: at all. */
++    if (isauto)
++        segacd_autorun();
++#endif
+     sh_main(isauto, isgem);         /* main shell loop */
+ 
+     free_accs(num_accs);            /* free DA memory */
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 138945b..796459b 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -3378,6 +3378,13 @@ static void cd_boot_over(void)
+     cd_booting = 0;
+ }
+ 
++/* The AES is starting an autorun program in place of the desktop. That
++ * program is the first thing after the boot, as deskmain() would be. */
++void segacd_autorun(void)
++{
++    cd_boot_over();
++}
++
+ LONG segacd_cd_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
+ {
+     if (rw & RW_WRITE)
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 40fcea9..2f6d424 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -24,6 +24,7 @@ void segacd_screen_init(void);
+ void segacd_setphys(const UBYTE *addr);
+ const UBYTE *segacd_physbase(void);
+ UBYTE *segacd_shown(void);         /* the screen the servant shows */
++void segacd_autorun(void);         /* the AES starts an autorun program */
+ WORD segacd_setcolor(WORD colorNum, WORD color);
+ 
+ /* System timer (gate array INT3) */
