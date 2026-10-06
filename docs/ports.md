@@ -58,7 +58,33 @@ serial keyboard for typing. It is possible, and it is the least useful
 of the three: rmac is already the better tool on the host, where it can
 be used as it is.
 
-Devpac 3 and QED are closed binaries. There is nothing in them to port.
+Devpac 3 and QED are closed binaries -- which, as it turned out, is no
+obstacle: see "Devpac 3: runs as it is" below.
+
+## Devpac 3: runs as it is
+
+Devpac 3.10's files are small: the editor `DEVPAC.PRG` is 93 KB, the
+assembler `BIN\GEN.TTP` 70 KB, and the debugger `BIN\MON.PRG` 36 KB.
+Each fits a 264 KB TPA many times over, and nothing needed patching.
+`tools/install-devpac.sh` puts them on D:, keeping the folders, because
+Devpac finds its tools and includes by path, and rewrites those paths
+in `HISOFTED.INF` from A: to D:. The romdisk and the disc's D: both
+carry one level of folders from `vendor/stsoft/` for this.
+
+Verified in gpgx from the cartridge:
+
+- `DEVPAC.PRG` opens its editor window from the desktop's autorun.
+- `GEN.TTP` assembles `D:\EXAMPLES\DEMO.S`, reporting the deliberate
+  error the example carries.
+- `GEN.TTP` assembles a fresh source to `C:\HELLO.PRG`, with 0 errors.
+- `C:\HELLO.PRG` then runs and prints its message.
+
+That makes the machine a 68000 development system for itself.
+
+Not yet tried: MonST, the debugger, which is the part of Devpac most
+likely to touch hardware directly, and assembling from inside the
+editor, which needs a keyboard the headless harness does not have. QED
+was not on the archive that had Devpac.
 
 ## Dungeon Master: fits, with three subsystems to replace
 

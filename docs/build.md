@@ -81,7 +81,8 @@ such a build reached hardware.
 the files a disc keeps on D:. Whatever is in `vendor/stsoft/` (and in
 `DDISK_DIR`, when that is set) goes into a FAT image in the ROM at
 512 KB, after the payloads, and EmuTOS mounts it as D:. A program put in
-`vendor/stsoft/` is therefore on D: on either boot. The image is sized to
+`vendor/stsoft/` is therefore on D: on either boot, and so is one level
+of folders under it -- `vendor/stsoft/BIN/GEN.TTP` is `D:\BIN\GEN.TTP`. The image is sized to
 its files in 16 KB steps and can be at most 1.5 MB, because the save RAM
 is mapped over the ROM from 2 MB. An empty `vendor/stsoft/` builds the
 same ROM as before. The servant reads it a sector at a time for the sub
@@ -209,3 +210,16 @@ cached in `.cache/`, which is git-ignored like the data files.
 TPA, and its permanent allocations go in the bulk arena: the PRG-RAM
 between the end of C: and the servant's scratch. A 32 KB C: leaves 80 KB
 there, and the default 112 KB C: leaves nothing.
+
+## Adding Devpac
+
+HiSoft's Devpac 3 runs as it is: the editor, and the assembler, which
+writes programs to C: that then run.
+
+    tools/install-devpac.sh <your Devpac 3 disk image>.st
+    tools/build-iso.sh U && tools/build-rom.sh boot/m1emu.S
+
+The script copies `DEVPAC.PRG`, `BIN`, `INCDIR` and `EXAMPLES` into
+`vendor/stsoft/` and points `HISOFTED.INF`'s paths at D:. D: is
+read-only, so assemble with the output on C: (in the editor, Options →
+Assembly; on the command line, `GEN.TTP file.S -OC:\FILE.PRG`).

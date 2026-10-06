@@ -108,12 +108,15 @@ if [[ "$(basename "$SRC")" = m1emu.S ]]; then
   done
   for dir in "$ROOT/vendor/stsoft" ${DDISK_DIR:+"$DDISK_DIR"}; do
     [[ -d "$dir" ]] || continue
+    # One level of folders is kept, as \BIN\GEN.TTP and the like: a
+    # program that keeps its tools in a folder finds them where it
+    # expects. Deeper ones are not; mkfat.py builds one level.
     while IFS= read -r -d '' f; do
-      bn=$(basename "$f")
+      bn=${f#"$dir"/}
       [[ "$bn" = README.md ]] && continue
       bn=$(echo "$bn" | tr '[:lower:]' '[:upper:]')
       RDADD+=(--add "$f:$bn")
-    done < <(find "$dir" -maxdepth 1 -type f -print0 | sort -z)
+    done < <(find "$dir" -mindepth 1 -maxdepth 2 -type f -print0 | sort -z)
   done
   if (( ${#RDADD[@]} )); then
     ROMDISK="$B/ROMDISK.IMG"
