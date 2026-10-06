@@ -39,3 +39,9 @@ __pycache__/
 # ReDMCSB, fetched by tools/build-dm.sh. Derived from FTL's executables:
 # fetched, never committed.
 .cache/
+
+# Checkouts of the submodules in .gitmodules. EmuTOS is rebuilt from
+# patches/emutos/ (see its README), megadev is cloned as is; neither is
+# this repository's content.
+/emutos/
+/vendor/megadev/
