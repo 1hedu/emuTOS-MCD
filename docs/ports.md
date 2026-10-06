@@ -201,9 +201,37 @@ of either goes into the repository.
    version". The version reduction is exact: each file preprocesses the
    same as the full tree.
 2. ~~The romdisk.~~ **Done**, see above.
-3. Patch DM for this machine (the hardware table above) and run it from
-   both boots with sound stubbed, up to the title and the entrance.
-4. Alt-RAM as the permanent region; count cache misses on a walk
-   through level 1, on both boots.
+3. ~~Patch DM for this machine.~~ **Patched and building**:
+   `tools/build-dm.sh`, `patches/dm/s12e-megacd.patch`. What the patch does:
+   - **VBL.** The VBL routine goes in the first free VBL-queue slot and
+     returns with `rts`. Vector `$70` is the CD drive's interrupt here.
+   - **Palette.** Where the routine programmed Timer B for the mid-screen
+     palette change, it now sets `colorptr` to the dungeon view's palette.
+     EmuTOS hands that to the servant at the next VBL, through the
+     Setpalette path added in the same change. One palette for the whole
+     screen, so in darkness the panels darken with the view; a per-tile
+     CRAM line could restore the split later.
+   - **Fades.** They go through a copy of the palette, read back with
+     `Setcolor(n, -1)`.
+   - **Sound.** Silent: the sample player returns at once.
+   - **Pointer.** The desktop's pointer sprite is hidden with Line-A
+     `A00A`.
+   - **Disks.** The floppy checks always succeed, and nothing is
+     formatted. The data files open from the current drive, and saves go
+     to `S:\DMGAME.DAT`.
+   - **Memory.** The GEM region is not used. On an ST it is safe only
+     because DM stops Timer C; here the gate array's tick keeps calling
+     the AES timer hook, which writes into it. The permanent allocations
+     go in the bulk arena instead, found through the `SgCD` cookie and
+     `SCD_BULK_INFO`.
+   - **ReDMCSB bug.** It never defines `G0319_ul_LoadGameTime` without
+     the copy protection; the patch defines it.
+
+   Not yet run: that needs a DM 1.2 `DUNGEON.DAT` and `GRAPHICS.DAT`.
+   Memory is the first thing to measure. This EmuTOS is 232 KB, which
+   fills Word RAM, so the Alt-RAM the plan counted on does not exist, and
+   ST-RAM after EmuTOS's 85 KB of BSS and the 32 KB screen leaves DM's
+   heap far smaller than a 520ST's. The bulk arena is the reserve.
+4. Count cache misses on a walk through level 1, on both boots.
 5. Sound on the PCM chip.
 6. Saves on S:.

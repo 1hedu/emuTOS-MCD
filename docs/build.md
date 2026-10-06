@@ -184,3 +184,25 @@ screen, and by the time it has said what it is for, the desktop he was
 supposed to be standing on is gone. Start ends it; so does walking into
 the sign post at the end of the fourth screen.
 
+
+## Adding Dungeon Master
+
+Not working yet: it builds, but has not been run against real data.
+`docs/ports.md` has the plan and the state.
+
+    tools/build-dm.sh                 # -> vendor/stsoft/DM.PRG
+    # copy DUNGEON.DAT and GRAPHICS.DAT from your DM 1.2 disk into
+    # vendor/stsoft/, then either build:
+    ADISK_SIZE=0x8000 SLIMC=1 tools/build-iso.sh U
+    tools/build-rom.sh boot/m1emu.S   # the cartridge: D: is the romdisk
+
+`build-dm.sh` fetches ReDMCSB, cuts DM 1.2 English out of it
+(`tools/dm-reduce.py`), applies `patches/dm/s12e-megacd.patch` and builds
+it with ReDMCSB's own Megamax C toolchain under Hatari. It needs
+`unifdef`, `hatari` and either `7z` or Python's `py7zr`. ReDMCSB is
+cached in `.cache/`, which is git-ignored like the data files.
+
+`ADISK_SIZE=0x8000 SLIMC=1` is there for memory. DM takes all of the
+TPA, and its permanent allocations go in the bulk arena: the PRG-RAM
+between the end of C: and the servant's scratch. A 32 KB C: leaves 80 KB
+there, and the default 112 KB C: leaves nothing.

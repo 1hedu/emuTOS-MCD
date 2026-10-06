@@ -35,3 +35,7 @@ __pycache__/
 # HEAD now, and the history still has them -- see docs/build.md. Rooted,
 # so vendor/emulator's bundle is unaffected.
 /*.zip
+
+# ReDMCSB, fetched by tools/build-dm.sh. Derived from FTL's executables:
+# fetched, never committed.
+.cache/

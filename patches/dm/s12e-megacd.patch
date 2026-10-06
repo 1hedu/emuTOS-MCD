@@ -1,0 +1,270 @@
+diff --git a/ATARIST.H b/ATARIST.H
+index e66e52f..d2f4aad 100644
+--- a/ATARIST.H
++++ b/ATARIST.H
+@@ -333,6 +333,7 @@ typedef struct { /* Size = 52 = 0x34 */
+ #define Getrez()                           (int16_t)R0056_TOS_CallXBIOS(0x04)
+ #define Setscreen(a, b, c)                 (void)R0056_TOS_CallXBIOS(0x05, a, b, c)
+ #define Setpalette(a)                      (void)R0056_TOS_CallXBIOS(0x06, a)
++#define Setcolor(a, b)                     (int16_t)R0056_TOS_CallXBIOS(0x07, a, b)
+ #define Floprd(a, b, c, d, e, f, g)        (int16_t)R0056_TOS_CallXBIOS(0x08, a, b, c, d, e, f, g)
+ #define Flopwr(a, b, c, d, e, f, g)        (long)R0056_TOS_CallXBIOS(0x09, a, b, c, d, e, f, g)
+ #define Flopfmt(a, b, c, d, e, f, g, h, i) (long)R0056_TOS_CallXBIOS(0x0A, a, b, c, d, e, f, g, h, i)
+diff --git a/BASE.C b/BASE.C
+index a354faa..b4c228b 100644
+--- a/BASE.C
++++ b/BASE.C
+@@ -21,6 +21,7 @@ unsigned int16_t G0312_i_LastProjectileDisabledMovementDirection;
+ unsigned long G0313_ul_GameTime;
+ int16_t G0317_i_WaitForInputVerticalBlankCount;
+ int16_t G0318_i_WaitForInputMaximumVerticalBlankCount;
++unsigned long G0319_ul_LoadGameTime; /* ReDMCSB defines this only with the copy protection, but LOADSAVE.C assigns it either way */
+ int16_t G0320_i_Unreferenced; /* BUG0_00 Useless code */
+ BOOLEAN G0321_B_StopWaitingForPlayerInput = C1_TRUE;
+ BOOLEAN G0322_B_PaletteSwitchingEnabled; /* Named DO_PAL_CHANGE in FM-Towns */
+@@ -291,6 +292,9 @@ asm {
+         T0017001:                                                               /* BUG0_03 Graphical glitch. If a vertical blank interrupt occurs while processing of the previous vertical blank exception has not completed then the interrupt is ignored because of the interrupt mask automatically set by the processor when running the exception. Consequently, the palette switching code below is not executed and the dungeon view may be drawn on screen with the wrong color palette. This is only visible for a very short amount of time and disappears on the next vertical scan. The issue can occur when the processor is under heavy load because many other interrupts occur with a higher priority level than the vertical blank interrupt, such as sound processing (another interrupt that occurs thousands of times per second to play the sound) and mouse processing (another interrupt each time the mouse moves or button status changes). North American systems are more affected because the vertical blank interrupt occurs at 60 Hz rather than 50 Hz in European systems */
+                 tst.w   G0322_B_PaletteSwitchingEnabled(A4)
+                 beq.s   T0017002                                                /* If palette switching is disabled */
++                lea     G0346_aui_Palette_MiddleScreen(A4),A0                   /* Mega CD: no Timer B and no mid-screen palette change. The dungeon view's palette is set for the whole screen through colorptr, which EmuTOS hands to the servant at the next VBL */
++                move.l  A0,0x045A
++                bra.s   T0017002
+                 clr.w   G0350_B_SwitchToTopBottomPalette(A4)
+                 movea.w #0xFA00,A0                                              /* This is the base address of the MFP */
+                 clr.b   27(A0)                                                  /* Clear LSB of Timer B control register on the MFP. This stops Timer B (it does not count anymore) */
+@@ -446,6 +450,7 @@ asm {
+                 move.w  #C1_TRUE,G0321_B_StopWaitingForPlayerInput(A4)          /* This flag instructs the main loop to to increment the game time. This occurs every 11 vertical blank cycles */
+         T0017022:
+                 movem.l (A7)+,D0-D5/A0/A4-A5
++                rts                                                             /* Mega CD: called from the VBL queue, not through vector $70, which is the CD drive's interrupt on this machine */
+                 dc.w    0x4EF9                                                  /* Call the original exception handler with a jmp instruction */
+         V0017000_JMPTargetAddress:
+                 dc.l    0x00000000
+@@ -463,10 +468,19 @@ void F0018_MAIN_SetExceptionVectors(
+                 move.l  A0,C0x0118_ADDRESS_INTERRUPT_VECTOR_6_KEYBOARD_MIDI                   /* Replace Exception Vector 70 (IKBD/MIDI, ST-MFP interrupt #6. Points to the handler for IKBD and MIDI interrupts) */
+                 lea     E0015_MAIN_Exception72Handler_TimerB_PaletteSwitcher(PC),A0
+                 move.l  A0,C0x0120_ADDRESS_INTERRUPT_VECTOR_8_TIMER_B_HORIZONTAL_BLANK        /* Replace Exception Vector 72 (MFP timer B (HBL counter), ST-MFP interrupt #8) */
+-                lea     V0017000_JMPTargetAddress(PC),A0
+-                move.l  C0x0070_ADDRESS_INTERRUPT_AUTOVECTOR_4_VERTICAL_BLANK,(A0)            /* Copy current Exception Vector 28 (vertical blank) in the jmp target address. The custom vertical blank handler calls the original handler via this jmp */
++                movea.l 0x0456,A1                                                       /* Mega CD: _vblqueue. The VBL arrives as interrupt level 2 here and $70 belongs to the CD drive, so the handler goes in the first free slot of the VBL queue, which EmuTOS calls every frame */
++                move.w  0x0454,D0                                                       /* _nvbls */
++                subq.w  #1,D0
++        @T0018001:
++                tst.l   (A1)
++                beq.s   @T0018002
++                addq.l  #4,A1
++                dbf     D0,@T0018001
++                bra.s   @T0018003
++        @T0018002:
+                 lea     E0017_MAIN_Exception28Handler_VerticalBlank_CPSDF(PC),A0
+-                move.l  A0,C0x0070_ADDRESS_INTERRUPT_AUTOVECTOR_4_VERTICAL_BLANK              /* Replace Exception Vector 28 */
++                move.l  A0,(A1)
++        @T0018003:
+         }
+ }
+ 
+diff --git a/DIALOG.C b/DIALOG.C
+index 77a3e00..1a1a645 100644
+--- a/DIALOG.C
++++ b/DIALOG.C
+@@ -11,7 +11,7 @@ char* G0544_pc_THATDISKISWRITEPROTECTED = "THAT DISK IS WRITE-PROTECTED!";
+ char* G0545_pc_THATDISKISUNREADABLE = "THAT DISK IS UNREADABLE.";
+ char* G0546_pc_THATSNOTTHESAMEGAME = "THAT'S NOT THE SAME GAME.";
+ char* G0547_pc_SAVEDGAMEDAMAGED = "SAVED GAME DAMAGED!";
+-char* G0548_pc_PUTTHEGAMESAVEDISKIN = "PUT GAME SAVE DISK IN DRIVE A:";
++char* G0548_pc_PUTTHEGAMESAVEDISKIN = "SAVED GAMES ARE ON DRIVE S:";
+ char* G0549_pc_PUTTHEGAMEDISKIN = "PUT DUNGEON MASTER DISK IN A:";
+ char* G0550_pc_PUTABLANKDISKIN = "PUT A BLANK DISK IN DRIVE A:";
+ char* G0556_pc_LOADSAVEDGAME = "LOAD SAVED GAME";
+diff --git a/FLOPPY.C b/FLOPPY.C
+index 7adf570..5a7eaa0 100644
+--- a/FLOPPY.C
++++ b/FLOPPY.C
+@@ -16,6 +16,7 @@ unsigned int16_t F0452_FLOPPY_GetDiskTypeInDrive_CPSB(
+         REGISTER unsigned char* L1456_puc_Buffer_CPSB;
+ 
+ 
++        return C1_DISK_TYPE_SAVE_DISK_WRITE_ENABLED; /* Mega CD: no floppy. The game files are on the drive DM runs from, and saves go to S: */
+         if (L1455_i_GraphicsDatFileReferenceCountBackup = G0631_i_GraphicsDatFileReferenceCount) {
+                 G0631_i_GraphicsDatFileReferenceCount = 1;
+                 F0478_MEMORY_CloseGraphicsDat_CPSDF();
+diff --git a/IO.C b/IO.C
+index faf0425..53d25ed 100644
+--- a/IO.C
++++ b/IO.C
+@@ -66,6 +66,9 @@ void F0066_MOUSE_Initialize(
+         G0590_i_MousePointerHotspotY = 51;
+         L0049_ps_Kbdvecs = (KBDVECS*)Kbdvbase();
+         L0049_ps_Kbdvecs->mousevec = (void (*)())S0075_MOUSE_Exception70Handler_IKBD_MIDI_MouseStatus;
++        asm {
++                dc.w    0xA00A                  /* Mega CD: Line-A hide mouse. The desktop's pointer is a hardware sprite and would stay on screen over DM's own */
++        }
+ }
+ 
+ 
+diff --git a/LOADSAVE.C b/LOADSAVE.C
+index 7a54aa1..dda9677 100644
+--- a/LOADSAVE.C
++++ b/LOADSAVE.C
+@@ -21,6 +21,7 @@ BOOLEAN F0432_STARTEND_FormatDiskMenu(
+         long L1336_l_ByteCount;
+ 
+ 
++        return C1_TRUE; /* Mega CD: nothing to format. S: is formatted from the desktop */
+         L1330_B_ReadyToFormat = C0_FALSE;
+         L1332_pc_Message = NULL;
+         do {
+@@ -384,7 +385,7 @@ int16_t F0435_STARTEND_LoadGame(
+                                         if ((G0521_i_GameFileHandle = Fopen(G0520_pc_ADMGAMEBAK, C0_READ_ONLY)) >= 0) {
+                                                 L1364_B_LoadBackupGame = C1_TRUE;
+                                         } else {
+-                                                if (!G0523_B_RestartGameRequested && ((G0521_i_GameFileHandle = Fopen("A:\\DUNGEON.FTL", C0_READ_ONLY)) >= 0)) {
++                                                if (!G0523_B_RestartGameRequested && ((G0521_i_GameFileHandle = Fopen("\\DUNGEON.FTL", C0_READ_ONLY)) >= 0)) {
+                                                         L1366_B_FadePalette = C1_TRUE;
+                                                         G0298_B_NewGame = C001_MODE_LOAD_DUNGEON;
+                                                         goto T0435002;
+diff --git a/MEMORY.C b/MEMORY.C
+index 36d8f48..d623139 100644
+--- a/MEMORY.C
++++ b/MEMORY.C
+@@ -304,7 +304,7 @@ void F0477_MEMORY_OpenGraphicsDat_CPSDF(
+         if (G0631_i_GraphicsDatFileReferenceCount++) {
+                 return;
+         }
+-        G0630_i_GraphicsDatFileHandle = Fopen("A:\\GRAPHICS.DAT", C0_READ_ONLY);
++        G0630_i_GraphicsDatFileHandle = Fopen("\\GRAPHICS.DAT", C0_READ_ONLY);
+         if (G0630_i_GraphicsDatFileHandle < 0) {
+                 F0019_MAIN_DisplayErrorAndStop(C41_ERROR_UNABLE_TO_OPEN_GRAPHICS_DAT);
+         }
+diff --git a/PALETTE.C b/PALETTE.C
+index 4811b4a..7918347 100644
+--- a/PALETTE.C
++++ b/PALETTE.C
+@@ -3,6 +3,8 @@
+ #endif
+ overlay "start"
+ 
++unsigned int16_t G9900_aui_Palette_Screen[16]; /* Mega CD: there are no palette registers to read back or write. The screen's colours are this copy, set with Setpalette */
++
+ 
+ 
+ 
+@@ -19,7 +21,11 @@ unsigned int16_t* P0849_pui_TargetColorPalette;
+         long L1379_l_SupervisorStack;
+ 
+ 
+-        L1378_pui_PaletteRegister = (unsigned int16_t*)0xFFFF8240;
++        L1378_pui_PaletteRegister = G9900_aui_Palette_Screen;
++        M526_WaitVerticalBlank();
++        for (L1376_i_Color = 0; L1376_i_Color < 16; L1376_i_Color++) {
++                L1378_pui_PaletteRegister[L1376_i_Color] = Setcolor(L1376_i_Color, -1);
++        }
+         L1379_l_SupervisorStack = Super(0L);
+         for (L1377_i_Counter = 0; L1377_i_Counter < 8; L1377_i_Counter++) {
+                         M526_WaitVerticalBlank();
+@@ -40,7 +46,9 @@ unsigned int16_t* P0849_pui_TargetColorPalette;
+                                 L1374_ui_CurrentRGBColor += 256;
+                         L1378_pui_PaletteRegister[L1376_i_Color] = L1374_ui_CurrentRGBColor;
+                 }
++                Setpalette(L1378_pui_PaletteRegister);
+         }
++        M526_WaitVerticalBlank();
+         Super(L1379_l_SupervisorStack);
+ }
+ 
+diff --git a/READWRIT.C b/READWRIT.C
+index 3bbab1e..ae8bff0 100644
+--- a/READWRIT.C
++++ b/READWRIT.C
+@@ -1,8 +1,8 @@
+ #ifndef COMPILE_H
+ #include "COMPILE.H"
+ #endif
+-char* G0519_pc_ADMGAMEDAT = "A:\\DMGAME.DAT";
+-char* G0520_pc_ADMGAMEBAK = "A:\\DMGAME.BAK";
++char* G0519_pc_ADMGAMEDAT = "S:\\DMGAME.DAT"; /* Mega CD: S: is the cartridge save RAM, or a backup RAM cart */
++char* G0520_pc_ADMGAMEBAK = "S:\\DMGAME.BAK";
+ FILE_HANDLE G0521_i_GameFileHandle; /* Dungeon file or saved game file */
+ long G0522_l_Unreferenced; /* BUG0_00 Useless code */
+ BOOLEAN G0523_B_RestartGameRequested;
+diff --git a/REQDISK.C b/REQDISK.C
+index 39d8457..a733887 100644
+--- a/REQDISK.C
++++ b/REQDISK.C
+@@ -9,6 +9,7 @@ REGISTER BOOLEAN P0845_B_ModalDialog FINAL_SEPARATOR
+ 
+ 
+         L1316_B_NoDialogDrawn = C1_TRUE;
++        return L1316_B_NoDialogDrawn; /* Mega CD: the game files are always there */
+                 L1318_pc_Message = NULL;
+                 while (P0844_B_ForceDialog || F0452_FLOPPY_GetDiskTypeInDrive_CPSB()) {
+                         L1316_B_NoDialogDrawn = P0844_B_ForceDialog = C0_FALSE;
+diff --git a/SOUND.C b/SOUND.C
+index 7cc802d..10fb2b1 100644
+--- a/SOUND.C
++++ b/SOUND.C
+@@ -28,6 +28,7 @@ int16_t          P0086_i_SoundVolume FINAL_SEPARATOR
+         long L0041_l_SupervisorStack;
+ 
+ 
++        return; /* Mega CD: no PSG and no MFP timer A. Sound goes to the PCM chip in a later step */
+         L0038_l_NextSoundSample = (long)P0084_puc_SoundData;
+         L0038_l_NextSoundSample = (L0038_l_NextSoundSample + 2) * 2; /* The first two bytes contain the sample count. There are two samples per byte of sound data */
+         L0039_i_RemainingSoundSampleCount = ((unsigned char)P0084_puc_SoundData[0] << 8) | (unsigned char)P0084_puc_SoundData[1];
+diff --git a/STARTUP1.C b/STARTUP1.C
+index b7dc8e3..d56e638 100644
+--- a/STARTUP1.C
++++ b/STARTUP1.C
+@@ -22,13 +22,47 @@ void F0448_STARTUP1_InitializeMemoryManager_CPSADEF(
+         Supexec(S0059_TOS_SetException257Vector_CriticalError);
+         L1437_l_AvailableHeapMemoryByteCount = Malloc(-1L) - 20;
+         L1443_pc_SupervisorStack = (char*)Super(0L);
++        /* Mega CD: not the GEM region. On an ST, DM takes the memory between
++           os_end and gm_end -- the AES's and the desktop's -- and that is safe
++           only because it also stops Timer C, so nothing of the AES ever runs
++           again. Here the system tick is the gate array's and it keeps
++           calling the AES's timer hook, which would write into whatever DM
++           put there. What this machine has instead is the bulk arena: the
++           PRG-RAM between the end of the C: ramdisk and the servant's scratch,
++           which EmuTOS never allocates. The Sega CD driver says where it is,
++           through the 'SgCD' cookie and SCD_BULK_INFO, and it takes DM's
++           permanent allocations exactly as the GEM region did. */
++        L1438_l_AvailableGEMMemoryBottom = 0;
++        L1439_l_AvailableGEMMemoryByteCount = 0;
+         asm {
+-                movea.l C0x04F2_ADDRESS_SYSTEM_VARIABLE__sysbase,A1     /* Address of the OSHEADER BIOS structure */
+-                move.l  12(A1),L1438_l_AvailableGEMMemoryBottom         /* os_end. Address of the first byte not used by the OS (BIOS/GEMDOS/VDI) */
+-                movea.l 20(A1),A0                                       /* os_magic. Address of the GEM_MUPB structure (GEM memory-usage parameter block) */
+-                move.l  4(A0),L1439_l_AvailableGEMMemoryByteCount       /* gm_end. Address of the end of the memory required by GEM (from the GEM_MUPB) */
++                movea.l 0x05A0,A1                                       /* _p_cookies */
++                move.l  A1,D0
++                beq.s   @T0448092
++        @T0448090:
++                move.l  (A1)+,D0
++                beq.s   @T0448092                                       /* End of the cookie jar: no Sega CD driver */
++                cmpi.l  #0x53674344,D0                                  /* 'SgCD' */
++                beq.s   @T0448091
++                addq.l  #4,A1
++                bra.s   @T0448090
++        @T0448091:
++                movea.l (A1),A1                                         /* struct scd_api */
++                movea.l 8(A1),A1                                        /* control(op, a, b, c) */
++                lea     V0448000_BulkInfo(PC),A0
++                clr.l   -(A7)
++                clr.l   -(A7)
++                move.l  A0,-(A7)                                        /* a: four longs. Arena address and length, then the ramdisk's */
++                move.l  #15,-(A7)                                       /* SCD_BULK_INFO */
++                jsr     (A1)
++                adda.w  #16,A7
++                lea     V0448000_BulkInfo(PC),A0
++                move.l  (A0)+,L1438_l_AvailableGEMMemoryBottom
++                move.l  (A0),L1439_l_AvailableGEMMemoryByteCount
++                bra.s   @T0448092
++        V0448000_BulkInfo:
++                dc.l    0, 0, 0, 0
++        @T0448092:
+         }
+-        L1439_l_AvailableGEMMemoryByteCount -= L1438_l_AvailableGEMMemoryBottom;
+         Super(L1443_pc_SupervisorStack);
+         F0475_MEMORY_Initialize(L1442_pc_HeapMemoryBottom_Useless = (char*)Malloc(L1437_l_AvailableHeapMemoryByteCount), L1437_l_AvailableHeapMemoryByteCount, L1438_l_AvailableGEMMemoryBottom, L1439_l_AvailableGEMMemoryByteCount); /* BUG0_00 Useless code */
+         F0479_MEMORY_ReadGraphicsDatHeader();
