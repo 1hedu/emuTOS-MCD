@@ -108,6 +108,12 @@ static inline void vdp_reg(uint8_t r, uint8_t v)
  * second enable: 0x01 works and 0x03 silently rejects writes. */
 #define CART_DATA_M1 0x200001u
 #define CART_CTL_M1  0xA130F1u
+/* The romdisk: D: on a cartridge boot. A FAT image that tools/build-rom.sh
+ * puts in the ROM at 512 KB, after the payloads, and that the servant
+ * reads a sector at a time for the sub (cart op 11). It has to end below
+ * the save RAM at $200000, which $A130F1 maps over the ROM. */
+#define ROMDISK_ROM  0x080000u
+#define ROMDISK_MAX  ((0x200000u - ROMDISK_ROM) / 512u)
 /* 63 sectors, not 64. The window this project's own ROM header
  * declares is 32 KB (0x200001..0x20FFFF, odd-byte) and boot/m1emu.S
  * keeps the last 512 bytes for its own boot report -- the only thing

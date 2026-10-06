@@ -1,0 +1,170 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 6 Oct 2026 01:25:22 +0000
+Subject: [PATCH 191/192] Sega CD: D: is the romdisk on a cartridge boot
+
+A cartridge boot has no disc, and D: is where the disc build keeps
+vendor/stsoft and the data disc's applications. tools/build-rom.sh now
+puts the same files into the ROM as a FAT image at 512 KB, and D: reads
+it from there, so a program finds its files on D: on either boot.
+
+The sub cannot see the cartridge ROM, so the servant copies a sector at
+a time into the bounce buffer: cart op 11, the S: read with a step of
+one byte instead of two. There is no comm word left to publish a size
+in and none is needed: the volume describes itself, by the OEM field
+this project's builder stamps and the sector count in its BPB, the same
+way C: does.
+
+The servant refuses op 11 on a CD boot and after the cartridge has been
+swapped out, and a refusal leaves the bounce buffer as it was. So the
+probe clears it first, and a refusal reads as no volume rather than as
+whatever the last S: read left there. With no volume, D: is the disc's
+driver exactly as before.
+---
+ bios/segacd.c | 105 +++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 103 insertions(+), 2 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index dc29e98..21e80aa 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -5110,6 +5110,11 @@ static UWORD bram_fs_signature(void)
+     return (UWORD)((bram_rd(0) << 8) | bram_rd(19));
+ }
+ 
++static UWORD romdisk_sectors;   /* D: is the romdisk when this is set */
++static void romdisk_probe(void);
++static LONG romdisk_rw(WORD rw, LONG sector, WORD count, UBYTE *buf);
++static LONG romdisk_ioctl(WORD op, void *arg);
++
+ void segacd_floppy_init(void)
+ {
+     segacd_cdd_init();
+@@ -5135,6 +5140,7 @@ void segacd_floppy_init(void)
+         segacd_event(5);
+     }
+     cart_sectors = CART_CNT_SECTORS;   /* published by the servant at startup */
++    romdisk_probe();
+ 
+     /* Both, now, and not one or the other.
+      *
+@@ -5215,7 +5221,12 @@ LONG segacd_disk_rw(WORD dev, WORD rw, LONG sector, WORD count, UBYTE *buf)
+     case SEGACD_DEV_RAMDISK: return segacd_ramdisk_rw(rw, sector, count, buf);
+     case SEGACD_DEV_BRAM:    return segacd_bram_rw(rw, sector, count, buf);
+ #if CONF_WITH_SEGACD_CD
+-    case SEGACD_DEV_DISC:    return segacd_cd_rw(rw, sector, count, buf);
++    case SEGACD_DEV_DISC:
++        if (romdisk_sectors)
++            return romdisk_rw(rw, sector, count, buf);
++        return segacd_cd_rw(rw, sector, count, buf);
++#else
++    case SEGACD_DEV_DISC:    return romdisk_rw(rw, sector, count, buf);
+ #endif
+ #if CONF_WITH_SEGACD_CART
+     case SEGACD_DEV_CART:    return segacd_cart_rw(rw, sector, count, buf);
+@@ -5230,7 +5241,12 @@ LONG segacd_disk_ioctl(WORD dev, WORD op, void *arg)
+     case SEGACD_DEV_RAMDISK: return segacd_ramdisk_ioctl(op, arg);
+     case SEGACD_DEV_BRAM:    return segacd_bram_ioctl(op, arg);
+ #if CONF_WITH_SEGACD_CD
+-    case SEGACD_DEV_DISC:    return segacd_cd_ioctl(op, arg);
++    case SEGACD_DEV_DISC:
++        if (romdisk_sectors)
++            return romdisk_ioctl(op, arg);
++        return segacd_cd_ioctl(op, arg);
++#else
++    case SEGACD_DEV_DISC:    return romdisk_ioctl(op, arg);
+ #endif
+ #if CONF_WITH_SEGACD_CART
+     case SEGACD_DEV_CART:    return segacd_cart_ioctl(op, arg);
+@@ -5542,6 +5558,91 @@ LONG segacd_cart_ioctl(WORD op, void *arg)
+     return ERR;
+ }
+ 
++/******************************************************************************/
++/* D: on a cartridge boot -- the romdisk                                      */
++/******************************************************************************/
++
++/* A cartridge boot has no disc, and D: is where the disc build keeps its
++ * programs: vendor/stsoft, the data disc's applications. So on a cart
++ * the same files go into the ROM instead, as a FAT image that
++ * tools/build-rom.sh appends at 512 KB, and D: reads them from there. A
++ * program finds them on D: on either boot and never has to know which
++ * one it got.
++ *
++ * The main CPU can see the ROM and the sub cannot, so the servant copies
++ * a sector at a time into the bounce buffer: cart op 11, the S: read
++ * with a step of one byte instead of two. There is no comm word left to
++ * publish a size in, and none is needed. The volume describes itself,
++ * the same way C: does: the OEM field this project's builder stamps,
++ * and the sector count in the BPB.
++ *
++ * The servant refuses op 11 on a CD boot and after the cartridge has
++ * been swapped out, and a refusal leaves the bounce buffer as it was.
++ * So the buffer is cleared before asking, and a refusal reads as no
++ * volume rather than as whatever the last S: read left there. */
++#define ROMDISK_MAX_SECTORS 3072    /* 0x080000..0x200000, under the save RAM */
++
++static void romdisk_probe(void)
++{
++    volatile UBYTE *b = BOUNCE;
++    UWORD n;
++    int i;
++
++    romdisk_sectors = 0;
++    for (i = 0; i < 40; i++)
++        b[i] = 0;
++    if (cart_xfer(11, 0) != E_OK)
++        return;
++    if (b[2] != 'E' || b[3] != 'm' || b[4] != 'u' || b[5] != 'T')
++        return;
++    if (b[11] != 0x00 || b[12] != 0x02)     /* 512 bytes per sector */
++        return;
++    n = (UWORD)(b[19] | (b[20] << 8));
++    if (n == 0 || n > ROMDISK_MAX_SECTORS)
++        return;
++    romdisk_sectors = n;
++}
++
++static LONG romdisk_rw(WORD rw, LONG sector, WORD count, UBYTE *buf)
++{
++    if (!romdisk_sectors)
++        return EUNDEV;
++    if (rw & RW_WRITE)
++        return EWRPRO;
++    if (sector < 0 || sector + count > romdisk_sectors)
++        return ESECNF;
++
++    while (count--) {
++        if (cart_xfer(11, (UWORD)sector) != E_OK)
++            return EREADF;
++        memcpy(buf, (const void *)BOUNCE, SECTOR_SIZE);
++        buf += SECTOR_SIZE;
++        sector++;
++    }
++    return E_OK;
++}
++
++static LONG romdisk_ioctl(WORD op, void *arg)
++{
++    ULONG *info = (ULONG *)arg;
++
++    if (!romdisk_sectors)
++        return EUNDEV;
++
++    switch (op) {
++    case GET_DISKINFO:
++        info[0] = romdisk_sectors;
++        info[1] = SECTOR_SIZE;
++        return E_OK;
++    case GET_DISKNAME:
++        strcpy((char *)arg, "RomDisk");
++        return E_OK;
++    case GET_MEDIACHANGE:
++        return MEDIANOCHANGE;
++    }
++    return ERR;
++}
++
+ /******************************************************************************/
+ /* Keyboard                                                                   */
+ /******************************************************************************/

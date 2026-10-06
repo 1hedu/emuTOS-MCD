@@ -72,7 +72,7 @@ for inc in $(grep -o '\.incbin[[:space:]]*"[^"]*"' "$SRC" 2>/dev/null \
     # without it grep prints "binary file matches" instead of the match
     # and the name comes back empty. The version of this line that only
     # asked -q was right by accident; this one has to be told.
-    hit=$(grep -aoE "SDIAGAUT|PALTEST|SHOWAUT|EDITAUT|NATAUT|PRNTAUT|SONICAUT|DDISKAUT|BRAMAUT|BRAMRWAU|FMTIAUTO" \
+    hit=$(grep -aoE "SDIAGAUT|PALTEST|SHOWAUT|EDITAUT|NATAUT|PRNTAUT|SONICAUT|DDISKAUT|BRAMAUT|BRAMRWAU|FMTIAUTO|ROMDAUTO" \
             "$d/$inc" | head -1 || true)
     if [[ -n "$hit" ]]; then
       echo "$inc carries $hit, which is emulator-only and must not reach" >&2
@@ -89,10 +89,52 @@ m68k-elf-as -m68000 --register-prefix-optional \
 m68k-elf-ld -Ttext 0x0 --oformat binary -o "$OUT" "$B/boot.o" "$B/rom.o"
 rm -f "$B/rom.o" "$B/boot.o"
 
-python3 - "$OUT" <<'PY'
+# The romdisk: D: on a cartridge boot.
+#
+# The disc build puts two drop folders on D: -- vendor/stsoft/ for
+# ordinary Atari ST programs and DDISK_DIR for this project's own
+# applications -- and a cartridge has no disc. So the EmuTOS loader's ROM
+# carries the same files as a FAT image at 512 KB, after the payloads,
+# and the servant reads it for D: a sector at a time (docs/ports.md).
+# Only for m1emu.S, the one ROM that boots EmuTOS, and only when there is
+# something to put in it: a ROM built from empty folders is the same ROM
+# it always was.
+ROMDISK=""
+if [[ "$(basename "$SRC")" = m1emu.S ]]; then
+  RDADD=()
+  for dir in "$ROOT/vendor/stsoft" ${DDISK_DIR:+"$DDISK_DIR"}; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r -d '' f; do
+      bn=$(basename "$f")
+      [[ "$bn" = README.md ]] && continue
+      bn=$(echo "$bn" | tr '[:lower:]' '[:upper:]')
+      RDADD+=(--add "$f:$bn")
+    done < <(find "$dir" -maxdepth 1 -type f -print0 | sort -z)
+  done
+  if (( ${#RDADD[@]} )); then
+    ROMDISK="$B/ROMDISK.IMG"
+    # Smallest image that holds them, in 16 KB steps. mkfat says "image
+    # full" rather than guessing, so the size is found by asking it.
+    # 0x180000 is everything between 512 KB and the save RAM at 2 MB.
+    rdsize=0x8000
+    until python3 "$ROOT/tools/mkfat.py" "$ROMDISK" --size "$rdsize" \
+            --label ROMDISK --oem EmuTOSMD "${RDADD[@]}" >/dev/null 2>&1; do
+      rdsize=$(( rdsize + 0x4000 ))
+      if (( rdsize > 0x180000 )); then
+        echo "the romdisk files need more than 1.5 MB: they cannot sit" >&2
+        echo "between the payloads and the save RAM at 0x200000" >&2
+        exit 1
+      fi
+    done
+    echo "romdisk: $(( ${#RDADD[@]} / 2 )) file(s), $rdsize bytes"
+  fi
+fi
+
+python3 - "$OUT" "$ROMDISK" <<'PY'
 import sys, os
 p = sys.argv[1]
 d = bytearray(open(p, 'rb').read())
+romdisk = sys.argv[2] if len(sys.argv) > 2 else ''
 if len(d) < 0x200:
     raise SystemExit("ROM is %d bytes: the header did not assemble" % len(d))
 if d[0x100:0x104] != b'SEGA':
@@ -110,6 +152,17 @@ d[0x1B0:0x1BC] = (b'RA' + bytes([0xF8, 0x20])
                   + (0x0020FFFF).to_bytes(4, 'big'))
 if d[0x1B0:0x1B2] != b'RA':
     raise SystemExit("no RA save declaration at 0x1B0")
+# The romdisk goes at exactly 512 KB: the servant reads it from
+# ROMDISK_ROM in iofw/hw.h, and EmuTOS finds it by its own boot sector.
+if romdisk:
+    if len(d) > 0x80000:
+        raise SystemExit("the loader is %d bytes: no room for the romdisk "
+                         "at 0x80000" % len(d))
+    d += b'\xFF' * (0x80000 - len(d))
+    d += open(romdisk, 'rb').read()
+    if len(d) > 0x200000:
+        raise SystemExit("ROM is %d bytes: past the save RAM at 0x200000"
+                         % len(d))
 # Pad up to a power of two, minimum 32 KB.
 #
 # The first attempt at this added two paddings together and produced

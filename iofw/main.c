@@ -2305,7 +2305,14 @@ static void cart_service(void)
         return;
     }
     lba = VU16(GA_CART_LBA);
-    if (!cart_sectors || lba >= cart_sectors) { cart_last_seq = seq;
+    /* op 11, the romdisk: a sector of cartridge ROM, read through the
+     * same loop as S: with a step of one byte instead of two. Only on a
+     * Mode 1 boot whose cartridge is still in the slot; anything else is
+     * acknowledged with the bounce buffer untouched, and the sub, which
+     * cleared it before asking, finds no volume there. */
+    if (op == 11 ? (VU32(M1_FLAG) != M1_MAGIC || cart_swapped
+                    || lba >= ROMDISK_MAX)
+                 : (!cart_sectors || lba >= cart_sectors)) { cart_last_seq = seq;
         VU16(GA_CART_ACK) = seq;   /* word write: sub reads the low byte */ return; }
 
     bounce = (volatile uint8_t *)(PRG_WINDOW + BOUNCE_WOFF);
@@ -2325,9 +2332,17 @@ static void cart_service(void)
         }
         cart_write_enable(0);
     } else {                                      /* read: cart -> bounce */
+        uint32_t step = 2;
+
+        cart += base * 2;
+        if (op == 11) {
+            cart = (volatile uint8_t *)(ROMDISK_ROM + base);
+            step = 1;
+        }
         for (i = 0; i < 512; i++) {
             if (!(i & 127)) uart_poll();
-            bounce[i] = cart[(base + i) * 2];
+            bounce[i] = *cart;
+            cart += step;
         }
     }
     cart_last_seq = seq;

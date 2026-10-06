@@ -18,7 +18,7 @@ An Atari ST desktop on a Mega CD, booting from CD-R or cartridge.
 | | |
 |---|---|
 | `C:` | ramdisk, system drive |
-| `D:` | the disc (disc boot only) |
+| `D:` | the disc, or on a cartridge the romdisk: the same files, in ROM |
 | `I:` | internal backup RAM, 8 KB |
 | `S:` | cartridge save RAM or CD Backup RAM Cart |
 

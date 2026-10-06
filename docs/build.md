@@ -77,6 +77,17 @@ boot forever, which on a television is a console that does some test
 instead of booting -- which is exactly how it was reported the one time
 such a build reached hardware.
 
+**The romdisk.** A cartridge has no disc, so `build-rom.sh` gives it
+the files a disc keeps on D:. Whatever is in `vendor/stsoft/` (and in
+`DDISK_DIR`, when that is set) goes into a FAT image in the ROM at
+512 KB, after the payloads, and EmuTOS mounts it as D:. A program put in
+`vendor/stsoft/` is therefore on D: on either boot. The image is sized to
+its files in 16 KB steps and can be at most 1.5 MB, because the save RAM
+is mapped over the ROM from 2 MB. An empty `vendor/stsoft/` builds the
+same ROM as before. The servant reads it a sector at a time for the sub
+(cart op 11), and EmuTOS only uses it when sector 0 carries the stamp
+this builder writes, so a disc boot's D: is still the disc.
+
 ## Running it
 
 On hardware: burn the `.cue`/`.iso` pair, or flash `m1emu.bin` to a
@@ -113,7 +124,7 @@ are the ones worth knowing:
 | `DIAG=1` | the diagnostic programs on C: and D: |
 
 The rest — `NOASK`, `PALTEST`, `SHOWAUTO`, `EDITAUTO`, `NATAUTO`,
-`PRNAUTO`, `DDAUTO`, `BRAMAUTO`, `BRAMRW`, `FMTIAUTO`, `ACCAUTO`,
+`PRNAUTO`, `DDAUTO`, `ROMDAUTO`, `BRAMAUTO`, `BRAMRW`, `FMTIAUTO`, `ACCAUTO`,
 `HELLOA`, `AUDIT`, `CDDTEST` — build programs into `AUTO` that run
 before the desktop and then hold, so a headless emulator run exercises
 one path without a hand on the pad. They are emulator-only, by name, in

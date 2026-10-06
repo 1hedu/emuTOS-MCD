@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 26 Aug 2026 22:22:56 +0000
-Subject: [PATCH 190/190] Sega CD: there is no warm boot here, so stop
+Subject: [PATCH 190/192] Sega CD: there is no warm boot here, so stop
  pretending there is
 
 Every start reads the whole OS image off the disc or out of the
@@ -22,7 +22,6 @@ every boot is.
 
 Splash and desktop unchanged in the emulator, which was always taking
 the cold path: cart splash 8d837bd972e1f693, desktop 856ffb907a9819f6.
-
 ---
  bios/memory.S | 14 ++++++++++++++
  1 file changed, 14 insertions(+)

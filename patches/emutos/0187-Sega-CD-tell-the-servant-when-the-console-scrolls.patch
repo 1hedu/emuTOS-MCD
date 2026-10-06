@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 26 Aug 2026 07:29:22 +0000
-Subject: [PATCH 187/190] Sega CD: tell the servant when the console scrolls
+Subject: [PATCH 187/192] Sega CD: tell the servant when the console scrolls
 
 scroll_up(0) memmoves the whole bitmap up one character cell and blanks
 the bottom one. On an ST that is the cheapest thing the console does;
@@ -22,7 +22,6 @@ not move, which the servant reads as "no scroll".
 
 Measured, one scroll at a time with full-width text: 715 tiles converted
 per scrolled line before, 275 after.
-
 ---
  bios/conout.c | 14 ++++++++++++++
  bios/segacd.c | 40 ++++++++++++++++++++++++++++++++++++++++

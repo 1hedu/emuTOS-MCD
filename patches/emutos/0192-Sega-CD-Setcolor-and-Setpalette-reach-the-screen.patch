@@ -1,0 +1,147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 6 Oct 2026 01:25:30 +0000
+Subject: [PATCH 192/192] Sega CD: Setcolor and Setpalette reach the screen
+
+There are no palette registers on this side of the machine. The servant
+keeps the sixteen colours in CRAM and takes new ones from the block just
+past the framebuffer that SHOW.PRG was the first to write. Until now
+that block was the only way in: Setcolor returned zero and Setpalette
+left colorptr set forever, so a program that set its colours the way
+TOS says to got the desktop's.
+
+Both calls now go through a copy of the palette and reach the block from
+the VBL. Only a real change is published, and the copy starts out as the
+sixteen the servant loads at boot -- which are exactly what the VDI's
+init_colors() sets, entry for entry -- so the desktop is untouched: the
+CD boot's desktop frame is byte-identical with and without this change.
+Setpalette is taken at the VBL, as on an ST, and the VBL is what writes
+the block, so a program's own VBL routine can change colours every
+frame. Dungeon Master is the first program that needs it.
+---
+ bios/screen.c |  2 ++
+ bios/segacd.c | 78 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ bios/segacd.h |  1 +
+ 3 files changed, 81 insertions(+)
+
+diff --git a/bios/screen.c b/bios/screen.c
+index 8e3e9eb..0f1ccef 100644
+--- a/bios/screen.c
++++ b/bios/screen.c
+@@ -1244,6 +1244,8 @@ WORD setcolor(WORD colorNum, WORD color)
+ {
+ #ifdef MACHINE_AMIGA
+     return amiga_setcolor(colorNum, color);
++#elif defined(MACHINE_SEGACD)
++    return segacd_setcolor(colorNum, color);
+ #elif CONF_WITH_ATARI_VIDEO
+     return atari_setcolor(colorNum, color);
+ #else
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 21e80aa..3a76f04 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -78,6 +78,83 @@ const UBYTE *segacd_physbase(void)
+     return logbase();
+ }
+ 
++/* Setcolor and Setpalette.
++ *
++ * There are no palette registers on this side of the machine. The
++ * servant keeps the sixteen colours in CRAM and takes new ones from a
++ * block just past the framebuffer -- "PAL!", a generation, and sixteen
++ * 0x0RGB words -- which SHOW.PRG was the first to write. Until now that
++ * block was the only way in: Setcolor returned zero and Setpalette left
++ * colorptr set forever, so a program that set its colours the way TOS
++ * says to got the desktop's.
++ *
++ * Both calls now go through a copy of the palette and reach the block.
++ * Only a real change is published, and the copy starts out as the
++ * sixteen the servant loads at boot, so the VDI setting its defaults at
++ * startup -- the same sixteen -- leaves the screen exactly as it was.
++ * Setpalette is taken from the VBL, as on an ST, and it is the VBL that
++ * writes the block, so a program's own VBL routine can change colours
++ * every frame. */
++static UWORD scd_pal[16] = {
++    0x777, 0x700, 0x070, 0x770, 0x007, 0x707, 0x077, 0x555,
++    0x333, 0x733, 0x373, 0x773, 0x337, 0x737, 0x377, 0x000
++};
++static UBYTE scd_pal_dirty;
++
++struct scd_palblock {
++    UWORD magic0, magic1;       /* "PA" "L!" */
++    UWORD gen;
++    UWORD colour[16];
++};
++
++/* The generation is the block's own plus one, written last, so the
++ * servant can never take a half-written palette. */
++static void scd_pal_publish(void)
++{
++    struct scd_palblock *pb =
++        (struct scd_palblock *)(v_bas_ad + 32000UL);
++    int i;
++
++    for (i = 0; i < 16; i++)
++        pb->colour[i] = scd_pal[i];
++    pb->magic0 = 0x5041;
++    pb->magic1 = 0x4C21;
++    pb->gen++;
++    scd_pal_dirty = 0;
++}
++
++WORD segacd_setcolor(WORD colorNum, WORD color)
++{
++    WORD old;
++
++    colorNum &= 0x000f;
++    old = (WORD)scd_pal[colorNum];
++    if (color >= 0 && (UWORD)(color & 0x0777) != scd_pal[colorNum]) {
++        scd_pal[colorNum] = (UWORD)(color & 0x0777);
++        scd_pal_dirty = 1;
++    }
++    return old;
++}
++
++static void scd_pal_vbl(void)
++{
++    const UWORD *p = colorptr;
++    int i;
++
++    if (p) {
++        colorptr = NULL;
++        for (i = 0; i < 16; i++) {
++            UWORD c = (UWORD)(p[i] & 0x0777);
++            if (c != scd_pal[i]) {
++                scd_pal[i] = c;
++                scd_pal_dirty = 1;
++            }
++        }
++    }
++    if (scd_pal_dirty)
++        scd_pal_publish();
++}
++
+ /******************************************************************************/
+ /* CD drive (CDD), BIOS-free                                                  */
+ /******************************************************************************/
+@@ -4527,6 +4604,7 @@ void segacd_int_2_c(void)
+      * lives there. */
+     *(volatile UWORD *)0xFF8020 = (UWORD)(((ULONG)v_bas_ad) >> 8);
+ 
++    scd_pal_vbl();
+     int_vbl();
+ }
+ 
+diff --git a/bios/segacd.h b/bios/segacd.h
+index c35924e..5fd0c1b 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -23,6 +23,7 @@
+ void segacd_screen_init(void);
+ void segacd_setphys(const UBYTE *addr);
+ const UBYTE *segacd_physbase(void);
++WORD segacd_setcolor(WORD colorNum, WORD color);
+ 
+ /* System timer (gate array INT3) */
+ void segacd_init_system_timer(void);

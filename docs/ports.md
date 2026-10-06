@@ -150,28 +150,26 @@ payload in a 512 KB image (`docs/mode1.md`), and a Mode 1 cart can map
 `$200000`, and about 1.6 MB of space is free there. Both DM files fit
 several times over.
 
-The way in is a read-only drive backed by ROM. The servant already
-serves S: one 512-byte sector at a time (`GA_CART_REQ` op 1, cart ->
-bounce buffer). A ROM drive is the same op with a different source:
-bytes in a row from a fixed ROM offset, rather than every other byte of
-save RAM. On the sub side it is another block device, next to I: and S:.
+So the cartridge now has a D: of its own: the romdisk (`docs/build.md`).
+Every file in `vendor/stsoft/` goes on D: on both boots. On the disc
+it is part of the disc's filesystem; on the cartridge it is a FAT image
+in the ROM at 512 KB, which the servant reads a sector at a time for the
+sub. That is cart op 11: the S: read loop with a step of one byte
+instead of two, which cost 40 of the servant's 152 free bytes. DM is an
+ordinary program here: it and its two data files go in `vendor/stsoft/`,
+and DM reads them from the drive it was started from, whichever boot
+that was.
 
-A cache miss then costs a ROM copy with no seek, so the cartridge build
-can play DM better than the disc. It can also be tested in emulation:
-gpgx boots a Mode 1 cart with no disc, which is exactly this setup.
+On the cartridge a cache miss costs a ROM copy with no seek, so the
+cartridge build can play DM better than the disc. Verified in gpgx: an
+AUTO test (`ROMDAUTO=1`) lists D: on a cart boot and reads a file back
+from the ROM. The disc boot's desktop is byte-identical with and without
+the change.
 
-Three costs:
-
-- **Servant space.** `iofw.bin` has 152 bytes free under the `0xFF7000`
-  cache, as of the last commit. The ROM read has to share the loop the
-  S: read already uses (a source pointer and a step of 1 or 2), not add
-  a second copy of it.
-- **`build-rom.sh`.** It has to append the user's two files to the image
-  and record where they start, and only when the user supplies them. A
-  ROM built without them has no ROM drive.
-- **A smaller C: in cart builds.** The ramdisk is all of C:, so
-  anything DM writes to C: comes out of that 112 KB. Saves therefore go
-  to S:, which is there on both boots.
+Saves go to S:, which is there on both boots: the cart's own save RAM on
+a cartridge, a backup RAM cart on a disc. The cartridge's save RAM is 63
+sectors, and a DM save carries the whole dungeon state. Whether it fits
+there has to be measured against real data files.
 
 ### The screen
 
@@ -191,14 +189,20 @@ of either goes into the repository.
 
 ### Order of work
 
-1. Compile the extracted S12E sources with `m68k-elf-gcc -mshort`. The
-   Megamax-isms to convert are K&R parameter lists, `asm { }` blocks,
-   `overlay "..."` and `HUGE`. Link against `progs/tosbind.S` plus the
-   handful of XBIOS calls it lacks.
-2. Run it in the emulator from a disc boot with the data on D:, sound
-   stubbed and the palette redirected, up to the title and the entrance.
-3. The ROM drive: the servant op, the block device, `build-rom.sh`
-   appending the data. Then the same run from `m1emu.bin` in gpgx.
+1. ~~Build the extracted S12E sources.~~ **Done, with Megamax C itself.**
+   ReDMCSB ships the Megamax compiler and linker, a command shell and a
+   shutdown program, and its own build runs them under Hatari. Hatari
+   runs on Linux too, with the EmuTOS image ReDMCSB carries as its TOS,
+   so the original toolchain builds DM 1.2 headless in about two
+   minutes. Nothing has to be translated to gcc. That matters because
+   about 3000 lines of DM are inline assembly in Megamax's syntax. The
+   output is not byte-identical to ReDMCSB's reference binary, and
+   ReDMCSB's own spreadsheet lists this executable as "Wrong compiler
+   version". The version reduction is exact: each file preprocesses the
+   same as the full tree.
+2. ~~The romdisk.~~ **Done**, see above.
+3. Patch DM for this machine (the hardware table above) and run it from
+   both boots with sound stubbed, up to the title and the entrance.
 4. Alt-RAM as the permanent region; count cache misses on a walk
    through level 1, on both boots.
 5. Sound on the PCM chip.

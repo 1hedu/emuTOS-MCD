@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 26 Aug 2026 20:54:39 +0000
-Subject: [PATCH 189/190] Sega CD: start window items on the tile grid, and
+Subject: [PATCH 189/192] Sega CD: start window items on the tile grid, and
  stop repainting the info line
 
 Two things the ring could not pay for on its own.
@@ -32,7 +32,6 @@ with. The reason it is not more is that a window of icons is mostly
 white, and moving white over white changes no bytes at all -- the diff
 was already skipping most of the window before any of this. What is left
 is the newly exposed row of icons, which is genuinely new pixels.
-
 ---
  desk/deskwin.c | 77 ++++++++++++++++++++++++++++++++++++++++++++++++--
  1 file changed, 74 insertions(+), 3 deletions(-)

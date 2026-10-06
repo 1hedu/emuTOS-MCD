@@ -222,6 +222,9 @@ if [[ -z "$PAYLOAD" ]]; then
     # What Sega's own Backup RAM manager sees. Read-only.
     [[ -n "${BRAMAUTO:-}" ]] && prg "$ROOT/progs/bramtest.c" BRAMAUT.PRG -DBRAM_AUTO=1
     [[ -n "${DIAG:-}" ]]     && prg "$ROOT/progs/bramtest.c" BRAMTEST.PRG
+    # D: on a cartridge is the romdisk; this lists it and reads a file
+    # back. Emulator-only, like the rest. See progs/romdisk.c.
+    [[ -n "${ROMDAUTO:-}" ]] && prg "$ROOT/progs/romdisk.c" ROMDAUTO.PRG -DROMD_AUTO=1
     # D: read + verify, bounded, from AUTO. See progs/diskmark.c.
     [[ -n "${DDAUTO:-}" ]]   && prg "$ROOT/progs/diskmark.c" DDISKAUT.PRG \
                                    -DDISKMARK_AUTO="${DDAUTO_BYTES:-262144}"
@@ -437,6 +440,7 @@ TXT
     [[ -n "${HELLOA:-}" ]] && CADD+=(--add "$B/HELLO.MDP:HELLO.MDP")
     [[ -n "${PRNAUTO:-}" ]] && CADD+=(--add "$B/PRNTAUTO.PRG:AUTO/PRNTAUT.PRG")
     [[ -n "${DDAUTO:-}" ]] && CADD+=(--add "$B/DDISKAUT.PRG:AUTO/DDISKAUT.PRG")
+    [[ -n "${ROMDAUTO:-}" ]] && CADD+=(--add "$B/ROMDAUTO.PRG:AUTO/ROMDAUTO.PRG")
     [[ -n "${BRAMAUTO:-}" ]] && CADD+=(--add "$B/BRAMAUT.PRG:AUTO/BRAMAUT.PRG")
     [[ -n "${BRAMRW:-}" ]] && CADD+=(--add "$B/BRAMRWAU.PRG:AUTO/BRAMRWAU.PRG")
     [[ -n "${FMTIAUTO:-}" ]] && CADD+=(--add "$B/FMTIAUTO.PRG:AUTO/FMTIAUTO.PRG")
