@@ -1,0 +1,89 @@
+0|EXT_GET_1ST_DIR_ENTRY|iconedit headedit topdesk textgrabber topdesk_mod9 geogif geodebug 
+1|EXT_GET_NXT_DIR_ENTRY|iconedit headedit topdesk textgrabber topdesk_mod9 geogif geodebug 
+2|EXT_SET_DIR_NUM|topdesk_mod9 
+3|EXT_SOUND_BOOT|synth topdesk_mod3 
+4|EXT_SOUND_WRITE|synth topdesk_mod3 
+5|EXT_UNDELETE_FILE|desktop_mod1 
+6|EXT_SET_ALARM|
+7|EXT_SET_PROTECTION|
+8|EXT_PRINT_SCREEN|selftest_print 
+9|EXT_BUILD_COMPOSITE|topdesk autoexec_test 
+10|EXT_RS232_OPEN|serialkbd terminal 
+11|EXT_RS232_CLOSE|serialkbd terminal 
+12|EXT_RS232_GET|terminal 
+13|EXT_RS232_PUT|terminal 
+14|EXT_RS232_AVAIL|terminal 
+15|EXT_BASIC_RUN|basic selftest_basic 
+16|EXT_ASM_ASSEMBLE|geoprog selftest_link selftest_asm selftest_asm65 
+17|EXT_ASM_LINK|geoprog selftest_asm 
+18|EXT_ASM_WRITE_REL|selftest_link selftest_asm 
+19|EXT_LINK_MODULES|selftest_link 
+20|EXT_DBG_ARM|geodebug selftest_dbg 
+21|EXT_DBG_DISARM|geodebug selftest_dbg 
+22|EXT_DBG_BP_SET|geodebug selftest_dbg 
+23|EXT_DBG_BP_CLEAR|selftest_dbg 
+24|EXT_DBG_BP_CLEAR_ALL|geodebug selftest_dbg 
+25|EXT_DBG_ENTER|geodebug selftest_dbg 
+26|EXT_DBG_RESUME|selftest_dbg 
+27|EXT_DBG_CONTINUE|geodebug selftest_dbg 
+28|EXT_LINK_COMMAND|selftest_link 
+29|EXT_DBG_LOAD_SYMS|geodebug selftest_dbg 
+30|EXT_DBG_SYM_NAME|geodebug selftest_dbg 
+31|EXT_DBG_SYM_VALUE|geodebug selftest_dbg 
+32|EXT_VIDEO_RESTORE|nongeos 
+33|EXT_PAINT_UNPACK|geogif_ui.inc geopaint 
+34|EXT_PAINT_PACK|geogif geopaint 
+35|EXT_PAINT_UNIFORM|
+36|EXT_GIF_OPEN|geogif_convert.inc 
+37|EXT_GIF_ROW|geogif_convert.inc 
+38|EXT_GIF_DITHER_ROW|geogif_convert.inc 
+39|EXT_FP_FIN|calc 
+40|EXT_FP_FOUT|calc 
+41|EXT_FP_ADD|calc 
+42|EXT_FP_SUB|calc 
+43|EXT_FP_MUL|calc 
+44|EXT_FP_DIV|calc 
+45|EXT_FP_CMP|
+46|EXT_SONIC_RUN|sonic 
+47|EXT_START_MOVE_FRAME|topdesk_m8.inc ruler 
+48|EXT_MOVE_FRAME_WAIT|ruler 
+49|EXT_INV_FRAME|topdesk_m8.inc 
+50|EXT_SPEED_FRAME|topdesk_m8.inc 
+51|EXT_MAX_TEXT_WIN|
+52|EXT_SET_TEXT_WIN|topdesk 
+53|EXT_RESTORE_TEXT_WIN|topdesk 
+54|EXT_APPLY_PREFS|topdesk prefs 
+55|EXT_Z80_SCRATCH_OUT|geowrite 
+56|EXT_Z80_SCRATCH_IN|geowrite 
+57|EXT_Z80_SCRATCH_CLAIM|geowrite geopaint 
+58|EXT_Z80_SCRATCH_RELEASE|geowrite geopaint 
+59|EXT_SOUND_STOP|topdesk_mod3 
+60|EXT_TEXT_PAINT|basic 
+61|EXT_BASIC_ENTER|topdesk desktop_mod4 
+62|EXT_GBDBG_LOAD|basic 
+63|EXT_GBDBG_CLEAR_BRK|basic 
+64|EXT_GB_ADD_OBJECT|basic 
+65|EXT_GB_SET_OBJECTS|basic 
+66|EXT_COLOUR_BACKUP|geopaint 
+67|EXT_COLOUR_WRITE|geoclock geopaint 
+68|EXT_COLOUR_READ|geoclock geopaint 
+69|EXT_COLOUR_SPAN|geopaint 
+70|EXT_PRINT_PAGE_BEGIN|printdrv 
+71|EXT_PRINT_BAND|printdrv 
+72|EXT_PRINT_PAGE_END|printdrv 
+73|EXT_PRINT_DRIVER_LOAD|geowrite_mod7 topdesk printit scrapit_out_printer selftest_print 
+74|EXT_PRINT_SCREEN_PAGE|geowrite_mod7 topdesk printit 
+75|EXT_PRINT_SCREEN_PAGE_X2|
+76|EXT_PRINT_TEXT_BEGIN|printdrv 
+77|EXT_PRINT_TEXT_LINE|printdrv 
+78|EXT_PRINT_TEXT_END|printdrv 
+79|EXT_FONT_LOAD|geowrite 
+80|EXT_FONT_SCAN|geowrite 
+81|EXT_FONT_FIND|geowrite 
+82|EXT_FONT_SIZES|geowrite 
+83|EXT_FONT_IDS_SLOT|fontswap 
+84|EXT_FOLLOW_CHAIN|combiner 
+85|EXT_ALLOC_ONE_BLOCK|iconedit desktop_mod3 topdesk_mod9 terminal desktop_ops.inc 
+86|EXT_COLOUR_ADDR|geopaint 
+87|EXT_POP_MOUSE_EDGE|scrapit 
+88|EXT_SPRITE_COLOUR|photomgr 
