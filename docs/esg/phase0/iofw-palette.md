@@ -1,4 +1,4 @@
-# ESC64 phase 0 — iofw feasibility (C64! palette rectangles)
+# ESG phase 0 — iofw feasibility (C64! palette rectangles)
 
 ## Re-measured on the dev branch
 

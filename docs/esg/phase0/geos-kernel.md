@@ -1,4 +1,4 @@
-# ESC64 phase 0: GEOS-Genesis kernel feasibility audit (read-only)
+# ESG phase 0: GEOS-Genesis kernel feasibility audit (read-only)
 
 Source: `/home/user/geos-genesis` (not modified). Build copy: a scratch copy
 (the `.git` and `.toolchain/` directories were left out). Tools used: `m68k-linux-gnu-{as,ld,objdump,nm}` 2.38.

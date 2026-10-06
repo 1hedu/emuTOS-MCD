@@ -1,4 +1,4 @@
-# ESC64 — the EmuTOS Subsystem for Commodore 64
+# ESG — the EmuTOS Subsystem for GEOS
 
 GEOS-Genesis (`1hedu/GEOS-genesis`) as a subsystem of EmuTOS, the way
 Linux is one of Windows under WSL. EmuTOS is the host; GEOS is the
@@ -17,7 +17,7 @@ There are two shapes, and both get built, cartridge first:
 
 ## Cartridge (WSL2)
 
-| WSL2 | ESC64, cartridge |
+| WSL2 | ESG, cartridge |
 |---|---|
 | the Linux kernel in its VM | GEOS-Genesis on the Genesis 68000, with its own VDP presenter, pads, sound and sprites |
 | the Windows host | EmuTOS on the Mega CD 68000 |
@@ -67,7 +67,7 @@ hardware. The GEOS kernal is assembled as a TOS program on the Mega CD
 sub 68000, and its calls are answered through GEMDOS, AES and VDI. The
 Genesis main CPU stays iofw's.
 
-| WSL | ESC64 |
+| WSL | ESG |
 |---|---|
 | lxcore.sys | GEOSCORE: `src/kernal/` reassembled, `src/genesis/` replaced by a TOS layer |
 | Linux syscalls | the native API gate, fixed at `$020000` |
@@ -237,6 +237,6 @@ None of these are fixed here.
    `EMUDESK.INF`; the programs and README are on D: and R:. That frees
    64 KB at `$6C000` — the sub-side screen buffers for the cartridge,
    a second GEOS instance for the disc.
-3. ESC64 lives in this repository.
+3. ESG lives in this repository.
 4. For the disc: the gate at `$20000` is claimed by `GEOS.PRG` itself,
    at no cost to a boot that never runs GEOS.

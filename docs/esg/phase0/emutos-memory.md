@@ -1,4 +1,4 @@
-# ESC64 Phase 0 — can sub $020000-$020FFF be kept free under emuTOS-MCD?
+# ESG Phase 0 — can sub $020000-$020FFF be kept free under emuTOS-MCD?
 
 Short answer: **yes.** Nothing fixed lives in $20000-$20FFF. That range is
 ordinary GEMDOS TPA, and the address can be reserved for certain with a few

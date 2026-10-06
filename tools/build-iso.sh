@@ -440,7 +440,7 @@ INF
     # is the bulk arena. 0xC000 by default: C: carries only the two
     # files below, so it is 48 KB of scratch, and the 64 KB it leaves at
     # 0x6C000 is the room the GEOS subsystem's screen path needs on the
-    # sub side (docs/esc64/). ADISK_SIZE=0x1C000 gives C: all of it.
+    # sub side (docs/esg/). ADISK_SIZE=0x1C000 gives C: all of it.
     #
     # What goes on C:: only what EmuTOS reads from the boot drive and
     # nowhere else -- the drive icons, and the desktop settings a console
