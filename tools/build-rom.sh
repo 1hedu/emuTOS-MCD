@@ -72,7 +72,7 @@ for inc in $(grep -o '\.incbin[[:space:]]*"[^"]*"' "$SRC" 2>/dev/null \
     # without it grep prints "binary file matches" instead of the match
     # and the name comes back empty. The version of this line that only
     # asked -q was right by accident; this one has to be told.
-    hit=$(grep -aoE "SDIAGAUT|PALTEST|SHOWAUT|EDITAUT|NATAUT|PRNTAUT|SONICAUT|DDISKAUT|BRAMAUT|BRAMRWAU|FMTIAUTO|ROMDAUTO" \
+    hit=$(grep -aoE "SDIAGAUT|PALTEST|SHOWAUT|EDITAUT|NATAUT|PRNTAUT|SONICAUT|DDISKAUT|BRAMAUT|BRAMRWAU|FMTIAUTO|ROMDAUTO|SPLITAUT" \
             "$d/$inc" | head -1 || true)
     if [[ -n "$hit" ]]; then
       echo "$inc carries $hit, which is emulator-only and must not reach" >&2

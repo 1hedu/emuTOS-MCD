@@ -210,6 +210,8 @@ if [[ -z "$PAYLOAD" ]]; then
     # so a palette test built alongside it never runs at all. An hour
     # went into three identical frame hashes before that was noticed.
     [[ -n "${PALTEST:-}" ]]  && prg "$ROOT/progs/paltest.c" PALTEST.PRG
+    # Logical and physical screen apart: which one shows. See progs/scrsplit.c.
+    [[ -n "${SPLITAUTO:-}" ]] && prg "$ROOT/progs/scrsplit.c" SPLITAUT.PRG
     [[ -n "${SHOWAUTO:-}" ]] && prg "$ROOT/progs/show.c" SHOWAUTO.PRG -DSHOW_AUTO=1
     [[ -n "${EDITAUTO:-}" ]] && prg "$ROOT/progs/edit.c" EDITAUTO.PRG -DEDIT_AUTO=1
     [[ -n "${NATAUTO:-}" ]]  && prg "$ROOT/progs/native.c" NATAUTO.PRG -DNATIVE_AUTO=1
@@ -467,6 +469,7 @@ INF
                                     --add "$B/FMTINOAS.PRG:FMTINOAS.PRG"
                                     --add "$B/SDIAGAUT.PRG:AUTO/SDIAGAUT.PRG")
     [[ -n "${PALTEST:-}" ]] && CADD+=(--add "$B/PALTEST.PRG:AUTO/PALTEST.PRG")
+    [[ -n "${SPLITAUTO:-}" ]] && CADD+=(--add "$B/SPLITAUT.PRG:AUTO/SPLITAUT.PRG")
     [[ -n "${SHOWAUTO:-}" ]] && CADD+=(--add "$B/SHOWAUTO.PRG:AUTO/SHOWAUT.PRG"
                                        --add "$B/TEST.PI1:TEST.PI1")
     [[ -n "${EDITAUTO:-}" ]] && CADD+=(--add "$B/EDITAUTO.PRG:AUTO/EDITAUT.PRG")

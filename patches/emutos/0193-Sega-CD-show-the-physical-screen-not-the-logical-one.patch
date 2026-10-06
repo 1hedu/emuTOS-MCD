@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: emuTOS-MCD <darekadumon@gmail.com>
+Date: Tue, 6 Oct 2026 04:31:17 +0000
+Subject: [PATCH 193/193] Sega CD: show the physical screen, not the logical
+ one
+
+The VBL told the servant to show v_bas_ad, the logical screen. An ST
+program may draw off-screen by moving only the logical screen,
+Setscreen(buf, -1, -1), and expects nobody to see it; here the buffer
+was put on display at once. The palette and pointer blocks followed
+v_bas_ad too, so they went 32000 bytes past the buffer, into the
+program's own memory.
+
+The screen on display is now Physbase(), through segacd_shown(), and so
+are the palette and pointer blocks. The console-scroll and blit notices
+are only given when the logical screen is the one on display: a scroll
+of a screen nobody sees is not one the servant should apply. A physical
+screen that moves gets its palette block written again at the new
+place.
+
+Nothing changes while the two screens are one, which is every program
+that never splits them: the desktop frame is byte-identical.
+---
+ bios/segacd.c   | 27 ++++++++++++++++++++++-----
+ bios/segacd.h   |  1 +
+ vdi/vdi_mouse.c | 11 +++++++----
+ 3 files changed, 30 insertions(+), 9 deletions(-)
+
+diff --git a/bios/segacd.c b/bios/segacd.c
+index 3a76f04..138945b 100644
+--- a/bios/segacd.c
++++ b/bios/segacd.c
+@@ -66,8 +66,14 @@ void segacd_screen_init(void)
+     GA_INTMASK |= 0x04;         /* now safe to take INT2 */
+ }
+ 
++static UBYTE scd_pal_dirty;
++
+ void segacd_setphys(const UBYTE *addr)
+ {
++    /* The palette block lives beside the screen, so a screen that moves
++     * needs it written again where the servant will now look. */
++    if (addr != segacd_screenbase)
++        scd_pal_dirty = 1;
+     segacd_screenbase = addr;
+ }
+ 
+@@ -78,6 +84,15 @@ const UBYTE *segacd_physbase(void)
+     return logbase();
+ }
+ 
++/* The screen on display, and so where the blocks the servant reads
++ * beside it live: the palette, the pointer, the scroll and blit notices.
++ * The physical screen, as on an ST -- not v_bas_ad, the logical one,
++ * which a program may point at a buffer to draw off-screen. */
++UBYTE *segacd_shown(void)
++{
++    return (UBYTE *)segacd_physbase();
++}
++
+ /* Setcolor and Setpalette.
+  *
+  * There are no palette registers on this side of the machine. The
+@@ -99,7 +114,6 @@ static UWORD scd_pal[16] = {
+     0x777, 0x700, 0x070, 0x770, 0x007, 0x707, 0x077, 0x555,
+     0x333, 0x733, 0x373, 0x773, 0x337, 0x737, 0x377, 0x000
+ };
+-static UBYTE scd_pal_dirty;
+ 
+ struct scd_palblock {
+     UWORD magic0, magic1;       /* "PA" "L!" */
+@@ -112,7 +126,7 @@ struct scd_palblock {
+ static void scd_pal_publish(void)
+ {
+     struct scd_palblock *pb =
+-        (struct scd_palblock *)(v_bas_ad + 32000UL);
++        (struct scd_palblock *)(segacd_shown() + 32000UL);
+     int i;
+ 
+     for (i = 0; i < 16; i++)
+@@ -4307,6 +4321,8 @@ void segacd_scrolled(WORD rows)
+ 
+     if (v_cel_wr != 1280 || v_cel_my != 24)
+         return;
++    if (v_bas_ad != segacd_shown())
++        return;                 /* scrolled a screen nobody is looking at */
+     sb[0] = 0x5343;             /* "SC" */
+     sb[1] = 0x524C;             /* "RL" */
+     sb[2] = (UWORD)(sb[2] + rows);
+@@ -4337,7 +4353,7 @@ void segacd_blitted(WORD sx, WORD sy, WORD dx, WORD dy, WORD w, WORD h)
+ {
+     volatile UWORD *bb = (volatile UWORD *)(v_bas_ad + BLTBLK_OFF);
+ 
+-    if (v_lin_wr != 160)
++    if (v_lin_wr != 160 || v_bas_ad != segacd_shown())
+         return;                 /* not the screen the servant maps */
+     bb[3] = (UWORD)sx;
+     bb[4] = (UWORD)sy;
+@@ -4601,8 +4617,9 @@ void segacd_int_2_c(void)
+     /* Tell the servant where the screen really is, rather than letting
+      * it assume the boot-time address: anything that moves the
+      * framebuffer would otherwise leave it converting whatever now
+-     * lives there. */
+-    *(volatile UWORD *)0xFF8020 = (UWORD)(((ULONG)v_bas_ad) >> 8);
++     * lives there. The physical screen: a program that moves only the
++     * logical one is drawing off-screen, and expects not to be seen. */
++    *(volatile UWORD *)0xFF8020 = (UWORD)(((ULONG)segacd_shown()) >> 8);
+ 
+     scd_pal_vbl();
+     int_vbl();
+diff --git a/bios/segacd.h b/bios/segacd.h
+index 5fd0c1b..40fcea9 100644
+--- a/bios/segacd.h
++++ b/bios/segacd.h
+@@ -23,6 +23,7 @@
+ void segacd_screen_init(void);
+ void segacd_setphys(const UBYTE *addr);
+ const UBYTE *segacd_physbase(void);
++UBYTE *segacd_shown(void);         /* the screen the servant shows */
+ WORD segacd_setcolor(WORD colorNum, WORD color);
+ 
+ /* System timer (gate array INT3) */
+diff --git a/vdi/vdi_mouse.c b/vdi/vdi_mouse.c
+index 2f34fe6..6d165a8 100644
+--- a/vdi/vdi_mouse.c
++++ b/vdi/vdi_mouse.c
+@@ -25,6 +25,9 @@
+ #include "vdi_inline.h"
+ #if WITH_AES
+ #include "../aes/aesstub.h"
++#ifdef MACHINE_SEGACD
++#include "../bios/segacd.h"
++#endif
+ #endif
+ 
+ #define MOUSE_WIDTH     16      /* in pixels */
+@@ -148,7 +151,7 @@ static BOOL sprite_form_same(const Mcdb *sprite)
+ 
+ static struct curblk *curblk(void)
+ {
+-    return (struct curblk *)(v_bas_ad + CURBLK_OFF);
++    return (struct curblk *)(segacd_shown() + CURBLK_OFF);
+ }
+ 
+ /* Tell the servant where the pointer is, and what it is.
+@@ -169,8 +172,8 @@ static BOOL sprite_cursor(Mcdb *sprite, WORD x, WORD y)
+     /* Setscreen moves the framebuffer, and the block moves with it --
+      * so a form cached against the old address says nothing about what
+      * is at the new one. Republish everything when the screen moves. */
+-    if (sprite_base != v_bas_ad) {
+-        sprite_base = v_bas_ad;
++    if (sprite_base != segacd_shown()) {
++        sprite_base = segacd_shown();
+         SPRITE_CACHED = 0;
+     }
+ 
+@@ -221,7 +224,7 @@ static BOOL sprite_cursor_replace(void)
+ {
+     struct curblk *cb = curblk();
+ 
+-    if (v_planes != 4 || !SPRITE_CACHED || sprite_base != v_bas_ad)
++    if (v_planes != 4 || !SPRITE_CACHED || sprite_base != segacd_shown())
+         return FALSE;
+     cb->visible = (HIDE_CNT == 0);
+     return TRUE;

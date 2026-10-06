@@ -130,6 +130,56 @@ Not done: play needs the cursor keys, which on a pad means the on-screen
 keyboard (Start). A "d-pad as arrow keys" mode in the servant would make
 it a pad game, but the servant has 112 bytes free.
 
+**Cyber Paint: builds, parked at the memory limit.** Jim Kent's
+low-resolution paint and cel-animation program (Antic, 1987; BSD
+licence) is about 26,000 lines of C and 40 files of assembly.
+`tools/build-cyberpaint.sh` builds it:
+
+- It was written for Manx Aztec C, whose `int` is 16 bits, so it is
+  built `-mshort` with libcmini, as Sokoban is.
+- `tools/aztec2gas.py` converts Aztec's assembler dialect to GNU as. All
+  40 files assemble.
+- The only file that touches the hardware is `PF.ASM`. It takes the VBL
+  vector at `$70`, MFP Timer B, the 200 Hz timer and the keyboard
+  vector, and splits the palette in stripes, so the menus' colours 1-3
+  differ from the picture's. `patches/cyberpaint/pf_mcd.c` replaces it.
+  It keeps PF.ASM's interface and runs from the VBL queue, with one
+  palette per frame. When a menu shows, colours 1-3 are the menu's.
+  When the menus are hidden, the picture's colours are exact.
+- `patches/cyberpaint/megacd.patch` changes about ten lines: two missing
+  `extern`s, a duplicate declaration, a two-argument `v_hide_c`, and
+  `aline.h` declaring the `aline` pointer.
+
+It links into a 169 KB program that needs 185 KB with its BSS. At
+startup it asks `Malloc(-1)` for its pool, keeps 24 KB back for GEM, and
+refuses to run with less than 96,000 bytes. From that pool it then
+takes five 32,000-byte screens: undo, back buffer, tween start and end,
+and the 64 KB next/previous frame pair. The total is about 400 KB
+before any cel or animation delta. A 264 KB TPA leaves it 79 KB, and
+the bulk arena adds 12 KB with the default C: or 112 KB with a 32 KB
+C:. That is short even with both. The animation buffers are used in 11
+of its files, so dropping them is a rewrite of the animation engine,
+not a port. It is parked with DM: the build stays, for a machine with
+more RAM. The script writes `vendor/stsoft/CYP.PRG`; delete it, or it
+goes onto D: as a program that refuses to start.
+
+**Found on the way, and fixed since.** The VBL told the servant to show
+`v_bas_ad`, the *logical* screen. Cyber Paint draws off-screen by
+moving only the logical screen (`Setscreen(buf, -1, -1)`), as ST
+programs may. Here that put the buffer on display, and the palette and
+pointer blocks went 32,000 bytes past it, inside the program's heap.
+EmuTOS patch 0193 makes the shown screen `Physbase()`, with the blocks
+beside it. `SPLITAUTO=1 tools/build-iso.sh` adds `progs/scrsplit.c`, an
+emulator-only check. It draws bands on the shown screen and solid green
+on a second one with only the logical screen moved there. After 300
+VBLs it moves the physical screen too. Before the fix the green showed
+at once; now the bands show until the move. The desktop frame is
+byte-identical, on the disc and on the cartridge.
+
+One limit remains, the same as before: a program that moves the
+physical screen to its own buffer has to leave 768 bytes free past the
+picture for the blocks, 32,768 bytes from a 256-byte boundary.
+
 ## Dungeon Master: fits, with three subsystems to replace
 
 ReDMCSB is Christophe Fontanel's reverse-engineered source for every

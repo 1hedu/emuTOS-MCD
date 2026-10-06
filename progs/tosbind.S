@@ -382,3 +382,42 @@ dos_malloc:
         addq.l  #6,%sp
         movem.l (%sp)+,%d2/%a2
         rts
+
+| long xbios_setscreen(void *log, void *phys, long rez)   XBIOS 5
+| -1 for any of them leaves it as it is.
+        .globl  xbios_setscreen
+xbios_setscreen:
+        movem.l %d2/%a2,-(%sp)
+        move.l  20(%sp),%d0
+        move.w  %d0,-(%sp)
+        move.l  18(%sp),-(%sp)
+        move.l  18(%sp),-(%sp)
+        move.w  #5,-(%sp)
+        trap    #14
+        lea     12(%sp),%sp
+        movem.l (%sp)+,%d2/%a2
+        rts
+
+| long xbios_setcolor(long pen, long colour)   XBIOS 7
+        .globl  xbios_setcolor
+xbios_setcolor:
+        movem.l %d2/%a2,-(%sp)
+        move.l  16(%sp),%d0
+        move.w  %d0,-(%sp)
+        move.l  14(%sp),%d0
+        move.w  %d0,-(%sp)
+        move.w  #7,-(%sp)
+        trap    #14
+        addq.l  #6,%sp
+        movem.l (%sp)+,%d2/%a2
+        rts
+
+| void xbios_vsync(void)               XBIOS 37
+        .globl  xbios_vsync
+xbios_vsync:
+        movem.l %d2/%a2,-(%sp)
+        move.w  #37,-(%sp)
+        trap    #14
+        addq.l  #2,%sp
+        movem.l (%sp)+,%d2/%a2
+        rts

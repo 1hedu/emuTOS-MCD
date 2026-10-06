@@ -20,11 +20,10 @@ typedef unsigned char UBYTE;
 typedef unsigned short UWORD;
 typedef unsigned long ULONG;
 
-/* v_bas_ad, the screen base, straight out of the ST sysvar. Not
- * Physbase(): this is the exact longword EmuTOS publishes to the
- * servant every VBL (segacd.c writes v_bas_ad >> 8 to 0xFF8020), so
- * following it is following the same pointer the pump follows, with no
- * trap in between and no chance of the two disagreeing. */
+/* v_bas_ad, the screen base, straight out of the ST sysvar. The
+ * servant shows the physical screen (segacd.c writes Physbase() >> 8 to
+ * 0xFF8020 every VBL), but this program moves neither screen, so the
+ * logical one is the same address, with no trap in between. */
 #define V_BAS_AD  (*(UBYTE * volatile *)0x44EL)
 
 #define SCREEN_BYTES 32000L

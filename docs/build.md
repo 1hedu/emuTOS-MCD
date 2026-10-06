@@ -128,7 +128,7 @@ them off, is now what happens anyway.
 | `AUTORUN=D:\\X.PRG` | the AES starts that program instead of the desktop; `AUTORUN_GEM=0` for a .PRG that is a TOS program |
 
 The rest — `NOASK`, `PALTEST`, `SHOWAUTO`, `EDITAUTO`, `NATAUTO`,
-`PRNAUTO`, `DDAUTO`, `ROMDAUTO`, `BRAMAUTO`, `BRAMRW`, `FMTIAUTO`, `ACCAUTO`,
+`PRNAUTO`, `DDAUTO`, `ROMDAUTO`, `SPLITAUTO`, `BRAMAUTO`, `BRAMRW`, `FMTIAUTO`, `ACCAUTO`,
 `HELLOA`, `AUDIT`, `CDDTEST` — build programs into `AUTO` that run
 before the desktop and then hold, so a headless emulator run exercises
 one path without a hand on the pad. They are emulator-only, by name, in

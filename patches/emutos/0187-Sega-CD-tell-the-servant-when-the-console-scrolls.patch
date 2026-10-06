@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 26 Aug 2026 07:29:22 +0000
-Subject: [PATCH 187/192] Sega CD: tell the servant when the console scrolls
+Subject: [PATCH 187/193] Sega CD: tell the servant when the console scrolls
 
 scroll_up(0) memmoves the whole bitmap up one character cell and blanks
 the bottom one. On an ST that is the cheapest thing the console does;

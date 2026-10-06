@@ -40,9 +40,10 @@ long dos_fsnext(void);
 long dos_fopen(const char *name, long mode);
 long dos_fread(long handle, long count, void *buf);
 long dos_fclose(long handle);
-/* v_bas_ad out of the ST sysvar rather than Physbase(): this is the
- * same longword EmuTOS publishes to the servant every VBL, so the
- * picture and the palette block land where the pump is looking. */
+/* v_bas_ad out of the ST sysvar rather than Physbase(). The servant
+ * shows the physical screen, but SHOW never moves either one, so the
+ * two are the same address, and the picture is written where the VDI
+ * and the console write too. */
 #define V_BAS_AD  (*(UBYTE * volatile *)0x44EL)
 
 #define SCREEN_BYTES 32000L
