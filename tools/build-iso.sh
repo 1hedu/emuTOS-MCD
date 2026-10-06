@@ -258,6 +258,8 @@ PI1
     prg "$ROOT/progs/native.c"   NATIVE.PRG
     prg "$ROOT/progs/show.c"     SHOW.PRG
     prg "$ROOT/progs/edit.c"     EDIT.PRG
+    # The same Mandelbrot set as DEMO.PI1, computed on the machine.
+    prg "$ROOT/progs/mandel.c"   MANDEL.PRG
     # The diagnostics, and SWAP.
     #
     # The diagnostics were written to answer faults that are now
@@ -357,6 +359,10 @@ SHOW.PRG displays Atari ST pictures -- .PI1
 uncompressed.  It lists what is in the folder
 you run it from; a letter shows one, any key
 comes back.  DEMO.PI1 is there to try it on.
+
+MANDEL.PRG draws that same picture on this
+machine, as you watch, then saves it as
+C:\MANDEL.PI1 for SHOW.  Any button returns.
 
 SHOW, EDIT and DEMO.PI1 are on D: -- the disc,
 or on a cartridge its ROM -- and run from there.
@@ -552,6 +558,7 @@ FILL
       --add "$B/EJECT.PRG:EJECT.PRG" \
       --add "$B/SHOW.PRG:SHOW.PRG" \
       --add "$B/EDIT.PRG:EDIT.PRG" \
+      --add "$B/MANDEL.PRG:MANDEL.PRG" \
       --add "$B/NATIVE.PRG:NATIVE.PRG" \
       --add "$B/DEMO.PI1:DEMO.PI1" \
       ${DIAG:+--add "$B/SWAP.PRG:SWAP.PRG" \

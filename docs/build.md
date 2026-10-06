@@ -114,8 +114,10 @@ more frames than it will survive.
 ## Flags
 
 `tools/build-iso.sh` reads these from the environment. The first four
-are the ones worth knowing. SHOW, EDIT and DEMO.PI1 are on D: on both
-boots and not on C: unless `FULLC` asks; `SLIMC=1`, which used to leave
+are the ones worth knowing. SHOW, EDIT, MANDEL and DEMO.PI1 are on D:
+on both boots and not on C: unless `FULLC` asks (MANDEL.PRG computes
+the picture in DEMO.PI1 on the machine, in about 37 seconds, and saves
+it as C:\MANDEL.PI1); `SLIMC=1`, which used to leave
 them off, is now what happens anyway.
 
 | | |

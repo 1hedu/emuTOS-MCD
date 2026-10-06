@@ -103,7 +103,7 @@ if [[ "$(basename "$SRC")" = m1emu.S ]]; then
   # The disc's own programs first: on a disc they are on D:, and here D:
   # is this image. build-iso.sh made them; only what exists is added.
   RDADD=()
-  for f in SHOW.PRG EDIT.PRG DEMO.PI1; do
+  for f in SHOW.PRG EDIT.PRG MANDEL.PRG DEMO.PI1; do
     if [[ -f "$B/$f" ]]; then RDADD+=(--add "$B/$f:$f"); fi
   done
   for dir in "$ROOT/vendor/stsoft" ${DDISK_DIR:+"$DDISK_DIR"}; do
