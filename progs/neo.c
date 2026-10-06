@@ -16,10 +16,11 @@
  * So this launcher loads NEONEW.PRG without starting it (Pexec 3),
  * patches those places in memory, and then starts it (Pexec 4). The VBL
  * work runs from the OS's VBL queue instead, here, in the launcher,
- * which stays resident underneath it. One palette per frame: the
- * toolbox's two text colours (14 and 15) while the toolbox shows, the
- * picture's own sixteen when it does not (right button). The colour
- * bands Timer B drew in the toolbox are not drawn.
+ * which stays resident underneath it. The colours Timer B changed down
+ * the toolbox -- its text colours from line 109, and the colour
+ * picker's seventeen bands of thirteen, five lines each, from 114 --
+ * go to EmuTOS as a raster table (SCD_RASTER), and the servant makes
+ * the same changes on the same lines from the VDP's line interrupt.
  *
  * And it chooses where NEOchrome's two screens go. NEOchrome lays out
  * its buffers back to back, 32000 bytes apart, and this machine needs
@@ -37,6 +38,8 @@
 typedef unsigned char UBYTE;
 typedef unsigned short UWORD;
 typedef unsigned long ULONG;
+
+#include "scdapi.h"
 
 void con_ws(const char *s);
 long con_in(void);
@@ -64,6 +67,7 @@ extern void *prg_basepage;
 #define V_FRAMES   0x31AF6UL  /* word: frames, for its timing */
 #define V_TOOLBOX  0x31B56UL  /* word: nonzero while the toolbox shows */
 #define V_TOOLCOL  0x31B6AUL  /* word: the toolbox's colour 14 */
+#define V_BANDS    0x31B6EUL  /* 17 x 13 words: the picker's bands */
 #define V_REGION   0x10360UL  /* where its own layout starts, unaligned */
 
 #define SCREEN     32000UL
@@ -76,6 +80,15 @@ extern void *prg_basepage;
 #define COLORPTR (*(UWORD * volatile *)0x45AUL)
 
 static UBYTE *neo;                  /* its text */
+static struct scd_api *api;
+
+/* The raster tables, two so that the one the servant may be reading is
+ * never the one being rewritten: line 109's colours 14 and 15, then the
+ * seventeen bands of colours 1-13 from line 114, five lines apart.
+ * 2 + 4 + 17 * 15 words. */
+#define RAS_WORDS (2 + 4 + 17 * 15)
+static UWORD ras[2][RAS_WORDS];
+static UWORD ras_cur;
 static UWORD start_pal[16];         /* the screen's, for it to restore */
 static UWORD out[16];
 static UBYTE have_out;
@@ -84,6 +97,43 @@ static void (**slot)(void);
 #define W(off)  (*(volatile UWORD *)(neo + (off)))
 #define L(off)  (*(volatile ULONG *)(neo + (off)))
 #define B(off)  (*(volatile UBYTE *)(neo + (off)))
+
+/* The toolbox's raster, as Timer B drew it: from line 109 colour 15
+ * the opposite of the background and 14 the toolbox's own, then band k
+ * of the picker from line 114 + 5k. (Timer B ran an eighteenth time,
+ * at line 199, from past the end of the table; that line is left as
+ * band 16 left it.) No toolbox, no entries. */
+static void neo_raster(const UWORD *pal)
+{
+    UWORD *t = ras[ras_cur ^ 1];
+    const UWORD *cur = ras[ras_cur];
+    UWORD *w = t + 2;
+    int k, i, n = 0;
+
+    if (W(V_TOOLBOX)) {
+        *w++ = 109; *w++ = 0xC000;
+        *w++ = W(V_TOOLCOL) & 0x777;
+        *w++ = (UWORD)~pal[0] & 0x777;
+        n++;
+        for (k = 0; k < 17; k++) {
+            const volatile UWORD *b =
+                (const volatile UWORD *)(neo + V_BANDS + 26UL * (ULONG)k);
+            *w++ = (UWORD)(114 + 5 * k); *w++ = 0x3FFE;
+            for (i = 0; i < 13; i++) *w++ = b[i] & 0x777;
+            n++;
+        }
+    }
+    t[1] = (UWORD)n;
+    for (i = 1; i < (int)(w - t); i++)
+        if (t[i] != cur[i])
+            break;
+    if (i == (int)(w - t) && cur[1] == n)
+        return;                         /* nothing moved */
+    t[0] = (UWORD)(cur[0] + 1);
+    ras_cur ^= 1;
+    if (api)
+        api->control(SCD_RASTER, (long)t, 0, 0);
+}
 
 /* What its VBL did, less the hardware. */
 static void neo_vbl(void)
@@ -98,12 +148,6 @@ static void neo_vbl(void)
         return;
     for (i = 0; i < 16; i++) {
         UWORD c = p[i] & 0x777;
-        if (W(V_TOOLBOX)) {
-            /* What Timer B set at the toolbox's top edge: 15 the
-             * opposite of the background, 14 the toolbox's own. */
-            if (i == 15) c = (UWORD)~p[0] & 0x777;
-            if (i == 14) c = W(V_TOOLCOL) & 0x777;
-        }
         if (c != out[i]) {
             out[i] = c;
             changed = 1;
@@ -113,14 +157,48 @@ static void neo_vbl(void)
         have_out = 1;
         COLORPTR = out;
     }
+
+    /* The table only when something in it can have moved. This runs in
+     * the VBL, and the sub CPU has little time to spare: the servant
+     * holds its bus for most of every frame while it reads the screen,
+     * and rebuilding 261 words each frame was enough to leave
+     * NEOchrome's own loop no time at all. Its toolbox flag and the two
+     * text colours are checked every frame; the picker's bands, which
+     * NEOchrome sets up once, every 64th. */
+    {
+        static UWORD tb, c14, c15;
+        static UBYTE tick;
+        UWORD ntb = W(V_TOOLBOX), n14 = W(V_TOOLCOL), n15 = p[0];
+        if (ntb != tb || n14 != c14 || n15 != c15 || !(++tick & 63)) {
+            tb = ntb; c14 = n14; c15 = n15;
+            neo_raster(p);
+        }
+    }
 }
 
 /* Called by NEOchrome, in supervisor mode, where it hooked $70 and
  * where it put $70 back. */
+/* The Sega CD driver's API, from its cookie. Without it -- an older
+ * EmuTOS -- NEOchrome still runs, with one palette per frame. */
+static struct scd_api *find_api(void)
+{
+    ULONG *jar = *(ULONG * volatile *)0x5A0L;
+
+    if (!jar) return 0;
+    for (; jar[0]; jar += 2)
+        if (jar[0] == SCD_COOKIE) {
+            struct scd_api *a = (struct scd_api *)jar[1];
+            return (a && a->version >= 36) ? a : 0;
+        }
+    return 0;
+}
+
 __attribute__((used, noinline)) static void vbl_install(void)
 {
     void (**q)(void) = VBLQUEUE;
     UWORD i, n = NVBLS;
+
+    api = find_api();
 
     for (i = 0; i < n; i++)
         if (!q[i]) {
@@ -132,6 +210,8 @@ __attribute__((used, noinline)) static void vbl_install(void)
 
 __attribute__((used, noinline)) static void vbl_remove(void)
 {
+    if (api)
+        api->control(SCD_RASTER, 0, 0, 0);
     if (slot) {
         *slot = 0;
         slot = 0;

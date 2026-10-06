@@ -194,19 +194,23 @@ are ST hardware:
 - It enables Timer B in the MFP, whose addresses alias the gate array.
 - It reads the shifter palette at `$FF8240`, to restore it at exit.
 
-`progs/neo.c` is a 2.4 KB launcher. It loads `NEONEW.PRG` with Pexec 3,
+`progs/neo.c` is a 2.8 KB launcher. It loads `NEONEW.PRG` with Pexec 3,
 checks every patch site against NEOchrome 1.0's own bytes, patches them
 in memory, and starts it with Pexec 4. The VBL work moves into the VBL
 queue, run from the launcher, which stays resident underneath. The
 MFP writes become NOPs, and the palette read becomes a copy taken
-through `Setcolor`. One palette per frame: while the toolbox shows,
-colours 14 and 15 are the toolbox's; with it hidden the picture's
-sixteen are exact. The toolbox's colour bands are not drawn.
+through `Setcolor`. The palette changes Timer B made down the toolbox
+go to EmuTOS as a raster table instead (`SCD_RASTER`, see
+docs/raster.md): colours 14 and 15 from line 109, then the colour
+picker's 17 bands of colours 1-13, five lines each, from line 114. The
+servant makes the same changes on the same lines from the VDP's line
+interrupt, so the picker shows its full grid of shades, about 200
+colours, and the picture above it keeps its own sixteen.
 
 The launcher also places NEOchrome's screens itself. NEOchrome lays its
 buffers out back to back, 32,000 bytes apart, and this machine needs two
-things of a screen: 768 bytes free past it for the palette and pointer
-blocks, and no 128 KB boundary inside it, because the servant reads the
+things of a screen: 256 bytes free past its 32,000 for the palette,
+pointer and raster blocks, and no 128 KB boundary inside it, because the servant reads the
 screen through one 128 KB bank of sub RAM. The launcher spaces the two
 screens 32,256 bytes apart within the same region NEOchrome would have
 used. If the load address puts a boundary where no layout fits, it
@@ -219,8 +223,9 @@ physical screen) is for.
 Verified in gpgx, on the cartridge and on the disc: the toolbox
 renders, a stroke drawn with the pad lands in the picture, FULL SCREEN
 shows the picture alone in its own palette, strokes still draw there,
-and A at the bottom edge brings the toolbox back. Not yet tried:
-loading and saving pictures.
+A at the bottom edge brings the toolbox back, and the picker shows all
+its bands. Not yet tried: loading and saving pictures, quitting back to
+the desktop, and the raster on a real console (docs/raster.md).
 
 Running it from the disc found a bug in `AUTORUN`. On a CD boot, D:
 refuses reads until the desktop has started, because the boot-time

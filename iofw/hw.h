@@ -195,4 +195,48 @@ extern uint32_t prg_window;
 /* Layout inside the shared PRG bank 3 (sub 0x60000, main window base) */
 #define FB_TILES_OFF  0x0000   /* 25 tile rows x 40 x 32 bytes = 32000 */
 
+/* The raster palette (raster.S, and ras_follow() in main.c).
+ *
+ * Its state lives above the planar cache, between the cache's end at
+ * 0xFFED00 and the stack, which starts at 0xFFFC00 and has been
+ * measured using under 500 bytes of the 3840 there. Not in BSS: there
+ * are 112 bytes left under the cache, and these are 2 KB. A payload is
+ * handed 0xFF7000..0xFFED00 and nothing here, and the raster is off
+ * while one runs anyway.
+ *
+ *   RAS_PTR    the next event the handler takes
+ *   RAS_START  the first event of the list in use
+ *   RAS_NEXT   a list waiting to replace it at the end of a frame
+ *   RAS_HIT    set by the handler: the VDP's address is no longer the
+ *              one the code it interrupted set (scd_tile redoes a tile)
+ *   RAS_BASE   the ordinary sixteen colours, as CRAM words, for the
+ *              handler to put back at the bottom of every frame
+ *   RAS_LIST0/1  the two event lists, RAS_LIST_BYTES each */
+#define RAS_PTR    0xFFED00u
+#define RAS_START  0xFFED04u
+#define RAS_NEXT   0xFFED08u
+#define RAS_HIT    0xFFED0Cu
+#define RAS_BASE   0xFFED10u
+#define RAS_LIST0  0xFFED40u
+#define RAS_LIST1  0xFFF140u
+#define RAS_LIST_BYTES 1024u
+
+/* The VDP's line interrupt is level 4. Its vector, on the CD BIOS and
+ * on our cartridge alike, is a six-byte jump slot in RAM. */
+#define HINT_SLOT  0xFFFD0Cu
+
+/* Interrupts off around a VDP sequence that a line interrupt must not
+ * split: the handler moves the VDP's address to CRAM, and the address
+ * cannot be read back to restore it. */
+static inline uint16_t irq_off(void)
+{
+    uint16_t sr;
+    __asm__ volatile("move.w %%sr,%0\n\tori.w #0x0700,%%sr" : "=d"(sr) :: "cc");
+    return sr;
+}
+static inline void irq_restore(uint16_t sr)
+{
+    __asm__ volatile("move.w %0,%%sr" :: "d"(sr) : "cc");
+}
+
 #endif

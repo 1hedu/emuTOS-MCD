@@ -1,3 +1,4 @@
+#pragma GCC optimize ("Os")   /* the servant is short of room */
 /* Input for the IOFW: Sega Mouse + pad-as-mouse, delivered to EmuTOS
  * through the comm registers as relative deltas + buttons.
  *

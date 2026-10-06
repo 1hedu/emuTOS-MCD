@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: emuTOS-MCD <darekadumon@gmail.com>
 Date: Wed, 26 Aug 2026 08:20:09 +0000
-Subject: [PATCH 188/194] Sega CD: hand the servant every screen-to-screen
+Subject: [PATCH 188/195] Sega CD: hand the servant every screen-to-screen
  blit, on a tile grid
 
 Two halves of the same thing, for window scrolling.

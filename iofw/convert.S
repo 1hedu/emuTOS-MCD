@@ -47,15 +47,23 @@ VDP_CTRL_PORT = 0xC00004
         move.l  %d1,VDP_DATA_PORT
         .endm
 
+| RAS_HIT, as an absolute short: 0xED0C sign-extends to 0xFFED0C. The
+| raster palette's line interrupt sets it when it has moved the VDP's
+| address to CRAM, which would send the rest of this tile there; the
+| tile is then written again from the top. See raster.S.
+RAS_HIT_W = 0xED0C
+
 scd_tile:
         movem.l %a2-%a4,-(%sp)
         move.l  16(%sp),%a0             | src
-        move.l  20(%sp),%d1             | vdpcmd
-        move.l  %d1,VDP_CTRL_PORT       | one address command per tile
         lea     tab8,%a1
         lea     1024(%a1),%a2
         lea     2048(%a1),%a3
         lea     3072(%a1),%a4
+again:
+        clr.b   (RAS_HIT_W).w
+        move.l  20(%sp),%d1             | vdpcmd
+        move.l  %d1,VDP_CTRL_PORT       | one address command per tile
 
         ROW 0
         ROW 160
@@ -66,5 +74,7 @@ scd_tile:
         ROW 960
         ROW 1120
 
+        tst.b   (RAS_HIT_W).w
+        bne     again
         movem.l (%sp)+,%a2-%a4
         rts

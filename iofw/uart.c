@@ -1,3 +1,4 @@
+#pragma GCC optimize ("Os")   /* the servant is short of room */
 /* uart.c - a real keyboard on the Mega Drive's serial port.
  *
  * The 315-5309 I/O chip can put any of its three ports into serial

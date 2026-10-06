@@ -420,9 +420,11 @@ static void screen_scroll_apply(void)
 {
     uint16_t row, col;
     for (row = 0; row < 25u; row++) {
+        uint16_t sr = irq_off();
         VU32(VDP_CTRL) = vdp_vram_w((uint16_t)(NAMETABLE + row * 128u));
         for (col = 0; col < 40u; col++)
             VU16(VDP_DATA) = (uint16_t)(slot_of(row, col) * 40u + col);
+        irq_restore(sr);
     }
 }
 
@@ -486,17 +488,20 @@ static void blit_ring(int16_t dx, int16_t dy, int16_t w, int16_t h,
     VU16(REPORT + 0x7A)++;
 }
 
-static void screen_nametab(void)
+__attribute__((optimize("Os"))) static void screen_nametab(void)
 {
     uint16_t row, col;
-    VU32(VDP_CTRL) = vdp_vram_w(NAMETABLE);
-    for (row = 0; row < 32; row++)
+    for (row = 0; row < 32; row++) {
+        uint16_t sr = irq_off();
+        VU32(VDP_CTRL) = vdp_vram_w((uint16_t)(NAMETABLE + row * 128u));
         for (col = 0; col < 64; col++)
             VU16(VDP_DATA) = TILE_BLANK;
+        irq_restore(sr);
+    }
     screen_scroll_apply();
 }
 
-static void vdp_init(void)
+__attribute__((optimize("Os"))) static void vdp_init(void)
 {
     uint16_t i;
 
@@ -521,7 +526,10 @@ static void vdp_init(void)
     vdp_reg(18, 0x00);          /* window plane: no vertical extent */
 
     VU32(VDP_CTRL) = vdp_cram_w(0);
-    for (i = 0; i < 16; i++) VU16(VDP_DATA) = st2cram(st_palette[i]);
+    for (i = 0; i < 16; i++) {
+        VU16(RAS_BASE + 2u * i) = st2cram(st_palette[i]);
+        VU16(VDP_DATA) = VU16(RAS_BASE + 2u * i);
+    }
 
     /* Palette line 1 is ours: nothing on the ST side addresses it.
      *
@@ -638,12 +646,14 @@ static uint8_t  cursor_on;
  * axes; y 0 puts the sprite off the top, which is how it hides. */
 static void cursor_sprite(void)
 {
+    uint16_t sr = irq_off();
     VU32(VDP_CTRL) = vdp_vram_w(SATBASE);
     VU16(VDP_DATA) = cursor_on
                      ? (uint16_t)(cursor_y + SCREEN_YOFF + 128) : 0;
     VU16(VDP_DATA) = 0x0500u;                        /* 2x2 tiles, link 0 */
     VU16(VDP_DATA) = (uint16_t)(0x6000u | CUR_TILE); /* palette line 3 */
     VU16(VDP_DATA) = (uint16_t)(cursor_x + 128);
+    irq_restore(sr);
 }
 
 /* Planar->tile conversion. One table per bitplane, indexed by a whole
@@ -1029,7 +1039,7 @@ static void cart_check_alias(void)
     VU8(0x600001ul) = s6;
 }
 
-static void cart_publish_where(void)
+__attribute__((optimize("Os"))) static void cart_publish_where(void)
 {
     uint8_t save = VU8(GA_MEMMODE), i;
 
@@ -1106,7 +1116,7 @@ static void cart_write_enable(uint8_t on)
  *
  * Sixteen is enough to be certain and small enough to leave no mark:
  * the originals go back afterwards. */
-static uint8_t mem_holds16(uint32_t base)
+__attribute__((optimize("Os"))) static uint8_t mem_holds16(uint32_t base)
 {
     uint8_t save[16], got[16], i, ok = 1;
 
@@ -1213,7 +1223,7 @@ uint8_t cart_probe_ours;        /* ...and our own boot sector is on it */
 uint8_t cart_entry[8];          /* $400020.., the driver's first bytes */
 uint8_t cart_is_smart;
 
-static void cart_read_sig(void)
+__attribute__((optimize("Os"))) static void cart_read_sig(void)
 {
     uint8_t i;
     static const char want[12] = { 'R','A','M','_','C','A','R','T','R','I','D','G' };
@@ -1581,7 +1591,7 @@ static void swap_watch(uint16_t pad)
         ready = 0;
 }
 
-static void cart_probe(void)
+__attribute__((optimize("Os"))) static void cart_probe(void)
 {
     if (VU32(M1_FLAG) == M1_MAGIC && !cart_swap_force_m2) {
         /* Mode 1: our own cartridge, ordinary Genesis save RAM. There
@@ -2044,11 +2054,183 @@ struct payload_hdr {
  * The report block is crowded; this one is not. */
 #define PAYLOAD_STAT (WATCH + 48u)
 
+/* The raster palette: an ST program's mid-screen colour changes.
+ *
+ * EmuTOS writes a block beside the screen on display (SCD_RASTER in
+ * emutos/bios/scdapi.h, scd_ras_vbl in segacd.c): "RST!", a generation
+ * and the address of the program's table in sub RAM. When either moves,
+ * this reads the table through the window and turns it into the event
+ * list raster.S works through, one event per line interrupt. The list
+ * is built in whichever of the two buffers the handler is not using and
+ * handed over in RAS_NEXT, which it takes up at the bottom of a frame,
+ * so it never sees a list half-written.
+ *
+ * Table: gen, count, then per entry: ST line (1..199), mask, and one
+ * 0x0RGB word per set bit, lowest colour first. An entry's colours
+ * apply from its line down, so its event is the interrupt at the end of
+ * the line before: display line (line - 1) + SCREEN_YOFF. */
+#define RASBLK_OFF   32240u
+#define RAS_MAXENT   32u
+#define RAS_TWORDS   560u
+#define RAS_E0       2u         /* the two empty events at the top */
+#define RAS_E1       5u
+#define RAS_ELAST    216u       /* the bottom, under the picture */
+
+static uint32_t ras_addr;       /* the table being followed, 0 none */
+static uint16_t ras_gen;
+static uint8_t  ras_on;
+static uint16_t ras_slot[3];    /* what HINT_SLOT held before us */
+
+extern void ras_hint(void);     /* raster.S */
+
+static void ras_base_cram(void)
+{
+    uint16_t i;
+    uint16_t sr = irq_off();
+    VU32(VDP_CTRL) = vdp_cram_w(0);
+    for (i = 0; i < 16; i++) VU16(VDP_DATA) = VU16(RAS_BASE + 2u * i);
+    VU32(VDP_CTRL) = vdp_cram_w(2 * 18);
+    VU16(VDP_DATA) = VU16(RAS_BASE);
+    irq_restore(sr);
+}
+
+/* Off, and the ordinary palette back on the whole screen. Interrupts
+ * stay masked afterwards, as they are whenever the raster is off. */
+__attribute__((optimize("Os"))) static void ras_off(void)
+{
+    ras_addr = 0;
+    if (!ras_on) return;
+    ras_on = 0;
+    __asm__ volatile("move.w #0x2700,%%sr" ::: "cc");
+    vdp_reg(0, 0x04);
+    ras_base_cram();
+    /* The slot is the BIOS's, or the cartridge's vector's; a payload
+     * that takes the machine next finds it as it was. */
+    VU16(HINT_SLOT) = ras_slot[0];
+    VU16(HINT_SLOT + 2u) = ras_slot[1];
+    VU16(HINT_SLOT + 4u) = ras_slot[2];
+}
+
+/* Build the event list for the table at `t` into `out`. */
+__attribute__((optimize("Os"))) static void ras_build(const volatile uint16_t *t, uint16_t *out)
+{
+    uint16_t line[RAS_MAXENT + 3];
+    const volatile uint16_t *ent[RAS_MAXENT + 3];
+    uint16_t n = 0, k, count = t[1], used = 2, prev = 0;
+    uint16_t *o = out, *end = out + RAS_LIST_BYTES / 2u;
+    const volatile uint16_t *p = t + 2;
+
+    line[n] = RAS_E0; ent[n++] = 0;
+    line[n] = RAS_E1; ent[n++] = 0;
+    if (count > RAS_MAXENT) count = RAS_MAXENT;
+    for (k = 0; k < count; k++) {
+        uint16_t l = p[0], m = p[1], w = 2;
+        uint16_t b;
+        for (b = 0; b < 16; b++) if (m & (1u << b)) w++;
+        if (l < 1 || l > 199 || l <= prev || used + w > RAS_TWORDS)
+            break;
+        line[n] = (uint16_t)(l - 1u + SCREEN_YOFF);
+        ent[n++] = p;
+        prev = l; used += w; p += w;
+    }
+    line[n] = RAS_ELAST; ent[n++] = 0;
+
+    for (k = 0; k < n; k++) {
+        uint16_t r;
+        if (k + 2u < n) r = (uint16_t)(line[k + 2] - line[k + 1] - 1u);
+        else if (k + 1u < n) r = 0xFF;
+        else r = RAS_E0;
+        if (o + 4 > end) break;
+        *o++ = (uint16_t)(0x8A00u | r);
+        *o++ = (uint16_t)((k + 1u == n ? 0x8000u : 0) | line[k]);
+        if (ent[k]) {
+            const volatile uint16_t *e = ent[k];
+            uint16_t m = e[1], b = 0;
+            const volatile uint16_t *c = e + 2;
+            while (b < 16) {
+                uint16_t first, cnt = 0;
+                if (!(m & (1u << b))) { b++; continue; }
+                first = b;
+                while (b < 16 && (m & (1u << b))) { b++; cnt++; }
+                if (o + 3 + cnt + 6 > end) break;
+                *(uint32_t *)o = vdp_cram_w((uint16_t)(2u * first)); o += 2;
+                *o++ = cnt;
+                while (cnt--) *o++ = st2cram(*c++);
+            }
+            if ((m & 1u) && o + 3 + 1 + 2 <= end) {    /* the paper too */
+                *(uint32_t *)o = vdp_cram_w(2 * 18); o += 2;
+                *o++ = 1;
+                *o++ = st2cram(e[2]);
+            }
+        }
+        *(uint32_t *)o = 0; o += 2;
+    }
+    if (k < n) {                /* out of room: end on a last event */
+        o = out;
+        *o++ = 0x8A00u | RAS_E0;
+        *o++ = (uint16_t)(0x8000u | RAS_ELAST);
+        *(uint32_t *)o = 0;
+    }
+}
+
+/* Called inside the grab, with the screen's bank selected. The cold
+ * functions here and elsewhere in this file are built for size: the
+ * servant has to fit under the planar cache at 0xFF7000. */
+__attribute__((optimize("Os"))) static void ras_follow(void)
+{
+    const volatile uint16_t *rb;
+    uint32_t addr, off;
+    uint16_t gen, sr;
+    uint16_t *out;
+
+    if (screen_woff + RASBLK_OFF + 10u > 0x20000u) { ras_off(); return; }
+    rb = (const volatile uint16_t *)(PRG_WINDOW + screen_woff + RASBLK_OFF);
+    if (rb[0] != 0x5253u || rb[1] != 0x5421u) { ras_off(); return; }
+    gen = rb[2];
+    addr = ((uint32_t)rb[3] << 16) | rb[4];
+    if (addr == ras_addr && gen == ras_gen && ras_on) return;
+    off = addr & 0x1FFFFu;
+    if ((addr & 1u) || addr >= 0x80000u
+        || off + 4u + 2u * RAS_TWORDS > 0x20000u) { ras_off(); return; }
+    ras_addr = addr;
+    ras_gen = gen;
+
+    sr = irq_off();
+    VU32(RAS_NEXT) = 0;         /* nothing half-built is ever taken */
+    irq_restore(sr);
+    out = (uint16_t *)((ras_on && VU32(RAS_START) == RAS_LIST0)
+                       ? RAS_LIST1 : RAS_LIST0);
+    VU8(GA_MEMMODE) = (uint8_t)((VU8(GA_MEMMODE) & ~0xC0u)
+                                | ((addr >> 17) << 6));
+    ras_build((const volatile uint16_t *)(PRG_WINDOW + off), out);
+    VU8(GA_MEMMODE) = (uint8_t)((VU8(GA_MEMMODE) & ~0xC0u)
+                                | (screen_bank << 6));
+    if (ras_on) {
+        VU32(RAS_NEXT) = (uint32_t)out;
+        return;
+    }
+    /* On. The handler finds its own way into step: until a frame's
+     * line 2 comes round, every event it is handed is on the wrong line
+     * and it waits (raster.S, "lost"). */
+    VU32(RAS_START) = (uint32_t)out;
+    VU32(RAS_PTR) = (uint32_t)out;
+    ras_slot[0] = VU16(HINT_SLOT);
+    ras_slot[1] = VU16(HINT_SLOT + 2u);
+    ras_slot[2] = VU16(HINT_SLOT + 4u);
+    VU16(HINT_SLOT) = 0x4EF9;                           /* jmp */
+    VU32(HINT_SLOT + 2u) = (uint32_t)ras_hint;
+    vdp_reg(10, RAS_E0);
+    vdp_reg(0, 0x14);                                   /* IE1 */
+    ras_on = 1;
+    __asm__ volatile("move.w #0x2300,%%sr" ::: "cc");
+}
+
 static void payload_run(void)
 {
     const struct payload_hdr *h = (const struct payload_hdr *)CACHE;
     uint32_t total;
 
+    ras_off();                  /* the machine is the payload's now */
     VU16(PAYLOAD_STAT) = 0x0001;                /* asked */
     if (!payload_staged) {
         VU16(PAYLOAD_STAT) = 0x0006;            /* run without a payload */
@@ -2188,9 +2370,13 @@ static void cart_service(void)
         volatile uint8_t *src = (volatile uint8_t *)(PRG_WINDOW + BOUNCE_WOFF);
         uint32_t k;
 
-        VU32(VDP_CTRL) = vdp_vram_w((uint16_t)(blk * 512u));
-        for (k = 0; k < 512u; k += 2)
-            VU16(VDP_DATA) = (uint16_t)((src[k] << 8) | src[k + 1]);
+        {
+            uint16_t sr = irq_off();
+            VU32(VDP_CTRL) = vdp_vram_w((uint16_t)(blk * 512u));
+            for (k = 0; k < 512u; k += 2)
+                VU16(VDP_DATA) = (uint16_t)((src[k] << 8) | src[k + 1]);
+            irq_restore(sr);
+        }
         VU16(PAYLOAD_STAT + 10u)++;
         cart_last_seq = seq;
         VU16(GA_CART_ACK) = seq;
@@ -2836,13 +3022,17 @@ int main(void)
             if (swap_quiet) {
                 uint16_t ramp = (uint16_t)((hb >> 2) & 0x0F);
                 if (ramp > 7) ramp = (uint16_t)(15 - ramp);
+                uint16_t sr = irq_off();
                 VU32(VDP_CTRL) = vdp_cram_w(2 * 16);
                 VU16(VDP_DATA) = (uint16_t)((ramp << 9) | 0x0200);
+                irq_restore(sr);
                 hb++; hb_on = 1;
             } else if (hb_on) {
+                uint16_t sr = irq_off();
                 hb_on = 0; hb = 0;
                 VU32(VDP_CTRL) = vdp_cram_w(2 * 16);
                 VU16(VDP_DATA) = 0x0000;    /* the frame back to black */
+                irq_restore(sr);
             }
         }
 
@@ -2902,14 +3092,19 @@ int main(void)
                 && pb[2] != pal_gen) {
                 uint16_t i;
 
+                uint16_t sr;
+
                 pal_gen = pb[2];
+                sr = irq_off();
                 VU32(VDP_CTRL) = vdp_cram_w(0);
                 for (i = 0; i < 16; i++) {
                     st_palette[i] = pb[3 + i];
-                    VU16(VDP_DATA) = st2cram(st_palette[i]);
+                    VU16(RAS_BASE + 2u * i) = st2cram(st_palette[i]);
+                    VU16(VDP_DATA) = VU16(RAS_BASE + 2u * i);
                 }
                 VU32(VDP_CTRL) = vdp_cram_w(2 * 18);
                 VU16(VDP_DATA) = st2cram(st_palette[0]);
+                irq_restore(sr);
                 /* The pointer is drawn in two of those sixteen, in a
                  * palette line of its own, so its entries have to be
                  * rewritten from the new colours. Forcing the form to
@@ -2918,6 +3113,8 @@ int main(void)
                 cur_shape = 0xFFFFu;
             }
         }
+
+        ras_follow();           /* the raster palette's table, if any */
 
         /* The mouse pointer, as a sprite.
          *
@@ -2939,7 +3136,7 @@ int main(void)
 
             if (cb[0] == 0x4355u && cb[1] == 0x5221u) {     /* "CUR!" */
                 if (cb[2] != cur_shape) {
-                    uint16_t k;
+                    uint16_t k, sr = irq_off();
                     cur_shape = cb[2];
                     VU32(VDP_CTRL) = vdp_vram_w(CUR_TILE * 32u);
                     for (k = 0; k < 64u; k++)
@@ -2947,6 +3144,7 @@ int main(void)
                     VU32(VDP_CTRL) = vdp_cram_w(2 * (48 + 1));
                     VU16(VDP_DATA) = st2cram(st_palette[cb[6] & 15u]);
                     VU16(VDP_DATA) = st2cram(st_palette[cb[7] & 15u]);
+                    irq_restore(sr);
                 }
                 cursor_x  = (int16_t)cb[3];
                 cursor_y  = (int16_t)cb[4];

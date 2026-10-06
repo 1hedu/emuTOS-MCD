@@ -252,5 +252,8 @@ Run `D:\NEOCHROM\NEO.PRG`, not `NEONEW.PRG`: the launcher loads NEOchrome,
 patches it in memory for this machine (`progs/neo.c` lists what and
 why) and starts it. It works on both boots. Draw with A. The FULL SCREEN
 button at the toolbox's left edge hides the toolbox; push the pointer to
-the bottom edge of the screen and press A to bring it back. Save to C:, I: or S:; D: is read-only.
+the bottom edge of the screen and press A to bring it back. The colour picker's
+bands come from the raster palette (docs/raster.md), which needs this
+branch's EmuTOS and servant; on anything older the launcher still runs
+NEOchrome, with one palette for the whole screen. Save to C:, I: or S:; D: is read-only.
 

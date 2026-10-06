@@ -159,6 +159,12 @@ d[0x1B0:0x1BC] = (b'RA' + bytes([0xF8, 0x20])
                   + (0x0020FFFF).to_bytes(4, 'big'))
 if d[0x1B0:0x1B2] != b'RA':
     raise SystemExit("no RA save declaration at 0x1B0")
+# The level 4 vector -- the VDP's line interrupt -- to the six-byte slot
+# at $FFFD0C, where the Mega CD BIOS's own vector table sends it too. The
+# servant puts its raster palette handler there (iofw/raster.S), and so
+# finds it on either boot; megadev's table sends it to a stub that
+# would hang.
+d[0x70:0x74] = (0x00FFFD0C).to_bytes(4, 'big')
 # The romdisk goes at exactly 512 KB: the servant reads it from
 # ROMDISK_ROM in iofw/hw.h, and EmuTOS finds it by its own boot sector.
 if romdisk:

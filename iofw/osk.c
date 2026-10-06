@@ -1,3 +1,4 @@
+#pragma GCC optimize ("Os")   /* cold code; the servant is short of room */
 /* On-screen keyboard on the VDP Window plane.
  *
  * The Window plane overlays plane A in a fixed screen region without the
@@ -120,7 +121,7 @@ static uint8_t osk_on;
 static uint8_t sel_r, sel_c;
 static uint8_t key_seq;
 
-void osk_upload_tiles(void)
+static void osk_upload_tiles_unmasked(void)
 {
     uint16_t i;
     const uint8_t *p = osk_font;
@@ -185,8 +186,17 @@ void osk_upload_tiles(void)
     vdp_reg(18, 0x00);                          /* window off until toggled */
 }
 
+/* With interrupts off: the raster palette's line interrupt moves the
+ * VDP's address, and a sequence it splits writes in the wrong place. */
+void osk_upload_tiles(void)
+{
+    uint16_t sr = irq_off();
+    osk_upload_tiles_unmasked();
+    irq_restore(sr);
+}
+
 /* Draw the whole keyboard into the window nametable. */
-static void osk_draw(void)
+static void osk_draw_unmasked(void)
 {
     uint16_t r, base;
 
@@ -245,6 +255,13 @@ static void osk_draw(void)
             col = (uint8_t)(col + w);
         }
     }
+}
+
+static void osk_draw(void)
+{
+    uint16_t sr = irq_off();
+    osk_draw_unmasked();
+    irq_restore(sr);
 }
 
 /* Show/hide by moving the window plane on or off screen. */
@@ -352,7 +369,7 @@ static uint8_t glyph_for(char c)
     return 0;                       /* space and anything unmapped */
 }
 
-void osk_diag_init(void)
+static void osk_diag_init_unmasked(void)
 {
     /* Byte address again -- see osk_init. 16 is entry 8 of palette line
      * ZERO, which is one of the ST's sixteen colours: this was quietly
@@ -369,9 +386,16 @@ void osk_diag_init(void)
     VU16(VDP_DATA) = 0x0000;               /* 3: black */
 }
 
+void osk_diag_init(void)
+{
+    uint16_t sr = irq_off();
+    osk_diag_init_unmasked();
+    irq_restore(sr);
+}
+
 /* One row of plane A, blank-padded to the full 40 columns. Everything
  * that puts text on the screen goes through here. */
-void osk_row(uint16_t row, const char *s)
+static void osk_row_unmasked(uint16_t row, const char *s)
 {
     uint16_t i;
     VU32(VDP_CTRL) = vdp_vram_w((uint16_t)(NAMETAB_A + row * 64 * 2));
@@ -385,6 +409,13 @@ void osk_row(uint16_t row, const char *s)
             break;
         }
     }
+}
+
+void osk_row(uint16_t row, const char *s)
+{
+    uint16_t sr = irq_off();
+    osk_row_unmasked(row, s);
+    irq_restore(sr);
 }
 
 void osk_status(const char *s)

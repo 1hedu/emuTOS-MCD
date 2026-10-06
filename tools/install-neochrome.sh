@@ -26,7 +26,7 @@ mcopy -o -i "$IMG" ::NEOCHROM/NEONEW.PRG "$D/NEONEW.PRG"
 # The launcher, built the way tools/build-iso.sh builds progs/, with the
 # startup that gives memory back so it can load a program.
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
-CC="m68k-elf-gcc -m68000 -mpcrel -Os -fomit-frame-pointer -ffreestanding -Wall --param=min-pagesize=0"
+CC="m68k-elf-gcc -m68000 -mpcrel -Os -fomit-frame-pointer -ffreestanding -Wall --param=min-pagesize=0 -I$ROOT/emutos/bios"
 $CC -DSHRINK_STARTUP=1 -c "$ROOT/progs/tosbind.S" -o "$T/tosbind.o"
 $CC -c "$ROOT/progs/neo.c" -o "$T/neo.o"
 m68k-elf-ld -T "$ROOT/tools/prg.ld" -o "$T/neo.elf" "$T/tosbind.o" "$T/neo.o"
