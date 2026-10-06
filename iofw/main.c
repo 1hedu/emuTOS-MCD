@@ -3138,10 +3138,20 @@ int main(void)
                 if (cb[2] != cur_shape) {
                     uint16_t k, sr = irq_off();
                     cur_shape = cb[2];
+                    /* EmuTOS builds the tiles with pixel values 1 and 2.
+                     * They are drawn as 4 and 5 instead, entries 52 and
+                     * 53 of palette line 3: entries 49-51 are the
+                     * on-screen keyboard's selected key, and the
+                     * pointer's colours written over entry 49 turned
+                     * that key's orange ink black, so the selection
+                     * did not show. 1 -> 4, 2 -> 5, nibble by nibble. */
                     VU32(VDP_CTRL) = vdp_vram_w(CUR_TILE * 32u);
-                    for (k = 0; k < 64u; k++)
-                        VU16(VDP_DATA) = cb[8 + k];
-                    VU32(VDP_CTRL) = vdp_cram_w(2 * (48 + 1));
+                    for (k = 0; k < 64u; k++) {
+                        uint16_t w = cb[8 + k];
+                        VU16(VDP_DATA) = (uint16_t)(((w & 0x1111u) << 2)
+                            | ((w & 0x2222u) << 1) | ((w & 0x2222u) >> 1));
+                    }
+                    VU32(VDP_CTRL) = vdp_cram_w(2 * (48 + 4));
                     VU16(VDP_DATA) = st2cram(st_palette[cb[6] & 15u]);
                     VU16(VDP_DATA) = st2cram(st_palette[cb[7] & 15u]);
                     irq_restore(sr);

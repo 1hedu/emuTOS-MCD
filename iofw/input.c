@@ -130,6 +130,8 @@ static int8_t clamp8(int16_t v)
 }
 
 uint8_t osk_active(void);   /* osk.c */
+void osk_post_key(uint8_t sc);   /* osk.c */
+uint8_t osk_key_acked(void);    /* osk.c */
 
 /* set once a real Sega Mouse answers the handshake; shown on the
  * hardware status line, since a mouse may simply not be plugged in */
@@ -149,9 +151,28 @@ uint16_t input_update(void)
     uint16_t mbut;
     uint16_t speed;
 
-    /* pad-as-mouse: d-pad with acceleration, A = left, B = right.
-     * Suppressed while the OSK owns the d-pad. */
-    if (!osk_active()) {
+    /* C held: the d-pad is the cursor keys instead of the pointer. ST
+     * programs played or edited from the keyboard -- Sokoban, an
+     * editor -- otherwise need the on-screen keyboard for every step.
+     * A key on the press, then repeating after a third of a second.
+     * Posted only once EmuTOS has taken the last one. */
+    static uint8_t c_prev, c_rep;
+    if ((pad & 0x20) && !osk_active()) {
+        uint8_t dirs = (uint8_t)(pad & 0x0F), go = 0, sc;
+        if (dirs & ~c_prev) { go = (uint8_t)(dirs & ~c_prev); c_rep = 20; }
+        else if (dirs && --c_rep == 0) { go = dirs; c_rep = 5; }
+        c_prev = dirs;
+        held = 0;
+        sc = (go & 0x01) ? 0x48 : (go & 0x02) ? 0x50
+           : (go & 0x04) ? 0x4B : (go & 0x08) ? 0x4D : 0;
+        if (sc && osk_key_acked())
+            osk_post_key(sc);
+        if (pad & 0x40) buttons |= 2;
+        if (pad & 0x10) buttons |= 1;
+    } else if (!osk_active()) {
+        /* pad-as-mouse: d-pad with acceleration, A = left, B = right.
+         * Suppressed while the OSK owns the d-pad. */
+        c_prev = 0;
         if (pad & 0x0F) held++; else held = 0;
         speed = (uint16_t)(1 + (held >> 3));
         if (speed > 4) speed = 4;
