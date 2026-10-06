@@ -125,7 +125,7 @@ them off, is now what happens anyway.
 | `ADISK_SIZE=0x…` | how big C: is, and so how much PRG RAM a payload has left |
 | `SONICACC=1` | add the Sonic accessory (see below) |
 | `DIAG=1` | the diagnostic programs on C: and D: |
-| `AUTORUN=D:\\X.PRG` | the desktop starts that program once it is up |
+| `AUTORUN=D:\\X.PRG` | the AES starts that program instead of the desktop; `AUTORUN_GEM=0` for a .PRG that is a TOS program |
 
 The rest — `NOASK`, `PALTEST`, `SHOWAUTO`, `EDITAUTO`, `NATAUTO`,
 `PRNAUTO`, `DDAUTO`, `ROMDAUTO`, `BRAMAUTO`, `BRAMRW`, `FMTIAUTO`, `ACCAUTO`,
@@ -223,3 +223,18 @@ The script copies `DEVPAC.PRG`, `BIN`, `INCDIR` and `EXAMPLES` into
 `vendor/stsoft/` and points `HISOFTED.INF`'s paths at D:. D: is
 read-only, so assemble with the output on C: (in the editor, Options →
 Assembly; on the command line, `GEN.TTP file.S -OC:\FILE.PRG`).
+
+## Adding Sokoban
+
+Peter Lane's GEM Sokoban, from the Atari_ST_Sources archive, with the
+50 classic levels built in:
+
+    tools/build-sokoban.sh            # -> vendor/stsoft/SOKOBAN.PRG, .RSC
+
+It needs `m68k-atari-mint-gcc` and GEMlib, which Vincent Rivière's
+`cross-mint-essential` package provides (his PPA, `ppa:vriviere/ppa`). The
+script fetches the source and libcmini at pinned commits into `.cache/`
+and builds `-mshort`, because the game was written for AHCC's 16-bit
+`int`. Best scores go to `I:\SOKOSCOR.TXT`, so they persist on both
+boots. The game is played with the cursor keys: the serial keyboard, or
+Start for the on-screen one.

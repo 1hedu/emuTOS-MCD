@@ -400,13 +400,22 @@ TXT
     # same two lines Options -> Install application writes -- so the
     # program runs with the AES and the desktop in place under it, which
     # an AUTO folder program does not get.
+    #
+    # The #Z line's first field says whether the program is a GEM one, and
+    # the AES starts it accordingly: a GEM program gets the pointer and
+    # the mouse, a TOS one a bare screen. So it follows the extension, as
+    # the desktop's own does -- .PRG and .APP are GEM, .TOS and .TTP not --
+    # and AUTORUN_GEM=0 or 1 says otherwise, for a .PRG that is really a
+    # TOS program (Dungeon Master is one).
     if [[ -n "${AUTORUN:-}" ]]; then
-      python3 - "$B/EMUDESK.INF" "$AUTORUN" <<'INF'
+      python3 - "$B/EMUDESK.INF" "$AUTORUN" "${AUTORUN_GEM:-}" <<'INF'
 import sys
-p, prog = sys.argv[1], sys.argv[2].upper()
+p, prog, gem = sys.argv[1], sys.argv[2].upper(), sys.argv[3]
+if gem == '':
+    gem = '0' if prog.endswith(('.TOS', '.TTP')) else '1'
 lines = open(p, 'rb').read().decode('ascii').split('\r\n')
-lines.insert(1, '#Z 00 %s@' % prog)
-lines.insert(len(lines) - 1, '#F 06 FF %s@ @' % prog)
+lines.insert(1, '#Z %02X %s@' % (int(gem), prog))
+lines.insert(len(lines) - 1, '#%s 06 FF %s@ @' % ('G' if gem == '1' else 'F', prog))
 open(p, 'wb').write('\r\n'.join(lines).encode('ascii'))
 INF
     fi

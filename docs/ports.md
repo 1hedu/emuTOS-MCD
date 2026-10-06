@@ -86,6 +86,49 @@ likely to touch hardware directly, and assembling from inside the
 editor, which needs a keyboard the headless harness does not have. QED
 was not on the archive that had Devpac.
 
+## From the Atari_ST_Sources archive
+
+ggnkua's Atari_ST_Sources collects about 185,000 files of ST source. These
+were checked against the same three tests: it fits a 264 KB TPA, it
+leaves the hardware alone, and it works in low resolution with a mouse
+or pad.
+
+| | verdict |
+|---|---|
+| Llamatron (Jeff Minter's source disk) | no. It programs Timer B, the MFP, the palette, the shifter, the keyboard ACIA and the floppy controller directly. It is also a 50 fps full-screen shooter, and the screen pump takes about 24 frames per full screen, so it would be a rewrite onto VDP sprites, not a port. |
+| QED 4.53, the editor | no. 18 of its 31 dialogs are wider than 40 columns, up to 86: it was laid out for 640-pixel screens. |
+| Peter Lane's Sokoban | **yes**, and it runs. |
+
+**Sokoban.** It is pure GEM: a menu bar, windows, VDI drawing, the 50
+classic levels built in, about 2,300 lines of C. Its licence, the Open
+Works License, allows redistribution. `tools/build-sokoban.sh` builds it:
+
+- It was written for AHCC, whose `int` is 16 bits, so the build uses
+  `-mshort`.
+- MiNTLib has no `-mshort` build, so the C library is libcmini, built
+  `-mshort` by the script. The result is 48 KB, against 159 KB with
+  MiNTLib, and that build crashed anyway: its 32-bit `int` did not match
+  the game's.
+- `patches/sokoban/include/` maps AHCC's GEM headers onto GEMlib's. The
+  differences are Pure C's variadic `wind_set`, its two-word
+  `evnt_multi` timer, and its colour names.
+- `patches/sokoban/megacd.patch` makes three small changes. The level
+  table, which was defined in a header and so copied into six files, is
+  now defined once. An enum name clash is resolved. The score file is
+  `I:\SOKOSCOR.TXT`, so best scores outlive a power-off on either boot.
+
+Verified in gpgx on the cartridge, driven by the pad: the level list
+opens, and a double-click opens a level, drawn in colour.
+
+That run found a bug in `AUTORUN`. Its `#Z` line always marked the
+program as not GEM, so the AES started a GEM program with the pointer
+hidden and no mouse. It now follows the extension, and `AUTORUN_GEM`
+overrides it.
+
+Not done: play needs the cursor keys, which on a pad means the on-screen
+keyboard (Start). A "d-pad as arrow keys" mode in the servant would make
+it a pad game, but the servant has 112 bytes free.
+
 ## Dungeon Master: fits, with three subsystems to replace
 
 ReDMCSB is Christophe Fontanel's reverse-engineered source for every
