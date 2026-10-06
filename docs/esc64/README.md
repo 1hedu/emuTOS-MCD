@@ -133,15 +133,24 @@ coordinates; the −12-line letterbox is display-only.
 
 ### Found along the way
 
-* **iofw:** the selected on-screen-keyboard key and the cursor share
-  line 3 entry 1. After the first `CUR!`, the selected key's ink is the
-  pointer's border colour, white by default, on a light grey face. The
-  palette move above fixes it.
-* **EmuTOS:** `bios/segacd.c` puts the timeshare read buffer at
+* **iofw:** the selected on-screen-keyboard key and the cursor shared
+  line 3 entry 1 on `main`. Already fixed on the dev branch this is
+  now based on.
+* **EmuTOS, latent:** `bios/segacd.c` puts the timeshare read buffer at
   `$7D000` with `CD_TS_SECTORS` 4 — four 2048-byte sectors, 8 KB, to
   `$7F000` — and the BRAM work area at `$7E000`. The guard meant to
-  catch exactly that multiplies by 512, so it can never fire. A read
-  that fills all four sectors runs over the BRAM work page.
+  catch exactly that multiplies by 512, so it can never fire. The two
+  do overlap, but nothing shipped is hurt by it: the work area is only
+  live between a `BRMINIT` and the end of the same BRAM call sequence,
+  every sequence in the driver (`bfs_init`, called first by `bfs_find`
+  and `bfs_create`) starts with its own `BRMINIT`, data access after it
+  is through the pointer `BRMSERCH` returns into backup RAM itself, and
+  no CD read can run in the middle of a sequence. The one way to reach
+  it is a program using the `SCD_BRAM_CALL` pass-through that calls
+  `BRM_INIT`, then reads from `D:`, then makes another BRAM call
+  without re-initialising — `progs/bramrw.c` does not. Not run in an
+  emulator: the timeshare exists only on a disc boot, which needs the
+  Sega CD BIOS images, and none are in this environment.
 * **iofw:** the CD trace mirror at `$FFEE00` (`hw.h:149`) is defined and
   never used.
 
