@@ -1,0 +1,65 @@
+diff -ruN a/aline.h b/aline.h
+--- a/aline.h	2026-10-06 04:07:26.305707901 +0000
++++ b/aline.h	2026-10-06 04:07:26.307284487 +0000
+@@ -75,3 +75,5 @@
+ 	char not_mine[24];
+ 	};
+ 
++
++extern struct aline *aline;
+diff -ruN a/input.c b/input.c
+--- a/input.c	2026-10-06 04:07:26.292179941 +0000
++++ b/input.c	2026-10-06 04:07:26.293506116 +0000
+@@ -135,7 +135,7 @@
+ 
+ ghide_mouse()
+ {
+-v_hide_c(handle, 0);
++v_hide_c(handle);
+ }
+ 
+ gshow_mouse()
+diff -ruN a/pentext.c b/pentext.c
+--- a/pentext.c	2026-10-06 04:07:26.295019600 +0000
++++ b/pentext.c	2026-10-06 04:07:26.297003400 +0000
+@@ -12,6 +12,8 @@
+ extern WORD properly;	/* proportional? What a wooly */
+ 
+ 
++extern WORD italic_mode;
++
+ erase_char(x, y)
+ WORD x, y;
+ {
+diff -ruN a/pull.c b/pull.c
+--- a/pull.c	2026-10-06 04:07:26.298640091 +0000
++++ b/pull.c	2026-10-06 04:07:26.300991643 +0000
+@@ -1,5 +1,7 @@
+ /* :ts=3 */
+-#include "jimk.h"
++#include "flicker.h"
++
++extern Pull root_pull;
+ #include "flicmenu.h"
+ 
+ 
+@@ -290,7 +292,6 @@
+ WORD scx, scy;	/* scratch (selection) offset */
+ WORD pulled = -1;	/* the result */
+ unsigned char c;
+-Pull *p;
+ 
+ /* save color map */
+ select = cchild = NULL;
+diff -ruN a/superdat.c b/superdat.c
+--- a/superdat.c	2026-10-06 04:07:26.302689762 +0000
++++ b/superdat.c	2026-10-06 04:07:26.304265113 +0000
+@@ -31,7 +31,7 @@
+ 
+ extern struct slidepot frame_sl;
+ extern struct range trange;
+-extern short tween_mode;
++extern WORD tween_mode;
+ 
+ #define SPTOP 115
+ #define SPY2  (SPTOP+15)

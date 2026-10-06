@@ -98,6 +98,7 @@ or pad.
 | Llamatron (Jeff Minter's source disk) | no. It programs Timer B, the MFP, the palette, the shifter, the keyboard ACIA and the floppy controller directly. It is also a 50 fps full-screen shooter, and the screen pump takes about 24 frames per full screen, so it would be a rewrite onto VDP sprites, not a port. |
 | QED 4.53, the editor | no. 18 of its 31 dialogs are wider than 40 columns, up to 86: it was laid out for 640-pixel screens. |
 | Peter Lane's Sokoban | **yes**, and it runs. |
+| Jim Kent's Cyber Paint | no, on memory. It builds, but needs about 400 KB; parked (below). |
 
 **Sokoban.** It is pure GEM: a menu bar, windows, VDI drawing, the 50
 classic levels built in, about 2,300 lines of C. Its licence, the Open
