@@ -122,6 +122,7 @@ are the ones worth knowing:
 | `ADISK_SIZE=0x…` | how big C: is, and so how much PRG RAM a payload has left |
 | `SONICACC=1` | add the Sonic accessory (see below) |
 | `DIAG=1` | the diagnostic programs on C: and D: |
+| `AUTORUN=D:\\X.PRG` | the desktop starts that program once it is up |
 
 The rest — `NOASK`, `PALTEST`, `SHOWAUTO`, `EDITAUTO`, `NATAUTO`,
 `PRNAUTO`, `DDAUTO`, `ROMDAUTO`, `BRAMAUTO`, `BRAMRW`, `FMTIAUTO`, `ACCAUTO`,
@@ -190,8 +191,8 @@ the sign post at the end of the fourth screen.
 Not working yet: it builds, but has not been run against real data.
 `docs/ports.md` has the plan and the state.
 
-    tools/build-dm.sh                 # -> vendor/stsoft/DM.PRG
-    # copy DUNGEON.DAT and GRAPHICS.DAT from your DM 1.2 disk into
+    tools/build-dm.sh S11E            # or S12E: the version your disk is
+    # copy DUNGEON.DAT and GRAPHICS.DAT from that disk into
     # vendor/stsoft/, then either build:
     ADISK_SIZE=0x8000 SLIMC=1 tools/build-iso.sh U
     tools/build-rom.sh boot/m1emu.S   # the cartridge: D: is the romdisk

@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# Build Dungeon Master 1.2 for this machine, from ReDMCSB, with the
-# original compiler.
+# Build Dungeon Master for this machine, from ReDMCSB, with the original
+# compiler.
 #
-#   tools/build-dm.sh            -> vendor/stsoft/DM.PRG
+#   tools/build-dm.sh [S11E|S12E]      -> vendor/stsoft/DM.PRG
 #
-# Then put your own DUNGEON.DAT and GRAPHICS.DAT from a DM 1.2 disk in
-# vendor/stsoft/ beside it. Either build of the system carries them on D:
+# The version has to be the one your data files came from: DM 1.1 or 1.2,
+# English. ReDMCSB lists every disk by MD5 in Documentation/ReDMCSB.xlsx,
+# sheet Files, so a DUNGEON.DAT can be checked against it. Then put your
+# own DUNGEON.DAT and GRAPHICS.DAT in vendor/stsoft/ beside it. Either build of the system carries them on D:
 # -- the disc's filesystem, or the cartridge's romdisk -- and DM reads
 # them from the drive it was started from.
 #
 # What it does:
 #   1. fetches ReDMCSB (Christophe Fontanel's reverse-engineered DM/CSB
 #      source) into .cache/, checked against a pinned SHA-256
-#   2. cuts DM 1.2 English (EXEID 115, S12E\START.PAK) out of it without
-#      the copy protection: tools/dm-reduce.py
-#   3. applies patches/dm/s12e-megacd.patch, which is the port
+#   2. cuts that version's game executable out of it, without the copy
+#      protection: tools/dm-reduce.py
+#   3. applies patches/dm/megacd.patch, which is the port, and the one
+#      change that patch cannot carry for every version (below)
 #   4. builds it with ReDMCSB's own Atari ST toolchain -- Megamax C 1.1,
 #      its linker, a command shell -- under Hatari, headless, with the
 #      EmuTOS image ReDMCSB ships as its TOS. About two minutes.
@@ -22,12 +25,19 @@
 # Megamax rather than gcc because about 3000 lines of DM are inline
 # assembly in Megamax's own syntax, written against its register
 # allocation and calling convention. Run on its own compiler, all of it
-# stays exactly as reverse-engineered, and the port is a 270-line patch.
+# stays exactly as reverse-engineered, and the port is a short patch.
 #
 # Needs: python3 with py7zr (pip install py7zr) or 7z, unifdef, gcc (to
 # read COMPILE.H's version symbols), hatari. Nothing of FTL's ends up in
 # the repository: ReDMCSB is fetched, and the data files are yours.
 set -euo pipefail
+VER="${1:-S12E}"
+# ReDMCSB's executable ID and link file for each game, from MKSS.BAT.
+case "$VER" in
+  S11E) EXEID=114; LNK=S11.LNK ;;
+  S12E) EXEID=115; LNK=S12S13.LNK ;;
+  *) echo "build-dm.sh: S11E (DM 1.1) or S12E (DM 1.2)" >&2; exit 1 ;;
+esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CACHE="$ROOT/.cache/dm"
 W="$ROOT/build/dm"
@@ -67,12 +77,18 @@ ST="$RD/Toolchains/Atari ST"
 rm -rf "$W"; mkdir -p "$W"
 cp -r "$ST/Base/HARDDISK" "$W/HD"
 cp "$ST/Base/Hatari/tos.img" "$W/tos.img"
-mkdir -p "$W/HD/SOURCE" "$W/HD/BUILD/S12E" "$W/HD/OBJECT/S12E/START.PAK" \
+mkdir -p "$W/HD/SOURCE" "$W/HD/BUILD/$VER" "$W/HD/OBJECT/$VER/START.PAK" \
          "$W/HD/OBJECT/SU1E/START.PRG"
 cp "$ST/Source/"*.BAT "$ST/Source/"*.LNK "$W/HD/SOURCE/"
 python3 "$ROOT/tools/dm-reduce.py" "$RD/Toolchains/Common/Source" "$W/src" \
-        --exeid 115
-patch -s -d "$W/src" -p1 < "$ROOT/patches/dm/s12e-megacd.patch"
+        --exeid "$EXEID"
+patch -s -d "$W/src" -p1 < "$ROOT/patches/dm/megacd.patch"
+# The save dialog's instruction. DIALOG.C orders its strings differently
+# from one version to the next, so a patch hunk would not apply to all of
+# them; the string itself is the same in each.
+sed -i 's/"PUT GAME SAVE DISK IN DRIVE A:"/"SAVED GAMES ARE ON DRIVE S:"/' \
+    "$W/src/DIALOG.C"
+grep -q 'SAVED GAMES ARE ON DRIVE S:' "$W/src/DIALOG.C"
 cp "$W/src/"* "$W/HD/SOURCE/"
 
 # MKSS.BAT builds everything ReDMCSB knows; this is the two lines of it
@@ -80,7 +96,7 @@ cp "$W/src/"* "$W/HD/SOURCE/"
 # Megamax library, which is what ReDMCSB links every game with.
 printf '%s\r\n' 'ECHO ON' 'PATH \MEGAMAX' 'CD \SOURCE' \
   'MKSSINIT.BAT \MEGAMAX \OBJECT\SU1E\START.PRG INIT' \
-  'MKSSGAME.BAT S12E START S12S13.LNK -DEXEID=115' \
+  "MKSSGAME.BAT $VER START $LNK -DEXEID=$EXEID" \
   'CD \' 'SHUTDOWN.PRG' > "$W/HD/SOURCE/REDMCSB.BAT"
 
 # SHUTDOWN.PRG powers Hatari off through NatFeats when the batch file is
@@ -93,16 +109,16 @@ printf '%s\r\n' 'ECHO ON' 'PATH \MEGAMAX' 'CD \SOURCE' \
     --compatible off --timer-d on --log-level warn --statusbar off \
     --conout 2 HD/PCOMMAND.PRG ) > "$W/hatari.log" 2>&1 || true
 
-PAK="$W/HD/BUILD/S12E/START.PAK"
+PAK="$W/HD/BUILD/$VER/START.PAK"
 if [[ ! -s "$PAK" ]]; then
   echo "no START.PAK: the build failed. The console is in $W/hatari.log;" >&2
-  echo "per-file compiler messages are in $W/HD/OBJECT/S12E/START.PAK/*.ERR" >&2
+  echo "per-file compiler messages are in $W/HD/OBJECT/$VER/START.PAK/*.ERR" >&2
   exit 1
 fi
 mkdir -p "$ROOT/vendor/stsoft"
 cp "$PAK" "$ROOT/vendor/stsoft/DM.PRG"
-echo "built: vendor/stsoft/DM.PRG ($(stat -c%s "$PAK") bytes)"
+echo "built: vendor/stsoft/DM.PRG, $VER ($(stat -c%s "$PAK") bytes)"
 for f in DUNGEON.DAT GRAPHICS.DAT; do
   [[ -f "$ROOT/vendor/stsoft/$f" ]] ||
-    echo "missing: vendor/stsoft/$f -- copy it from your own DM 1.2 disk"
+    echo "missing: vendor/stsoft/$f -- copy it from your own $VER disk"
 done

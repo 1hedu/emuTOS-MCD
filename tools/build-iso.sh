@@ -389,6 +389,22 @@ TXT
     # changing.
     ( cd "$ROOT" && python3 tools/mkicon.py --rsc "$B/EMUICON.RSC" \
                  && python3 tools/mkicon.py --inf "$B/EMUDESK.INF" )
+    # AUTORUN=D:\\DM.PRG: the desktop starts that program as soon as it is
+    # up, as if it had been double-clicked. It is the desktop's own
+    # autorun -- an installed application and a #Z line naming it, the
+    # same two lines Options -> Install application writes -- so the
+    # program runs with the AES and the desktop in place under it, which
+    # an AUTO folder program does not get.
+    if [[ -n "${AUTORUN:-}" ]]; then
+      python3 - "$B/EMUDESK.INF" "$AUTORUN" <<'INF'
+import sys
+p, prog = sys.argv[1], sys.argv[2].upper()
+lines = open(p, 'rb').read().decode('ascii').split('\r\n')
+lines.insert(1, '#Z 00 %s@' % prog)
+lines.insert(len(lines) - 1, '#F 06 FF %s@ @' % prog)
+open(p, 'wb').write('\r\n'.join(lines).encode('ascii'))
+INF
+    fi
     # How big C: is, and therefore how much PRG RAM is left over for a
     # payload's bulk data. 0x1C000 is the whole of the region between
     # EmuTOS's phystop and the timeshare's scratch, which is the right

@@ -11,7 +11,7 @@ index e66e52f..d2f4aad 100644
  #define Flopwr(a, b, c, d, e, f, g)        (long)R0056_TOS_CallXBIOS(0x09, a, b, c, d, e, f, g)
  #define Flopfmt(a, b, c, d, e, f, g, h, i) (long)R0056_TOS_CallXBIOS(0x0A, a, b, c, d, e, f, g, h, i)
 diff --git a/BASE.C b/BASE.C
-index a354faa..b4c228b 100644
+index 0038134..88294e7 100644
 --- a/BASE.C
 +++ b/BASE.C
 @@ -21,6 +21,7 @@ unsigned int16_t G0312_i_LastProjectileDisabledMovementDirection;
@@ -63,21 +63,8 @@ index a354faa..b4c228b 100644
          }
  }
  
-diff --git a/DIALOG.C b/DIALOG.C
-index 77a3e00..1a1a645 100644
---- a/DIALOG.C
-+++ b/DIALOG.C
-@@ -11,7 +11,7 @@ char* G0544_pc_THATDISKISWRITEPROTECTED = "THAT DISK IS WRITE-PROTECTED!";
- char* G0545_pc_THATDISKISUNREADABLE = "THAT DISK IS UNREADABLE.";
- char* G0546_pc_THATSNOTTHESAMEGAME = "THAT'S NOT THE SAME GAME.";
- char* G0547_pc_SAVEDGAMEDAMAGED = "SAVED GAME DAMAGED!";
--char* G0548_pc_PUTTHEGAMESAVEDISKIN = "PUT GAME SAVE DISK IN DRIVE A:";
-+char* G0548_pc_PUTTHEGAMESAVEDISKIN = "SAVED GAMES ARE ON DRIVE S:";
- char* G0549_pc_PUTTHEGAMEDISKIN = "PUT DUNGEON MASTER DISK IN A:";
- char* G0550_pc_PUTABLANKDISKIN = "PUT A BLANK DISK IN DRIVE A:";
- char* G0556_pc_LOADSAVEDGAME = "LOAD SAVED GAME";
 diff --git a/FLOPPY.C b/FLOPPY.C
-index 7adf570..5a7eaa0 100644
+index 59d5260..6e73e16 100644
 --- a/FLOPPY.C
 +++ b/FLOPPY.C
 @@ -16,6 +16,7 @@ unsigned int16_t F0452_FLOPPY_GetDiskTypeInDrive_CPSB(
@@ -103,7 +90,7 @@ index faf0425..53d25ed 100644
  
  
 diff --git a/LOADSAVE.C b/LOADSAVE.C
-index 7a54aa1..dda9677 100644
+index accc028..297ccca 100644
 --- a/LOADSAVE.C
 +++ b/LOADSAVE.C
 @@ -21,6 +21,7 @@ BOOLEAN F0432_STARTEND_FormatDiskMenu(
@@ -114,7 +101,7 @@ index 7a54aa1..dda9677 100644
          L1330_B_ReadyToFormat = C0_FALSE;
          L1332_pc_Message = NULL;
          do {
-@@ -384,7 +385,7 @@ int16_t F0435_STARTEND_LoadGame(
+@@ -378,7 +379,7 @@ int16_t F0435_STARTEND_LoadGame(
                                          if ((G0521_i_GameFileHandle = Fopen(G0520_pc_ADMGAMEBAK, C0_READ_ONLY)) >= 0) {
                                                  L1364_B_LoadBackupGame = C1_TRUE;
                                          } else {
@@ -173,7 +160,7 @@ index 4811b4a..7918347 100644
  }
  
 diff --git a/READWRIT.C b/READWRIT.C
-index 3bbab1e..ae8bff0 100644
+index 117143e..039f6d3 100644
 --- a/READWRIT.C
 +++ b/READWRIT.C
 @@ -1,8 +1,8 @@
@@ -200,7 +187,7 @@ index 39d8457..a733887 100644
                  while (P0844_B_ForceDialog || F0452_FLOPPY_GetDiskTypeInDrive_CPSB()) {
                          L1316_B_NoDialogDrawn = P0844_B_ForceDialog = C0_FALSE;
 diff --git a/SOUND.C b/SOUND.C
-index 7cc802d..10fb2b1 100644
+index 7cc802d..10f87dd 100644
 --- a/SOUND.C
 +++ b/SOUND.C
 @@ -28,6 +28,7 @@ int16_t          P0086_i_SoundVolume FINAL_SEPARATOR
@@ -211,6 +198,14 @@ index 7cc802d..10fb2b1 100644
          L0038_l_NextSoundSample = (long)P0084_puc_SoundData;
          L0038_l_NextSoundSample = (L0038_l_NextSoundSample + 2) * 2; /* The first two bytes contain the sample count. There are two samples per byte of sound data */
          L0039_i_RemainingSoundSampleCount = ((unsigned char)P0084_puc_SoundData[0] << 8) | (unsigned char)P0084_puc_SoundData[1];
+@@ -78,6 +79,7 @@ REGISTER int16_t P0087_i_AmplitudeIndex FINAL_SEPARATOR
+ #define AL0042_l_SoundSampleRepeatCount L0042_l_Multiple
+ 
+ 
++        return; /* Mega CD: $FF8800 is not a PSG here. On the sub CPU it mirrors the gate array's reset register, and writing it resets the gate array: every interrupt stops */
+         AL0042_l_SupervisorStack = Super(0L);
+         asm {
+                 and.w   #0x000F,P0087_i_AmplitudeIndex                                  /* This function is called only once with P0087_i_AmplitudeIndex = 8 */
 diff --git a/STARTUP1.C b/STARTUP1.C
 index b7dc8e3..d56e638 100644
 --- a/STARTUP1.C

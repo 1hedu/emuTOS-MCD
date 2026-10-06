@@ -187,6 +187,53 @@ extracts and patches the ST sources at build time, and the user
 supplies `DUNGEON.DAT` and `GRAPHICS.DAT` from their own disks. Nothing
 of either goes into the repository.
 
+### First runs, and what they found
+
+The data files are DM 1.1's (ReDMCSB's S11E). Their MD5s match the
+original disk's in ReDMCSB.xlsx, so `build-dm.sh S11E` builds the
+matching executable.
+
+**On an ST, it works.** The same patched DM.PRG runs under Hatari as an
+ST with 1 MB and EmuTOS. It shows "Presents", the title and the entrance
+screen. So the Megamax build, the VBL-queue change and the Setpalette
+palette path are sound, independently of the Mega CD.
+
+**On the Mega CD, two faults.**
+
+1. **The sound chip's address resets the gate array.** DM's sound init
+   silences the PSG by writing `$FF8800`. On the sub CPU that address is
+   a mirror of the gate array's own reset register (`$FF8001`), so the
+   write reset the peripherals and cleared the interrupt mask: no VBL,
+   no timer, and DM waiting forever in `Vsync`. Found with a write
+   watch on the gate array in a locally patched gpgx. The patch now
+   stubs `F0061_SOUND_SetChannelAmplitudes` as well. Any ST program that
+   touches the YM2149 directly will do the same thing here.
+2. **Memory.** After that fix DM starts, finds the bulk arena (80 KB at
+   `$68000`), and stops with SYSTEM ERROR 40, out of memory.
+
+**How much DM needs, measured.** DM was run under Hatari behind a
+launcher that leaves it a set amount of TPA. It reaches the entrance
+with 400 KB and fails at 390 KB. Its own image is 166 KB plus Megamax's
+8 KB stack, so it wants about 225 KB of heap, and in-game may want more.
+
+**How much this machine gives.** A program here gets 263,608 bytes of
+TPA from the desktop and 264,154 from AUTO, so the desktop costs almost
+nothing. That leaves DM 89 KB of heap plus the 80 KB arena, about
+135 KB short. Where more could come from:
+
+| | KB | catch |
+|---|---|---|
+| a 16 KB C: instead of 32 KB | +16 | to the bulk arena |
+| the GEM region | +33 | safe only when the AES has not started, so DM booted from AUTO |
+| the timeshare scratch, `$7C000`–`$7EFFF` | +12 | Mode 1 only: no CD BIOS to exchange |
+| the CD BIOS parking space in Word RAM | +24 | Mode 1 only |
+| an EmuTOS built without the AES and desktop | a lot | a separate "game" boot |
+
+The first four are scattered regions, so DM's allocator would need to
+take permanent allocations from more than one. Its large temporary
+allocations come off the heap. The title alone takes 133 KB, but DM
+skips the title when there is not room for it.
+
 ### Order of work
 
 1. ~~Build the extracted S12E sources.~~ **Done, with Megamax C itself.**
