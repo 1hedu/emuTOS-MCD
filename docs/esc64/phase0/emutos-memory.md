@@ -2,10 +2,110 @@
 
 Short answer: **yes.** Nothing fixed lives in $20000-$20FFF. That range is
 ordinary GEMDOS TPA, and the address can be reserved for certain with a few
-lines of code, either in EmuTOS or in an AUTO-folder TSR. The cost is 4 KB
-of TPA.
+lines of code, either in EmuTOS or in an AUTO-folder TSR. The reservation
+uses 4 KB, but it also splits the TPA, so the largest single block shrinks
+by about 46 KB (see "Re-measured on the dev branch").
 
-## 0. How this was established
+## Re-measured on the dev branch (supersedes the numbers below)
+
+* **Tree:** a084e52d with all 196 current `patches/emutos/*.patch`
+  (0001-0196, through "the romdisk is R:, and D: is the disc on both
+  boots"). They applied cleanly; HEAD is `585140e0`.
+* **Build:** same toolchain and workarounds as §0 (`-fno-ivopts
+  -fno-tree-slsr`, `bios/kprint.c` compiled by hand). The image is 236,614
+  bytes.
+* **What changed since the old series:** only 9 files differ, all from
+  patches 0191-0196: `segacd.c`, `segacd.h`, `scdapi.h`, `disk.c`,
+  `machine.h`, `screen.c` (Setcolor only), `geminit.c`, `deskapp.c` and
+  `vdi_mouse.c`. `biosmem.c`, `fsbuf.c`, the screen allocation and
+  `bios.c` are unchanged.
+
+### The new numbers
+
+| Item | Old series | Dev branch |
+|---|---|---|
+| `.bss` | $2140-$14FCF | $2140-$14FE3. segacd.o is now 17,266 B (+18): `scd_pal[16]`, raster and romdisk state. |
+| `__endvdibss` | $CBF8 | $CC0A |
+| MEMBOT (`end_os`) | $14FD0 | **$14FE4** (+20 B). RAM used: 85,988 B. |
+| GEMDOS buffers | to $1581F | $14FE4-$15833 (2,128 B, unchanged) |
+| TPA | $15820-$55FFF, 264,160 B | **$15834-$55FFF, 264,140 B**. `docs/ports.md` measures 264,154 B from AUTO and 263,608 B from the desktop on the real build. |
+| Screen | $58000 (+8 KB slack below) | unchanged: $58000-$5FFFF |
+| phystop | $60000 | unchanged |
+| C: ramdisk | $60000 + image length | Unchanged, on both boots. `boot/m1emu.S:394-402` plants it at $60000 in Mode 1; `sp.S` does the same on a disc boot. The default is $1C000, ending at $7C000. |
+| $7C000-$7FFFF | timeshare, CD buffer, BURAM, bounce, CDSECT | unchanged |
+
+### Correction to §1
+
+§1 said a launched GEM app gets "about 235 KB" because the AES `gl_tmp`
+buffer sits below it. The measurement in `docs/ports.md` (263,608 B from
+the desktop) shows that the desktop costs almost nothing.
+
+### Romdisk R:
+
+* **Where the data lives:** cartridge ROM, from cart offset $080000 up to
+  $200000 (`ROMDISK_MAX_SECTORS` 3072). It is not in sub RAM.
+* **How it is read:** the servant copies one sector at a time into the
+  existing bounce buffer at sub $7F000 (cart op 11, shared with S:). The
+  sub-side state is a `romdisk_sectors` word in BSS.
+* **Mode 1:** R: exists when the ROM carries an "EmuT" FAT image.
+* **Disc boot:** the servant refuses op 11, so R: does not exist.
+  D: is the disc on both boots.
+* **Effect on memory:** R: adds nothing above phystop.
+
+### New users of $20000-$20FFF
+
+* **Fixed users: none.** I grepped every added line in the whole series
+  for `0x2xxxx`. The only hit is the comment `0x080000..0x200000`, which
+  is a cart ROM address.
+* **New dynamic users (patches 0192, 0193, 0195):**
+  * **What they write:** the kernel writes the palette block (`PAL!`) at
+    `Physbase()+32000` and the raster block (`RST!`) at `+32240`. The
+    servant reads the pointer, scroll and blit blocks beside the shown
+    screen, and it reads an `SCD_RASTER` table wherever the program keeps
+    it.
+  * **Why they could touch the range:** all of these follow the
+    *physical* screen. A program that `Setscreen`s its own buffer, such as
+    Cyber Paint or the NEOchrome launcher, gets these writes up to
+    32,768 B past the buffer start.
+  * **When they hit $20000-$20FFF:** only if a TOS program puts its own
+    screen in roughly $18000-$20FFF. GEOS itself never does, and neither
+    does the desktop or any AUTO program.
+  * **Bank rule:** a screen still may not straddle a 128 KB bank, and
+    $20000 is a bank boundary.
+
+### Does the bios.c reservation still hold?
+
+* **Where:** yes. `autoexec()` is still at **`bios/bios.c:1135`**. It now
+  comes right after the `#ifdef MACHINE_SEGACD` dirty-framebuffer probe
+  at lines 1128-1134, so insert the reservation between line 1134 and
+  line 1135.
+* **Margin:** MEMBOT moved by only 20 B, leaving about 42 KB of margin
+  below $20000.
+* **The cost is larger than the 4 KB itself.** Pexec takes the *largest*
+  free block. A reservation at $20000 leaves two blocks:
+  $15834-$1FFFF (42,956 B) and $21000-$55FFF (217,088 B).
+  * So the largest program drops from about 264 KB to **about 212 KB**
+    (−46 KB), not −4 KB.
+  * NEOchrome is 204 KB with its BSS, and its launcher also needs to space
+    its screens. It would be on the edge.
+* **Programs parked at the memory limit (`docs/ports.md`):**
+  * **Cyber Paint** needs about 400 KB: 185 KB of image and BSS plus five
+    32 KB screens and a 64 KB frame pair. It has 79 KB of pool in a
+    264 KB TPA.
+  * **Dungeon Master** needs about 225 KB of heap, plus its 166 KB image
+    and an 8 KB stack, and gets 89 KB of heap plus the 80 KB bulk arena.
+    It is about 135 KB short.
+  * Both are already far beyond reach, so the reservation does not change
+    their status. It does move them further from any future fix.
+* **Recommendation, revised:**
+  * Keep the mechanism (c1): Malloc with a pad from `initial_basepage` at
+    `bios.c:1134/1135`.
+  * Make it conditional, for example on a GEOS boot flag or file. The
+    general-purpose boot would then keep its single 264 KB block.
+  * Alternatively, rely on (b) or (c2): an AUTO TSR shipped only on the
+    GEOS disc, or GEOS.PRG claiming the range itself.
+
+## 0. How this was established (old series 0001-0190; superseded by the section above)
 
 * Upstream EmuTOS was cloned to a scratch checkout of upstream EmuTOS, and the
   branch `segacd` was checked out at base commit
@@ -36,6 +136,10 @@ File:line references below are into the patched tree
 (a scratch checkout of upstream EmuTOS) unless prefixed with the project path.
 
 ## 1. Sub-CPU memory map at runtime (release build, no SCD_DIAG)
+
+*Old series. On the dev branch, `.bss` ends at $14FE3, MEMBOT is $14FE4
+and the TPA is $15834-$55FFF (264,140 B); everything from the screen up is
+unchanged. See the top section.*
 
 | Range | What | Source |
 |---|---|---|
@@ -106,7 +210,7 @@ Malloc is first-fit, lowest address first (`bdos/iumem.c:88-97`).
 * **When a GEM app is launched,** the desktop process terminates and its
   memory is freed (`desk/deskmain.c:2146-2181`, `aes/gemshlib.c:645`).
 * **Where the app lands.** With no AUTO TSRs and no ACCs, a GEM .PRG gets a
-  basepage at roughly **$1AB00** (membot + about $300 for the env and
+  basepage at roughly **$1AB00** *(superseded: ports.md measures 263,608 B of TPA from the desktop, so `gl_tmp` is not below the app)* (membot + about $300 for the env and
   basepages + 20 KB `gl_tmp`). Its TPA runs to about $56000, about 235 KB.
   A TOS or TTP program lands about 20 KB lower, because `sh_toalpha` frees
   `gl_tmp` (`aes/gemshlib.c:258`).
@@ -174,7 +278,7 @@ Malloc is first-fit, lowest address first (`bdos/iumem.c:88-97`).
   6. `Ptermres(own size)`.
 * **Why it is deterministic:** at AUTO time the free list is a single block
   starting just above membot (about $15900), so the addresses are known.
-* **Cost:** about 4 KB, plus the TSR's basepage and code.
+* **Cost:** about 4 KB, plus the TSR's basepage and code. *(Superseded: the largest free block also drops to about 212 KB; see the top section.)*
 * **Side effect:** the free list splits into a lower block of about 42 KB
   (below $20000) and an upper block of about 212 KB (from $21000 to $56000).
   AES `gl_tmp` and other small Mallocs fall into the lower block. Pexec

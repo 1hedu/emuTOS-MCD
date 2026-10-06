@@ -45,13 +45,16 @@ Three studies, each with its own report:
 
 ### Verdict: feasible, with five things to settle first
 
-**1. The gate at `$020000` can be kept.** Nothing fixed lives there:
-it is ordinary TPA. The recommended reservation is a few lines in
-`bios/bios.c` before `autoexec()` — Malloc a pad up to `$20000`,
-Malloc `$1000` (which then lands at `$20000`), free the pad — owned by
-the initial process, costing exactly 4 KB. A resident `AUTO` program
-doing the same is the fallback if EmuTOS should not change. Raising
-`membot` instead would cost ~46 KB; don't.
+**1. The gate at `$020000` can be kept, but not for free.** Nothing
+fixed lives there: it is ordinary TPA (re-measured on the dev branch:
+`$15834`–`$55FFF`, 264,140 bytes). Claiming it — Malloc a pad up to
+`$20000`, Malloc `$1000`, which then lands there, free the pad — costs
+4 KB of memory but splits the TPA in two, 42,956 bytes below and
+217,088 above, and Pexec takes the largest block: the biggest program
+drops from ~264 KB to ~212 KB (NEOchrome needs 204 KB). So the claim
+happens only when GEOS is wanted — `GEOS.PRG` making it itself if it
+was loaded below `$20000`, or an `AUTO` program on a GEOS disc — not in
+every boot. Raising `membot` instead would cost ~46 KB; don't.
 
 **2. Most application binaries run unmodified; seven do not.**
 Applications are base-relative throughout — data `label(a5)`, GEOS
@@ -167,7 +170,10 @@ None of these are fixed here.
 
 ### Decisions needed before phase 1
 
-1. Gate reservation: the EmuTOS patch (recommended), or `AUTO\GEOSRES.PRG`.
+1. Gate reservation: claimed by `GEOS.PRG` itself (recommended — no cost
+   to a boot that never runs GEOS), an `AUTO` program on a GEOS disc, or
+   an always-on EmuTOS patch that costs every program ~52 KB of largest
+   block.
 2. Shrink the C: ramdisk by 64 KB for two instances, or settle for one.
 3. Where GEOSCORE's source lives: a new directory in GEOS-Genesis
    (recommended — it reuses `src/kernal/` directly), or its own repo.
