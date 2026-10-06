@@ -1,10 +1,71 @@
 # ESC64 — the EmuTOS Subsystem for Commodore 64
 
-GEOS-Genesis (`1hedu/GEOS-genesis`) running inside EmuTOS the way Linux
-runs inside Windows under WSL1: no second machine, no second kernel
-image on its own hardware. The GEOS kernal is assembled as a TOS
-program on the Mega CD sub 68000, and its calls are answered through
-GEMDOS, AES and VDI. The Genesis main CPU stays iofw's.
+GEOS-Genesis (`1hedu/GEOS-genesis`) as a subsystem of EmuTOS, the way
+Linux is one of Windows under WSL. EmuTOS is the host; GEOS is the
+guest. It lives here, in this repository.
+
+There are two shapes, and both get built, cartridge first:
+
+* **Cartridge: WSL2.** GEOS runs as itself, a second kernel on its own
+  CPU: GEOS-Genesis, unported, on the Genesis main 68000, while EmuTOS
+  runs on the Mega CD's. Its screen is shown in a scrollable EmuTOS
+  window — WSLg — composited by the VDP, not copied.
+* **Disc: WSL1**, afterwards. The GEOS kernal assembled as a TOS
+  program on the sub 68000, its calls answered through GEMDOS, AES and
+  VDI. On a disc boot there is no cartridge ROM for GEOS to run from,
+  so this is the only shape a disc can have.
+
+## Cartridge (WSL2)
+
+| WSL2 | ESC64, cartridge |
+|---|---|
+| the Linux kernel in its VM | GEOS-Genesis on the Genesis 68000, with its own VDP presenter, pads, sound and sprites |
+| the Windows host | EmuTOS on the Mega CD 68000 |
+| WSLg | a GEM window whose work area is VDP tiles of GEOS's screen, on a C64 palette line; the sliders scroll a view of the 320×200 screen |
+| `/mnt/c`, `\\wsl$` | file exchange through the existing sector proxy, as S: is served today |
+
+**The constraint** is the Genesis's 64 KB of work RAM: GEOS uses all of
+it as the C64's memory, and iofw uses all of it too (code, the 32 KB
+planar cache, `tab8`). So iofw becomes almost RAM-free:
+
+* its code runs from cartridge ROM;
+* the change detection and planar-to-tile conversion move to the sub
+  CPU, into the 64 KB bulk arena at `$6C000` that the 48 KB C: now
+  leaves (32 KB previous frame, 32 KB converted tiles); the main CPU
+  only copies finished tiles to VRAM;
+* the few hundred bytes of state left go in Z80 RAM or GEOS's 2 KB
+  stack band.
+
+**The window.** VRAM has room for about 680 GEOS tiles beside the ST
+screen's 1000 — a view of about 256×160, which is what the scrollable
+window shows. EmuTOS tells the Genesis side where the work area is and
+which part of GEOS's screen it views; plane A's cells there point at
+GEOS's tiles with the C64 palette line. Scrolling re-presents only the
+cells that come into view.
+
+**Input.** The mouse is on the Genesis, so the main side routes it.
+Ordinary movement goes to EmuTOS as today and never to GEOS. A press
+inside the window goes to GEOS, in GEOS coordinates, and so does the
+position while the button is held, until the release: clicks and drags
+only. So GEOS menus that close when the pointer leaves them close on
+the next click instead, and the pointer is always EmuTOS's. The
+keyboard goes to whichever window has focus.
+
+**Costs.** Cartridge only; GEOS, EmuTOS, its images and the romdisk in
+one ROM of at most 4 MB (GEOS's disk images alone are ~1.8 MB); the
+Genesis CPU runs GEOS and the ST screen's tile copies both; one GEOS
+application at a time, because GEOS is single-tasking.
+
+**First measurement:** whether sub-side conversion plus main-side
+copying under SBRQ keeps up with the screen.
+
+## Disc (WSL1), afterwards
+
+GEOS-Genesis running inside EmuTOS the way Linux runs inside Windows
+under WSL1: no second machine, no second kernel image on its own
+hardware. The GEOS kernal is assembled as a TOS program on the Mega CD
+sub 68000, and its calls are answered through GEMDOS, AES and VDI. The
+Genesis main CPU stays iofw's.
 
 | WSL | ESC64 |
 |---|---|
@@ -17,15 +78,16 @@ GEMDOS, AES and VDI. The Genesis main CPU stays iofw's.
 | `\\wsl$` | `G:`, a FAT view of `.D64`/`.D81` images |
 | `wsl.exe` | `GEOSRUN.TTP`, asking `GEOS.ACC` to open an application |
 
-## Phases
+Phases:
 
-0. Feasibility — this directory, `phase0/`. Done.
 1. Headless console: `GEOS.PRG`, BASIC in a window, `LOAD"$",8` over a GEMDOS folder.
 2. One GUI application (geoWrite) in a scrolling window.
 3. Colour: the `C64!` block and a freed palette line.
 4. Two instances.
 5. `GEOS.ACC` and `GEOSRUN.TTP`.
 6. `G:`, writes both ways, file names, clipboard.
+
+Phase 0, below, was done for this shape; most of it carries over.
 
 ## Phase 0 results
 
@@ -168,12 +230,13 @@ letterbox is display-only.
 
 None of these are fixed here.
 
-### Decisions needed before phase 1
+### Decided
 
-1. Gate reservation: claimed by `GEOS.PRG` itself (recommended — no cost
-   to a boot that never runs GEOS), an `AUTO` program on a GEOS disc, or
-   an always-on EmuTOS patch that costs every program ~52 KB of largest
-   block.
-2. Shrink the C: ramdisk by 64 KB for two instances, or settle for one.
-3. Where GEOSCORE's source lives: a new directory in GEOS-Genesis
-   (recommended — it reuses `src/kernal/` directly), or its own repo.
+1. The cartridge (WSL2) first, the disc (WSL1) after.
+2. C: is 48 KB by default and carries only `EMUICON.RSC` and
+   `EMUDESK.INF`; the programs and README are on D: and R:. That frees
+   64 KB at `$6C000` — the sub-side screen buffers for the cartridge,
+   a second GEOS instance for the disc.
+3. ESC64 lives in this repository.
+4. For the disc: the gate at `$20000` is claimed by `GEOS.PRG` itself,
+   at no cost to a boot that never runs GEOS.

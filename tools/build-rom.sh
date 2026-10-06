@@ -102,8 +102,12 @@ ROMDISK=""
 if [[ "$(basename "$SRC")" = m1emu.S ]]; then
   # The disc's own programs first: on a disc they are on D:, and here
   # they are on R:. build-iso.sh made them; only what exists is added.
+  # C: carries none of them (see CADD in build-iso.sh), so this is where
+  # a cartridge boot finds its tools and its README.
   RDADD=()
-  for f in SHOW.PRG EDIT.PRG MANDEL.PRG DEMO.PI1; do
+  if [[ -f "$B/readme.txt" ]]; then RDADD+=(--add "$B/readme.txt:README.TXT"); fi
+  for f in EJECT.PRG NATIVE.PRG FORMATS.PRG FORMATI.PRG SRAMTOOL.PRG \
+           SHOW.PRG EDIT.PRG MANDEL.PRG DEMO.PI1; do
     if [[ -f "$B/$f" ]]; then RDADD+=(--add "$B/$f:$f"); fi
   done
   for dir in "$ROOT/vendor/stsoft" ${DDISK_DIR:+"$DDISK_DIR"}; do

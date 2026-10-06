@@ -159,7 +159,7 @@ refuses to run with less than 96,000 bytes. From that pool it then
 takes five 32,000-byte screens: undo, back buffer, tween start and end,
 and the 64 KB next/previous frame pair. The total is about 400 KB
 before any cel or animation delta. A 264 KB TPA leaves it 79 KB, and
-the bulk arena adds 12 KB with the default C: or 112 KB with a 32 KB
+the bulk arena adds 64 KB with the default 48 KB C: or 80 KB with a 32 KB
 C:. That is short even with both. The animation buffers are used in 11
 of its files, so dropping them is a rewrite of the animation engine,
 not a port. It is parked with DM: the build stays, for a machine with
@@ -315,7 +315,7 @@ both. They differ in where its two data files can come from.
 seek and a read through the CDC. That is slow, so a read cache for the
 file is the likely fix.
 
-**Cartridge.** There is no D:. C: is the 112 KB ramdisk in PRG-RAM,
+**Cartridge.** There is no D:. C: is the ramdisk in PRG-RAM (48 KB by default, 112 KB at most),
 and `docs/sonic.md` already found that full with a 52 KB file in it. S:
 is the cart's save RAM. Neither one can hold `GRAPHICS.DAT`: DM 1.x's
 is a few hundred kilobytes. Check the size against your own dump.

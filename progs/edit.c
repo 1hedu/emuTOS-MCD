@@ -449,8 +449,8 @@ int pmain(void)
 {
 #ifdef EDIT_AUTO
     /* Emulator only, and never on a cartridge: no menu. Load a file
-     * that is certainly on C:, draw it, and fall into the ordinary key
-     * loop below. With nothing typed the screen is as stable as the
+     * that is certainly on C: (EDITAUTO puts it there), draw it, and
+     * fall into the ordinary key loop below. With nothing typed the screen is as stable as the
      * old hold-forever was, so a framebuffer dump still compares
      * against the file. The hold-forever version read no keys at all,
      * so the serial-keyboard test could not type into it. */

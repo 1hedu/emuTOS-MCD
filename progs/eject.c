@@ -128,7 +128,7 @@ int pmain(void)
         con_ws(", the driver is v");
         put2(g_api ? g_api->version : 0);
         con_ws(g_api ? ".\r\n" : " (no cookie).\r\n");
-        con_ws("That is an old copy of EJECT.PRG. Use the one on C:.\r\n");
+        con_ws("That is an old copy of EJECT.PRG. Use the one on D: or R:.\r\n");
         return 0;
     }
 

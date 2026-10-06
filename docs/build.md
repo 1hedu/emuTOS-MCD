@@ -117,17 +117,18 @@ more frames than it will survive.
 ## Flags
 
 `tools/build-iso.sh` reads these from the environment. The first four
-are the ones worth knowing. SHOW, EDIT, MANDEL and DEMO.PI1 are on D:
-on a disc and R: on a cartridge and not on C: unless `FULLC` asks (MANDEL.PRG computes
+are the ones worth knowing. The programs and README.TXT are on D:
+on a disc and R: on a cartridge; C: carries only EMUICON.RSC and
+EMUDESK.INF, which EmuTOS reads from the boot drive, unless `FULLC` asks (MANDEL.PRG computes
 the picture in DEMO.PI1 on the machine, in about 37 seconds, and saves
 it as C:\MANDEL.PI1); `SLIMC=1`, which used to leave
 them off, is now what happens anyway.
 
 | | |
 |---|---|
-| `FULLC=1` | put SHOW, EDIT and DEMO.PI1 on C: as well as D: |
+| `FULLC=1` | put the programs, README.TXT and DEMO.PI1 on C: as well |
 | `ADISK_DIR=<dir>` | put a directory's files on C: |
-| `ADISK_SIZE=0x…` | how big C: is, and so how much PRG RAM a payload has left |
+| `ADISK_SIZE=0x…` | how big C: is, and so how much PRG RAM a payload has left; 0xC000 (48 KB) by default, 0x1C000 at most |
 | `SONICACC=1` | add the Sonic accessory (see below) |
 | `DIAG=1` | the diagnostic programs on C: and D: |
 | `AUTORUN=D:\\X.PRG` | the AES starts that program instead of the desktop; `AUTORUN_GEM=0` for a .PRG that is a TOS program |
@@ -214,7 +215,7 @@ cached in `.cache/`, which is git-ignored like the data files.
 `ADISK_SIZE=0x8000` is there for memory. DM takes all of the
 TPA, and its permanent allocations go in the bulk arena: the PRG-RAM
 between the end of C: and the servant's scratch. A 32 KB C: leaves 80 KB
-there, and the default 112 KB C: leaves nothing.
+there, and the default 48 KB C: leaves 64 KB.
 
 ## Adding Devpac
 

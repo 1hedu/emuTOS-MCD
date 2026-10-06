@@ -47,7 +47,7 @@ Verified sizes, from the current build:
 | | bytes | goes to |
 |---|---|---|
 | `emutos-segacd.img` | 236360 | sub `0x080000` (Word RAM) |
-| `ADISK.IMG` | 114688 | sub `0x060000` (PRG-RAM bank 3) |
+| `ADISK.IMG` | 114688 (49152 since the default C: became 48 KB) | sub `0x060000` (PRG-RAM bank 3) |
 | `iofw.bin` | 11576 | main `0xFF1000` (Genesis work RAM) |
 
 362624 bytes of payload, so a 512 KB ROM. `iofw.bin` already relocates

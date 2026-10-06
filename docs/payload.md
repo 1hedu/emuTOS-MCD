@@ -149,15 +149,14 @@ it. What is actually true:
   * EmuTOS's own memory ends at `phystop`, sub `$60000`.
   * The C: ramdisk starts there. Its length is the total-sector count in
     its own boot sector, which is whatever `tools/build-iso.sh` built it
-    at -- `ADISK_SIZE`, 0x1C000 by default.
+    at -- `ADISK_SIZE`, 0xC000 by default (0x1C000 at most).
   * Sub `$7C000`..`$7EFFF` is the timeshare's scratch, and `$7F000` up is
     the sector bounce buffer and the captured-sector slot.
 
 So the bulk arena is **everything between the end of the ramdisk and
-`$7C000`**, and on a disc whose ramdisk is the default size that is
-twelve kilobytes. A disc that carries a payload with a `.MDD` builds a
-smaller C: -- `tools/build-datadisc.sh` uses 32KB and drops from it
-everything that is also on D:, which leaves 112KB.
+`$7C000`**, and with the default 48KB ramdisk that is 64KB, from
+`$6C000`. A disc that carries a payload with a `.MDD` builds a
+smaller C: -- `tools/build-datadisc.sh` uses 32KB, which leaves 80KB.
 
 `SCD_BULK_INFO` is how a program asks: it fills two longs, the byte
 address and the length, and a length of zero means the ramdisk filled

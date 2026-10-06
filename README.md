@@ -28,7 +28,7 @@ Options → Save Desktop writes to `I:`, which both boots read. `I:` and
 the cart — see `docs/bram-filesystem.md`.
 
 The disc carries a picture viewer, a text editor, formatters and a
-backup tool; `readme.txt` on C: lists them. `PRN:` is a printer on the
+backup tool; `README.TXT` on D: (R: on a cartridge) lists them. `PRN:` is a printer on the
 EXT port — see `docs/printer.md` and `hardware/pico-printer/`.
 
 ## Running it

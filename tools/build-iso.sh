@@ -321,6 +321,8 @@ the backup RAM cartridge.
 
 Drive C: this ramdisk, and the system drive.
 Drive D: the compact disc.
+Drive R: the cartridge's romdisk, on a
+         cartridge boot.
 Drive I: the console's internal backup RAM, 8K.
 Drive S: the cartridge's save RAM.
 
@@ -364,12 +366,14 @@ MANDEL.PRG draws that same picture on this
 machine, as you watch, then saves it as
 C:\MANDEL.PI1 for SHOW.  Any button returns.
 
-SHOW, EDIT and DEMO.PI1 are on D:, the disc,
-or on a cartridge on R:, its ROM -- and run from
-there.  A cartridge boot can have a disc in the
-tray as well, and it is D: then.
-C: is rebuilt at every start, so copy anything
-to it you like: it is back to this next time.
+All of these, and this file, are on D:, the
+disc, or on a cartridge on R:, its ROM -- and
+run from there.  A cartridge boot can have a
+disc in the tray as well, and it is D: then.
+C: holds only what the desktop reads at
+startup, and the rest of it is yours: it is
+rebuilt at every start, so copy anything to it
+you like, and it is back to empty next time.
 
 NATIVE.PRG runs Genesis-side code off a disc
 -- a .MDP file.  EmuTOS is on the Mega CD's
@@ -430,30 +434,31 @@ open(p, 'wb').write('\r\n'.join(lines).encode('ascii'))
 INF
     fi
     # How big C: is, and therefore how much PRG RAM is left over for a
-    # payload's bulk data. 0x1C000 is the whole of the region between
-    # EmuTOS's phystop and the timeshare's scratch, which is the right
-    # default for a system disc and the wrong one for a disc carrying a
-    # .MDD: the driver takes the ramdisk's length from this image's own
-    # boot sector, so shrinking it here is what frees the rest.
-    # What goes on C:: only what is not also on D:, because the
-    # ramdisk's length is what decides how much PRG RAM is left for a
-    # payload's bulk data, and a full one leaves none. See ADISK_SIZE
-    # above and docs/payload.md.
-    CADD=(--add "$B/readme.txt:README.TXT"
-          --add "$B/EMUICON.RSC:EMUICON.RSC"
-          --add "$B/EMUDESK.INF:EMUDESK.INF"
-          --add "$B/EJECT.PRG:EJECT.PRG"
-          --add "$B/NATIVE.PRG:NATIVE.PRG")
-    CADD+=(--add "$B/FORMATS.PRG:FORMATS.PRG"
-           --add "$B/FORMATI.PRG:FORMATI.PRG"
-           --add "$B/SRAMTOOL.PRG:SRAMTOOL.PRG")
-    # SHOW, EDIT and DEMO.PI1 live on D: -- the disc -- or R:, the
-    # cartridge's romdisk, and not on C:. C: is rebuilt on every boot, so a copy
-    # made there can be deleted and made again; a copy put there by
-    # default only spends PRG RAM. FULLC=1 puts them back. (SLIMC=1, which
-    # used to be how to leave them off, is now simply what happens.)
+    # payload's bulk data. The region between EmuTOS's phystop and the
+    # timeshare's scratch is 0x1C000; the driver takes the ramdisk's
+    # length from this image's own boot sector, so what C: does not take
+    # is the bulk arena. 0xC000 by default: C: carries only the two
+    # files below, so it is 48 KB of scratch, and the 64 KB it leaves at
+    # 0x6C000 is the room the GEOS subsystem's screen path needs on the
+    # sub side (docs/esc64/). ADISK_SIZE=0x1C000 gives C: all of it.
+    #
+    # What goes on C:: only what EmuTOS reads from the boot drive and
+    # nowhere else -- the drive icons, and the desktop settings a console
+    # whose I: holds none falls back to. Everything else lives on D:,
+    # the disc, or R:, the cartridge's romdisk (tools/build-rom.sh), and
+    # runs from there: C: is rebuilt on every boot, so a copy made there
+    # can be made again, and a copy put there by default only spends
+    # PRG RAM. FULLC=1 puts the programs back.
+    CADD=(--add "$B/EMUICON.RSC:EMUICON.RSC"
+          --add "$B/EMUDESK.INF:EMUDESK.INF")
     if [[ -n "${FULLC:-}" ]]; then
-      CADD+=(--add "$B/SHOW.PRG:SHOW.PRG"
+      CADD+=(--add "$B/readme.txt:README.TXT"
+             --add "$B/EJECT.PRG:EJECT.PRG"
+             --add "$B/NATIVE.PRG:NATIVE.PRG"
+             --add "$B/FORMATS.PRG:FORMATS.PRG"
+             --add "$B/FORMATI.PRG:FORMATI.PRG"
+             --add "$B/SRAMTOOL.PRG:SRAMTOOL.PRG"
+             --add "$B/SHOW.PRG:SHOW.PRG"
              --add "$B/EDIT.PRG:EDIT.PRG"
              --add "$B/DEMO.PI1:DEMO.PI1")
     fi
@@ -480,7 +485,10 @@ INF
     [[ -n "${SPLITAUTO:-}" ]] && CADD+=(--add "$B/SPLITAUT.PRG:AUTO/SPLITAUT.PRG")
     [[ -n "${SHOWAUTO:-}" ]] && CADD+=(--add "$B/SHOWAUTO.PRG:AUTO/SHOWAUT.PRG"
                                        --add "$B/TEST.PI1:TEST.PI1")
-    [[ -n "${EDITAUTO:-}" ]] && CADD+=(--add "$B/EDITAUTO.PRG:AUTO/EDITAUT.PRG")
+    # EDITAUTO opens README.TXT from C:, the current drive at boot, and
+    # by default C: no longer carries it.
+    [[ -n "${EDITAUTO:-}" ]] && CADD+=(--add "$B/EDITAUTO.PRG:AUTO/EDITAUT.PRG"
+                                       --add "$B/readme.txt:README.TXT")
     [[ -n "${NATAUTO:-}" ]] && CADD+=(--add "$B/NATAUTO.PRG:AUTO/NATAUT.PRG")
     [[ -n "${HELLOA:-}" ]] && CADD+=(--add "$B/HELLO.MDP:HELLO.MDP")
     [[ -n "${PRNAUTO:-}" ]] && CADD+=(--add "$B/PRNTAUTO.PRG:AUTO/PRNTAUT.PRG")
@@ -500,7 +508,7 @@ INF
         CADD+=(--add "$B/SONIC.ACC:SONIC.ACC")
       fi
     fi
-    python3 "$ROOT/tools/mkfat.py" "$B/fs/ADISK.IMG" --size "${ADISK_SIZE:-0x1C000}" \
+    python3 "$ROOT/tools/mkfat.py" "$B/fs/ADISK.IMG" --size "${ADISK_SIZE:-0xC000}" \
       --label EMUTOSMD --oem EmuTOSMD "${CADD[@]}" >/dev/null
     # D: -- a FAT16 filesystem that stays on the disc and is read a
     # sector at a time, rather than being loaded into RAM like A:. That
@@ -557,7 +565,11 @@ FILL
       --entropy \
       --add "$B/dread.txt:READCD.TXT" \
       --add "$B/filler.bin:FILLER.BIN" \
+      --add "$B/readme.txt:README.TXT" \
       --add "$B/EJECT.PRG:EJECT.PRG" \
+      --add "$B/FORMATS.PRG:FORMATS.PRG" \
+      --add "$B/FORMATI.PRG:FORMATI.PRG" \
+      --add "$B/SRAMTOOL.PRG:SRAMTOOL.PRG" \
       --add "$B/SHOW.PRG:SHOW.PRG" \
       --add "$B/EDIT.PRG:EDIT.PRG" \
       --add "$B/MANDEL.PRG:MANDEL.PRG" \
