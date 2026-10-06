@@ -1,5 +1,7 @@
 # Three programs, measured
 
+*Dungeon Master is parked: see "Status: parked at a hard limit" below.*
+
 ORCS, rmac and Dungeon Master were proposed as ports. Each one was
 fetched and measured against this machine before any work started.
 Two of them fail on size. Dungeon Master fits, and its own memory
@@ -186,6 +188,27 @@ executables. The model is the Sonic one: a script fetches ReDMCSB and
 extracts and patches the ST sources at build time, and the user
 supplies `DUNGEON.DAT` and `GRAPHICS.DAT` from their own disks. Nothing
 of either goes into the repository.
+
+### Status: parked at a hard limit
+
+**Parked, October 2026.** DM needs about 225 KB of heap and this machine
+gives it 89 KB; every scattered region added together does not close
+that gap. It is a hard limit of the Mega CD's memory map, not something
+the port can engineer around. Revisit with a 32X attached: its RAM is
+the missing piece.
+
+Nothing is lost. What stays in the repository, and works:
+
+- `tools/build-dm.sh S11E|S12E` builds DM with ReDMCSB's own Megamax
+  toolchain under Hatari, from a pinned ReDMCSB download.
+- `tools/dm-reduce.py` and `patches/dm/megacd.patch` are the port.
+- The patched DM 1.1 runs on an emulated 1 MB ST to the entrance
+  screen.
+- On the Mega CD it starts, runs its VBL and palette paths, finds the
+  bulk arena, and stops at SYSTEM ERROR 40.
+
+The romdisk, the Setcolor/Setpalette path and `AUTORUN` came out of
+this work and stand on their own.
 
 ### First runs, and what they found
 
