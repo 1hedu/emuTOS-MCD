@@ -220,7 +220,11 @@ part every picture is.
 **Shots.** Standing, running or in the air, a shot is three things: his
 pose, the flash and bolt flying as an animation of their own, and his
 colours lit for 29 frames, entries 1 to 8 of his palette frame by frame
-as the game does it. Up to four shots can be in the air.
+as the game does it. Up to four shots can be in the air. A shot shows
+two frames after the button, standing, running or in the air, and its
+sound starts one frame after — the game's own timing, measured the same
+way off both. Those two frames are not a wind-up: they are how long any
+press takes to reach the screen, in the game and here alike.
 
 **Sound.** The 68000 plays the FM effects, a frame's writes in each
 vertical blank. The landing is 8860 bytes a second, too fast for that,
@@ -255,8 +259,6 @@ decodes at most three records a frame, catching up on the next.
     another, the in-between frames here are the blend above: the same
     pictures getting to the same place, but not the poses the skeleton
     would have passed through.
-  * **The shot's two frames of wind-up.** The game fires two frames after
-    the button; here it is the same frame.
   * **The music.** Only his own sounds.
   * **Enemies, scenery, anything to shoot.** The desktop is the level.
 
