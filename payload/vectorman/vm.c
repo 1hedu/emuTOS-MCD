@@ -4,22 +4,26 @@
  * edge on it -- the menu bar's underside, a window's frame, the top of
  * an icon -- is a surface he can land on, and he jumps up through them
  * the way he jumps up through the girders of the level he comes from.
- * The d-pad walks, C jumps and C again in the air fires his boots, A or
- * B shoots, down looks down and down with C drops through what he is
- * standing on. Start puts the desktop back.
+ * The d-pad walks, a tap the other way turns him round, C jumps and C
+ * again in the air fires his boots, A or B shoots -- standing, running
+ * or in the air -- down looks down and down with C drops through what
+ * he is standing on. Start puts the desktop back.
  *
- * He is the cartridge's own drawing and moves by the cartridge's own
- * numbers. VECTOR.MDD is every pose the game drew him in, recorded off
- * the running game by tools/vectorman-tools/extract.py, and the physics
- * below were measured off the same runs: a walk that gains 32/256 of a
- * pixel a frame up to four, a turn that sheds 128, a jump that starts
- * at -2080 and loses 96 a frame. Nothing here was eyeballed.
+ * He is the cartridge's own drawing, moves by the cartridge's own numbers
+ * and makes the cartridge's own noises. VECTOR.MDD is every pose the game
+ * drew him in and every write its sound driver made for him, recorded
+ * off the running game by tools/vectorman-tools/extract.py, and the
+ * physics below were measured off the same runs: a walk that gains
+ * 32/256 of a pixel a frame up to four, a turn that sheds 128, a jump
+ * that starts at -2080 and loses 96 a frame. Nothing here was eyeballed.
  *
  * What it does not have is the game's skeleton. The cartridge works his
  * pose out every frame from joint angles; this plays back the poses it
- * worked out. That is why some things are not here -- shooting while
- * walking, say, which the game composes on the fly and nobody recorded
- * -- and why everything that is here looks exactly right.
+ * worked out. Where the game eases from one movement into another -- out
+ * of standing into the first stride, out of aiming back into the run --
+ * the skeleton is what does the easing, and here each of his sprites is
+ * moved instead to the nearest one of the same part in the new pose
+ * (blend, below). It is the same picture getting there the same way.
  *
  * The desktop is read once, at the start, into a bitmap of which pixels
  * are not the background. Nothing can draw on it while he runs -- the
@@ -42,6 +46,13 @@ typedef long LONG;
 #define GA_MEMMODE  (*(volatile UBYTE *)0xA12003)
 #define PAD_DATA    (*(volatile UBYTE *)0xA10003)
 #define PAD_CTRL    (*(volatile UBYTE *)0xA10009)
+#define Z80_RAM     ((volatile UBYTE *)0xA00000)
+#define Z80_BUSREQ  (*(volatile UWORD *)0xA11100)
+#define Z80_RESET   (*(volatile UWORD *)0xA11200)
+#define YM_A0       (*(volatile UBYTE *)0xA04000)
+#define YM_D0       (*(volatile UBYTE *)0xA04001)
+#define YM_A1       (*(volatile UBYTE *)0xA04002)
+#define YM_D1       (*(volatile UBYTE *)0xA04003)
 
 #define VRAM_W(a)   (0x40000000UL | (((ULONG)(a) & 0x3FFFu) << 16) | ((ULONG)(a) >> 14))
 #define CRAM_W(a)   (0xC0000000UL | ((ULONG)(a) << 16))
@@ -69,7 +80,10 @@ enum {
     A_WALK = 8,                 /* eight segments of the cycle: 8 + 2s */
     A_STOP = 24, A_JUMP = 26, A_LAND = 28, A_BOOST = 30, A_SHOOT = 32,
     A_DOWN_IN = 34, A_DOWN_OUT = 36,
-    A_COUNT = 38
+    A_AIM = 38,                 /* the aiming walk, eight segments too */
+    A_AIRSHOT = 54, A_TURN = 56,
+    A_SHOTFX = 58, A_AIRFX = 60,/* effects only: a flash and a bolt */
+    A_COUNT = 62
 };
 #define H_TOTAL     8
 #define H_NRUNS     12
@@ -85,7 +99,12 @@ enum {
 #define H_PAL       36
 #define H_PALFX     68
 #define H_CYCLE     100
-#define H_SIZE      360
+#define H_AIMF      356         /* frames a running shot aims for */
+#define H_NGLOW     358         /* frames of the glow a shot lights him with */
+#define H_GLOW      360
+#define H_BOLT      364         /* the standing shot's bolt against SHOTFX's */
+#define H_SFX       372
+#define H_SIZE      384
 
 /* ---- his numbers, measured off the cartridge (docs/vectorman.md) ------- */
 #define WALK_ACC    32          /* 1/256 px a frame, a frame */
@@ -104,38 +123,65 @@ enum {
 #define LAND_HOLD   9           /* frames of landing he keeps his speed through */
 #define SURF_MIN    16          /* the narrowest edge he comes down on */
 #define DROP        24          /* down with C passes this many rows */
+#define AIM_EASE    8           /* the last frames of an aim ease back to the walk */
+#define AIM_JUMP    4           /* the stride jumps ahead this far on a shot */
+#define TAP         8           /* a press the other way let go of sooner is a turn */
 
-enum { S_IDLE, S_WALK, S_STOP, S_AIR, S_LAND, S_SHOOT, S_DOWN };
+enum { S_IDLE, S_WALK, S_STOP, S_AIR, S_LAND, S_SHOOT, S_DOWN, S_TURN };
 
 struct spr { WORD dx, dy; UBYTE g, fl; };
+#define NPART       16          /* kinds of picture: a ball, a hand, a foot... */
+
+/* An animation playing: his own, or one of the effects flying about. */
+struct player {
+    const UBYTE *next;          /* the record after the current one */
+    const UBYTE *front, *back;  /* this record's effects, in the blob */
+    UWORD id, ai, nrec, fr;     /* which, which record, how many, frame */
+    UBYTE left;                 /* frames the current record has to run */
+    UBYTE nfront, nback, nbody;
+};
+
+/* A shot's flash and bolt. The flash rides with him; the bolt flies from
+ * where it was fired, whatever he does after. */
+struct fx {
+    struct player pl;
+    WORD x, y;                  /* where it was fired */
+    UBYTE on, front, wait;
+};
+#define NFX 4
 
 /* Everything that changes, in the servant's working space. */
 struct vm {
     UWORD pix[200 * 20];        /* the desktop, a bit a pixel, set = drawn */
     struct spr body[32];        /* his sprites as the last record left them */
+    struct spr shown[32];       /* ...and as they were last drawn */
+    struct spr from[32];        /* where a blend started, sorted by part */
+    UBYTE fstart[NPART + 1];    /* where each part's sprites begin in it */
     UWORD sat[80 * 4];
-    const UBYTE *front, *back;  /* this frame's effects, in the blob */
-    UBYTE nbody, nfront, nback, dur;
-
-    /* the animation playing */
-    const UBYTE *anext;         /* the record after the current one */
-    UWORD aid, ai, anrec, afr;  /* which, which record, how many, frame */
-    UBYTE left;                 /* frames the current record has to run */
+    struct player me;
+    struct fx fx[NFX];
 
     LONG x, y;                  /* his feet, in 1/256 px */
     WORD vx, vy;
     UBYTE facing;               /* 0 left, 1 right */
-    UBYTE state, boosted, k, step, skid, held;
+    UBYTE state, boosted, k, step, skid, held, aim, tap;
+    UBYTE nshown, nfrom, bw, bstep;
     WORD ignore;                /* rows above this are not landed on */
-    UWORD loops, due, fidget, seed, cyc, nsat;
-    UBYTE pad, prev;
-};
-_Static_assert(sizeof(struct vm) <= 10240, "head.S WORKSPACE is too small");
+    UWORD loops, due, fidget, seed, cyc, nsat, glow, nglow;
+    UBYTE pad, prev, sound;
+    UWORD landlen;              /* the landing sample, as much as the Z80 holds */
 
-/* The one static, and it is initialised so that it is .data: there is
- * no .bss in a payload. */
+    /* the two FM effects playing, frame by frame */
+    const UBYTE *sfx[2];
+    UWORD sfxleft[2];
+};
+_Static_assert(sizeof(struct vm) <= 11264, "head.S WORKSPACE is too small");
+
+/* The statics, each initialised so that it is .data: there is no .bss
+ * in a payload. */
 static struct vm *V = 0;
 static const UBYTE *blob = 0;
+static const UBYTE *groups = 0;         /* the pictures: tile, size, part */
 
 void vm_main(const UWORD *screen, struct vm *work, ULONG mode,
              const UBYTE *bulk, ULONG blen);
@@ -156,7 +202,22 @@ void *memcpy(void *d, const void *s, unsigned long n)
     return d;
 }
 
-static UWORD rd16(const UBYTE *p) { return (UWORD)((p[0] << 8) | p[1]); }
+/* A run of sprites, three words each. memcpy above goes a byte at a time,
+ * at seventy-odd cycles a byte, and a pose is a hundred and twenty-six. */
+static void spr_copy(struct spr *d, const struct spr *s, UBYTE n)
+{
+    UWORD *p = (UWORD *)d;
+    const UWORD *q = (const UWORD *)s;
+    UWORD w = (UWORD)(3 * n);
+    while (w--)
+        *p++ = *q++;
+}
+
+/* The few small things done hundreds of times a frame are inlined: at
+ * -Os gcc would rather call them, and on a 68000 the call is most of it. */
+#define HOT static inline __attribute__((always_inline))
+
+HOT UWORD rd16(const UBYTE *p) { return (UWORD)((p[0] << 8) | p[1]); }
 static ULONG rd32(const UBYTE *p) { return ((ULONG)rd16(p) << 16) | rd16(p + 2); }
 static WORD hdr16(UWORD o) { return (WORD)rd16(blob + o); }
 
@@ -178,7 +239,7 @@ static void bank(UWORD b)
 static int good(const UBYTE *b, ULONG len)
 {
     return b[0] == 'V' && b[1] == 'M' && b[2] == 'D' && b[3] == 'D'
-        && rd32(b + H_TOTAL) <= len;
+        && b[4] == 0 && b[5] == 2 && rd32(b + H_TOTAL) <= len;
 }
 
 static const UBYTE *rom_find(void)
@@ -231,7 +292,7 @@ static void read_desktop(const UWORD *s)
         *d++ = s[0] | s[1] | s[2] | s[3];
 }
 
-static int px(WORD x, WORD y)
+HOT int px(WORD x, WORD y)
 {
     if ((UWORD)x >= 320 || y < 0)
         return 0;
@@ -240,7 +301,7 @@ static int px(WORD x, WORD y)
     return (V->pix[(UWORD)y * 20 + ((UWORD)x >> 4)] << (x & 15)) & 0x8000;
 }
 
-static int solid(WORD x, WORD y)
+HOT int solid(WORD x, WORD y)
 {
     return px(x - 1, y) && px(x, y) && px(x + 1, y);
 }
@@ -279,7 +340,7 @@ static int lands(WORD x, WORD y)
 }
 
 /* ---- playing the poses ---------------------------------------------------- */
-static void spr_read(struct spr *s, const UBYTE *p)
+HOT void spr_read(struct spr *s, const UBYTE *p)
 {
     s->dx = (WORD)rd16(p);
     s->dy = (WORD)rd16(p + 2);
@@ -288,78 +349,89 @@ static void spr_read(struct spr *s, const UBYTE *p)
 }
 
 /* One record: his sprites, whole or as changes, then the effects in
- * front of him and behind him, which stay where they are in the blob. */
-static const UBYTE *rec(const UBYTE *p)
+ * front of him and behind him, which stay where they are in the blob.
+ * An effects-only animation has none of his, and only his own player
+ * keeps any. */
+static const UBYTE *rec(struct player *pl, const UBYTE *p)
 {
     UBYTE n, i, c;
-    V->dur = p[0];
+    struct spr *b = V->body;
+    pl->left = p[0];
     n = p[2];
-    V->nbody = n;
+    pl->nbody = n;
     if (p[1] == 0) {
         p += 3;
-        for (i = 0; i < n; i++, p += 6)
-            spr_read(&V->body[i], p);
+        for (i = n; i; i--, p += 6)
+            spr_read(b++, p);
     } else {
         const UBYTE *mask = p + 3;
+        UBYTE bits = 0;
         p = mask + ((n + 7) >> 3);
-        for (i = 0; i < n; i++) {
-            UBYTE b;
-            if (!(mask[i >> 3] & (0x80 >> (i & 7))))
+        for (i = 0; i < n; i++, b++, bits <<= 1) {
+            UBYTE d;
+            if (!(i & 7))
+                bits = *mask++;
+            if (!(bits & 0x80))
                 continue;
-            b = *p++;
-            if (b == 0x88)
+            d = *p++;
+            if (d == 0x88)
                 continue;               /* replaced below */
-            V->body[i].dx += (WORD)(((b >> 4) ^ 8) - 8);
-            V->body[i].dy += (WORD)(((b & 15) ^ 8) - 8);
+            b->dx += (WORD)(((d >> 4) ^ 8) - 8);
+            b->dy += (WORD)(((d & 15) ^ 8) - 8);
         }
+        b = V->body;
         for (c = *p++; c; c--, p += 7)
-            spr_read(&V->body[p[0]], p + 1);
+            spr_read(&b[p[0]], p + 1);
     }
-    V->nfront = *p;
-    V->front = p + 1;
+    pl->nfront = *p;
+    pl->front = p + 1;
     p += 1 + 6 * (UWORD)*p;
-    V->nback = *p;
-    V->back = p + 1;
+    pl->nback = *p;
+    pl->back = p + 1;
     p += 1 + 6 * (UWORD)*p;
     return p;
 }
 
-static void play(UWORD id)
+static void play_on(struct player *pl, UWORD id)
 {
     const UBYTE *t = blob + rd32(blob + H_ANIMS) + 12 * id;
-    V->aid = id;
-    V->anrec = rd16(t + 4);
-    V->ai = 0;
-    V->afr = 0;
-    V->anext = rec(blob + rd32(t));
-    V->left = V->dur;
+    pl->id = id;
+    pl->nrec = rd16(t + 4);
+    pl->ai = 0;
+    pl->fr = 0;
+    pl->next = rec(pl, blob + rd32(t));
 }
 
 /* A frame on. Nonzero, and nothing moved, if the animation was already
  * on its last frame: what follows is the caller's to decide. */
-static int tick(void)
+static int tick_on(struct player *pl)
 {
-    if (V->left > 1) {
-        V->left--;
-        V->afr++;
+    if (pl->left > 1) {
+        pl->left--;
+        pl->fr++;
         return 0;
     }
-    if (V->ai + 1 >= V->anrec)
+    if (pl->ai + 1 >= pl->nrec)
         return 1;
-    V->ai++;
-    V->afr++;
-    V->anext = rec(V->anext);
-    V->left = V->dur;
+    pl->ai++;
+    pl->fr++;
+    pl->next = rec(pl, pl->next);
     return 0;
 }
 
-static void seek(UWORD id, UWORD frame)
+#define play(id)    play_on(&V->me, (id))
+#define tick()      tick_on(&V->me)
+
+/* To a frame of an animation, decoding up to `most` records past its
+ * first; called again, it carries on from where it got to. */
+static void seek_some(UWORD id, UWORD frame, UWORD most)
 {
-    if (V->aid != id || V->afr > frame)
+    if (V->me.id != id || V->me.fr > frame)
         play(id);
-    while (V->afr < frame && !tick())
+    while (V->me.fr < frame && most-- && !tick())
         ;
 }
+#define seek(id, frame)     seek_some((id), (frame), 0xFFFF)
 
 static UBYTE anim_byte(UWORD id, UWORD o)
 {
@@ -368,11 +440,111 @@ static UBYTE anim_byte(UWORD id, UWORD o)
 #define ENTRY(id)   anim_byte(id, 8)    /* the loop frame a fidget leaves at */
 #define EXIT(id)    anim_byte(id, 9)    /* the loop frame it hands back to */
 
+/* ---- easing from one pose into another -----------------------------------
+ * Over the next few frames each of his sprites travels from where it was
+ * drawn to where the new pose puts it -- to the nearest sprite of the same
+ * part, a hand to a hand and a ball to a ball, which the file says of
+ * every picture. His parts are depth-sorted afresh every frame, so the
+ * order of the list says nothing about which sprite is which; the part
+ * and the distance do. Halfway, each takes the new pose's picture. */
+HOT UBYTE part(UBYTE g)
+{
+    return (UBYTE)(groups[4 * (UWORD)g + 3] & (NPART - 1));
+}
+
+/* The pose he was last drawn in becomes where the blend starts from,
+ * sorted by part so that each sprite of the new pose need only look
+ * among its own kind. */
+static void blend(UBYTE frames)
+{
+    UBYTE n = V->nshown, i, k;
+    UBYTE at[NPART], kind[32];
+
+    for (k = 0; k < NPART; k++)
+        at[k] = 0;
+    for (i = 0; i < n; i++) {
+        kind[i] = part(V->shown[i].g);
+        at[kind[i]]++;
+    }
+    for (k = 0, i = 0; k < NPART; k++) {
+        UBYTE c = at[k];
+        V->fstart[k] = at[k] = i;
+        i = (UBYTE)(i + c);
+    }
+    V->fstart[NPART] = n;
+    for (i = 0; i < n; i++)
+        V->from[at[kind[i]]++] = V->shown[i];
+    V->nfrom = n;
+    V->bw = 0;
+    V->bstep = frames >= 8 ? 1 : frames >= 4 ? 2 : frames == 3 ? 3 : frames == 2 ? 4 : 8;
+}
+
+/* Each frame of a blend, every sprite of the pose he is going to finds
+ * the nearest one of its kind in the pose he came from that no other has
+ * taken. His twenty-one are the same eleven kinds in every pose, seven
+ * of them balls, so that is seventy-one comparisons rather than four
+ * hundred and forty-one -- which mattered: done the long way it took
+ * longer than a frame, and everything, the bolt in the air included, ran
+ * at half speed while he blended. */
+static void compose(void)
+{
+    UBYTE i, j, n = V->me.nbody;
+    UBYTE taken[32];
+    const struct spr *from = V->from;
+    WORD w;
+
+    if (V->bw < 8)
+        V->bw = (UBYTE)(V->bw + V->bstep);
+    if (V->bw >= 8 || !V->nfrom) {
+        spr_copy(V->shown, V->body, n);
+        V->nshown = n;
+        return;
+    }
+    w = V->bw;
+    for (j = 0; j < V->nfrom; j++)
+        taken[j] = 0;
+    for (i = 0; i < n; i++) {
+        const struct spr *t = &V->body[i];
+        struct spr *o = &V->shown[i];
+        UBYTE kind = part(t->g), best = 0xFF, end;
+        WORD bd = 0x7FFF, tx = t->dx, ty = t->dy;
+        end = V->fstart[kind + 1];
+        for (j = V->fstart[kind]; j < end; j++) {
+            WORD d, e;
+            if (taken[j])
+                continue;
+            d = from[j].dx - tx;
+            if (d < 0) d = -d;
+            e = from[j].dy - ty;
+            if (e < 0) e = -e;
+            d += e;
+            if (d < bd) {
+                bd = d;
+                best = j;
+            }
+        }
+        if (best == 0xFF) {
+            *o = *t;
+            continue;
+        }
+        taken[best] = 1;
+        {
+            const struct spr *s = &from[best];
+            o->dx = (WORD)(s->dx + (((WORD)(tx - s->dx) * w) >> 3));
+            o->dy = (WORD)(s->dy + (((WORD)(ty - s->dy) * w) >> 3));
+            o->g = w < 4 ? s->g : t->g;
+            o->fl = w < 4 ? s->fl : t->fl;
+        }
+    }
+    V->nshown = n;
+}
+
 /* ---- idling --------------------------------------------------------------
  * He breathes, a 32-frame loop, and every few seconds he does one of the
  * three things the cartridge has him do when nobody is playing. They
  * leave the loop at one frame of it and come back at another, and so do
- * stopping, landing and shooting -- the extractor wrote down where. */
+ * stopping, landing, shooting and turning -- the extractor wrote down
+ * where. */
 static UWORD rnd(void)
 {
     V->seed = (UWORD)(V->seed * 25173u + 13849u);
@@ -399,9 +571,9 @@ static void idle_at(UWORD phase)
 
 static void idle(void)
 {
-    if ((V->aid & ~1u) == A_LOOP) {
+    if ((V->me.id & ~1u) == A_LOOP) {
         UWORD f = V->fidget + V->facing;
-        if (V->loops >= V->due && V->afr + 1 == ENTRY(f)) {
+        if (V->loops >= V->due && V->me.fr + 1 == ENTRY(f)) {
             play(f);
             plan();
             return;
@@ -411,17 +583,284 @@ static void idle(void)
             V->loops++;
         }
     } else if (tick()) {
-        idle_at(EXIT(V->aid));
+        idle_at(EXIT(V->me.id));
     }
+}
+
+/* ---- sound -----------------------------------------------------------------
+ * Three effects. The shot and the boost are FM: the game's driver wrote
+ * a voice into a channel and then a frequency a frame, and the extractor
+ * kept every write, so playing them is writing them again, a frame at a
+ * time, into the YM2612 -- all but the voices, which it set aside to be
+ * loaded once, at the start, each into a channel of its own. The landing is a sample, 8860 bytes a second
+ * through the DAC -- too fast for this side to keep up with between
+ * frames, so the Z80 plays it, from its own RAM, with the twenty-odd
+ * instructions below. They are this project's, not the game's.
+ *
+ * The 68000 reaches the YM2612 only with the Z80's bus in its hand, and
+ * taking the bus stops the Z80, possibly between its writing the DAC's
+ * register number and its writing the sample. So the 68000 leaves that
+ * register number behind it every time it lets go, and the Z80's next
+ * write lands where it meant it to. */
+static const UBYTE z80_player[] = {
+    0xF3,                   /* 0000 di */
+    0x31, 0x00, 0x20,       /* 0001 ld sp,2000h */
+    0x21, 0x80, 0x00,       /* 0004 ld hl,0080h       the mailbox */
+    0x7E,                   /* 0007 ld a,(hl)          idle: */
+    0xB7,                   /* 0008 or a */
+    0x28, 0xFC,             /* 0009 jr z,0007h */
+    0x36, 0x00,             /* 000B ld (hl),0          take the order */
+    0xED, 0x5B, 0x81, 0x00, /* 000D ld de,(0081h)      where */
+    0xED, 0x4B, 0x83, 0x00, /* 0011 ld bc,(0083h)      how many */
+    0x3E, 0x2B,             /* 0015 ld a,2Bh */
+    0x32, 0x00, 0x40,       /* 0017 ld (4000h),a */
+    0x3E, 0x80,             /* 001A ld a,80h */
+    0x32, 0x01, 0x40,       /* 001C ld (4001h),a       DAC on */
+    0x3E, 0x2A,             /* 001F ld a,2Ah           each sample: */
+    0x32, 0x00, 0x40,       /* 0021 ld (4000h),a */
+    0x1A,                   /* 0024 ld a,(de) */
+    0x32, 0x01, 0x40,       /* 0025 ld (4001h),a */
+    0x13,                   /* 0028 inc de */
+    0x0B,                   /* 0029 dec bc */
+    0x7E,                   /* 002A ld a,(hl) */
+    0xB7,                   /* 002B or a */
+    0x20, 0xDD,             /* 002C jr nz,000Bh        a new order wins */
+    0x3E, 0x13,             /* 002E ld a,19 */
+    0x3D,                   /* 0030 dec a */
+    0x20, 0xFD,             /* 0031 jr nz,0030h */
+    0x00,                   /* 0033 nop                400 T a sample */
+    0x78,                   /* 0034 ld a,b */
+    0xB1,                   /* 0035 or c */
+    0x20, 0xE7,             /* 0036 jr nz,001Fh */
+    0x3E, 0x2B,             /* 0038 ld a,2Bh */
+    0x32, 0x00, 0x40,       /* 003A ld (4000h),a */
+    0xAF,                   /* 003D xor a */
+    0x32, 0x01, 0x40,       /* 003E ld (4001h),a       DAC off */
+    0x18, 0xC4,             /* 0041 jr 0007h */
+};
+#define Z80_MAIL    0x80
+#define Z80_SAMPLE  0x100
+
+static void z80_take(void)
+{
+    UWORD n = 0xFFFF;
+    Z80_BUSREQ = 0x0100;
+    while ((Z80_BUSREQ & 0x0100) && --n)
+        ;
+}
+
+static void z80_give(void)
+{
+    Z80_BUSREQ = 0;
+}
+
+/* Both waits are counted, for the reason payload/sonic/shim.S gives:
+ * a poll for a flag that cannot stay set is a poll nobody has seen fail. */
+static void ym_wait(void)
+{
+    UWORD n = 0x3FF;
+    while ((YM_A0 & 0x80) && --n)
+        ;
+}
+
+static void ym(UBYTE port, UBYTE reg, UBYTE val)
+{
+    ym_wait();
+    if (port) {
+        YM_A1 = reg;
+        ym_wait();
+        YM_D1 = val;
+    } else {
+        YM_A0 = reg;
+        ym_wait();
+        YM_D0 = val;
+    }
+}
+
+static const UBYTE *sfx_entry(UWORD n)
+{
+    return blob + rd32(blob + H_SFX) + 8 * n;
+}
+
+static void sound_open(void)
+{
+    const UBYTE *e = sfx_entry(2);
+    const UBYTE *land = blob + rd32(e), *w;
+    UWORD nland = rd16(e + 4), i;
+
+    if (nland > 0x2000 - Z80_SAMPLE)
+        nland = 0x2000 - Z80_SAMPLE;
+    Z80_BUSREQ = 0x0100;
+    Z80_RESET = 0x0100;
+    z80_take();
+    for (i = 0; i < sizeof z80_player; i++)
+        Z80_RAM[i] = z80_player[i];
+    for (; i < Z80_SAMPLE; i++)
+        Z80_RAM[i] = 0;
+    for (i = 0; i < nland; i++)
+        Z80_RAM[Z80_SAMPLE + i] = land[i];
+    V->landlen = nland;
+    V->sfxleft[0] = V->sfxleft[1] = 0;
+    Z80_RESET = 0;                      /* which resets the YM2612 too */
+    for (i = 0; i < 32; i++)
+        __asm__ volatile("nop");
+    z80_give();
+    Z80_RESET = 0x0100;                 /* and the Z80 starts at 0, where it
+                                         * waits for an order */
+    /* What the reset left in the chip: everything off, and every channel
+     * to both speakers. */
+    z80_take();
+    ym(0, 0x22, 0x00);                  /* LFO off */
+    ym(0, 0x27, 0x00);                  /* timers off, channel 3 normal */
+    ym(0, 0x2B, 0x00);                  /* DAC off */
+    for (i = 0; i < 7; i++)
+        if (i != 3)
+            ym(0, 0x28, (UBYTE)i);      /* every channel keyed off */
+    for (i = 0; i < 3; i++) {
+        ym(0, (UBYTE)(0xB4 + i), 0xC0);
+        ym(1, (UBYTE)(0xB4 + i), 0xC0);
+    }
+    /* and the effects' voices, each in a channel of its own, so that
+     * playing one is a frequency and a key a frame. */
+    e = sfx_entry(3);
+    for (w = blob + rd32(e), i = rd16(e + 4); i; i--, w += 3)
+        ym(w[0], w[1], w[2]);
+    ym_wait();
+    YM_A0 = 0x2A;
+    z80_give();
+    V->sound = 1;
+}
+
+/* Out: the Z80 stopped and its bus kept, as Sonic's payload leaves it,
+ * and every channel silent. A Z80 held in reset will not answer a bus
+ * request, so it is left out of reset; see sn_sound_close in
+ * payload/sonic/main.S for the night that was learnt. */
+static void sound_close(void)
+{
+    UBYTE i;
+    if (!V->sound)
+        return;
+    z80_take();
+    ym(0, 0x2B, 0x00);
+    for (i = 0; i < 7; i++)
+        if (i != 3)
+            ym(0, 0x28, i);
+}
+
+static void sfx_fm(UWORD n)
+{
+    const UBYTE *e = sfx_entry(n);
+    V->sfx[n] = blob + rd32(e);
+    V->sfxleft[n] = rd16(e + 4);
+}
+
+static void sfx_land(void)
+{
+    UWORD n = V->landlen;
+    if (!V->sound)
+        return;
+    z80_take();
+    Z80_RAM[Z80_MAIL + 1] = (UBYTE)Z80_SAMPLE;
+    Z80_RAM[Z80_MAIL + 2] = (UBYTE)(Z80_SAMPLE >> 8);
+    Z80_RAM[Z80_MAIL + 3] = (UBYTE)n;
+    Z80_RAM[Z80_MAIL + 4] = (UBYTE)(n >> 8);
+    Z80_RAM[Z80_MAIL] = 1;
+    z80_give();
+}
+
+/* This frame's writes for each FM effect that is playing, in the
+ * vertical blank. */
+static void sfx_frame(void)
+{
+    UBYTE n, c;
+    if (!V->sound || !(V->sfxleft[0] | V->sfxleft[1]))
+        return;
+    z80_take();
+    for (n = 0; n < 2; n++) {
+        const UBYTE *p = V->sfx[n];
+        if (!V->sfxleft[n])
+            continue;
+        for (c = *p++; c; c--, p += 3)
+            ym(p[0], p[1], p[2]);
+        V->sfx[n] = p;
+        V->sfxleft[n]--;
+    }
+    ym_wait();
+    YM_A0 = 0x2A;                       /* the DAC's, for the Z80 */
+    z80_give();
+}
+
+/* ---- shots -----------------------------------------------------------------
+ * A shot is three things: his pose, which is the animation he is in; a
+ * flash and a bolt, which fly as an effect of their own; and the glow,
+ * his palette lit up white-blue for half a second, as the game does it. */
+static void fx_fire(UWORD id, WORD dx, WORD dy, BYTE dt, UBYTE front)
+{
+    struct fx *f = &V->fx[0];
+    UBYTE i;
+    for (i = 0; i < NFX; i++)
+        if (!V->fx[i].on) {
+            f = &V->fx[i];
+            break;
+        }
+    play_on(&f->pl, id);
+    f->x = (WORD)(V->x >> 8) + dx;
+    f->y = (WORD)(V->y >> 8) - hdr16(H_FOOT) + dy;
+    f->on = 1;
+    f->front = front;
+    f->wait = dt > 0 ? (UBYTE)dt : 0;
+    while (dt++ < 0)
+        tick_on(&f->pl);
+}
+
+static void fx_step(void)
+{
+    UBYTE i;
+    for (i = 0; i < NFX; i++) {
+        struct fx *f = &V->fx[i];
+        if (!f->on)
+            continue;
+        if (f->wait)
+            f->wait--;
+        else if (tick_on(&f->pl))
+            f->on = 0;
+    }
+}
+
+static void lit(void)
+{
+    V->glow = 0;
+    sfx_fm(0);
+}
+
+/* Standing: the SHOOT animation has his flash and the casing; the bolt is
+ * the running shot's, flown from where the standing one's was. */
+static void shoot_standing(void)
+{
+    const UBYTE *b = blob + H_BOLT + 3 * V->facing;
+    V->state = S_SHOOT;
+    play(A_SHOOT + V->facing);
+    blend(2);
+    fx_fire(A_SHOTFX + V->facing, (BYTE)b[0], (BYTE)b[1], (BYTE)b[2], 0);
+    lit();
 }
 
 /* ---- the walk ---------------------------------------------------------------
  * The game's cycle is 64 poses in eight segments. A segment runs at one
  * pose a frame, or at two if he is near top speed when it begins -- so
- * the same 64 poses serve every speed, which is what the game does. */
+ * the same 64 poses serve every speed, which is what the game does. A
+ * shot on the run jumps the cycle four poses on and draws it from the
+ * aiming cycle for the length of the aim, the last frames of which ease
+ * back into the walk. */
 static void walk_pose(void)
 {
-    seek(A_WALK + 2 * (V->k >> 3) + V->facing, V->k & 7);
+    UWORD base = V->aim > AIM_EASE ? A_AIM : A_WALK;
+    /* Going over from the walk to the aim or back means decoding the new
+     * cycle from the start of its segment, up to seven records, and in
+     * the frame of a shot that was a third of the frame. Three at a time
+     * is enough: it is blending there anyway, and the pose catches up in
+     * a frame or two. */
+    seek_some(base + 2 * (V->k >> 3) + V->facing, V->k & 7, 3);
 }
 
 static void walk_start(void)
@@ -430,7 +869,9 @@ static void walk_start(void)
     V->k = 0;
     V->step = 1;
     V->skid = 0;
+    V->aim = 0;
     walk_pose();
+    blend(8);
 }
 
 static void walk_advance(void)
@@ -442,7 +883,20 @@ static void walk_advance(void)
         if (!(V->k & 7))
             V->step = (V->vx >= FAST || V->vx <= -FAST) ? 2 : 1;
     }
+    if (V->aim && --V->aim == AIM_EASE)
+        blend(AIM_EASE);
     walk_pose();
+}
+
+static void shoot_running(void)
+{
+    if (!V->aim)
+        V->k = (UBYTE)((V->k + AIM_JUMP) & 63);
+    V->aim = (UBYTE)hdr16(H_AIMF);
+    walk_pose();
+    blend(2);
+    fx_fire(A_SHOTFX + V->facing, 0, 0, 0, 1);
+    lit();
 }
 
 /* ---- moving him ------------------------------------------------------------- */
@@ -525,7 +979,9 @@ static void jump(void)
     V->vy = JUMP_V;
     V->boosted = 0;
     V->ignore = -32767;
+    V->aim = 0;
     play(A_JUMP + V->facing);
+    blend(2);
 }
 
 static void fall(WORD ignore_above)
@@ -534,6 +990,7 @@ static void fall(WORD ignore_above)
     V->vy = 0;
     V->boosted = 0;
     V->ignore = ignore_above;
+    V->aim = 0;
     seek(A_JUMP + V->facing, (UWORD)hdr16(H_JUMPFALL));
 }
 
@@ -549,7 +1006,7 @@ static void air(WORD d, UBYTE hit)
         UBYTE f = d > 0;
         if (f != V->facing) {           /* he turns in the air, mid-pose */
             V->facing = f;
-            seek((V->aid & ~1u) + f, V->afr);
+            seek((V->me.id & ~1u) + f, V->me.fr);
         }
         V->vx += d * AIR_ACC;
         if (V->vx > WALK_MAX) V->vx = WALK_MAX;
@@ -559,6 +1016,12 @@ static void air(WORD d, UBYTE hit)
         V->boosted = 1;
         V->vy = BOOST_V;
         play(A_BOOST + V->facing);
+        sfx_fm(1);
+    } else if (hit & (P_A | P_B)) {
+        play(A_AIRSHOT + V->facing);
+        blend(3);
+        fx_fire(A_AIRFX + V->facing, 0, 0, 0, 1);
+        lit();
     }
     move_x();
     V->vy += GRAVITY;
@@ -578,12 +1041,26 @@ static void air(WORD d, UBYTE hit)
                 V->state = S_LAND;
                 V->held = LAND_HOLD;
                 play(A_LAND + V->facing);
+                blend(2);
+                sfx_land();
                 return;
             }
         }
     }
     V->y = ny;
     tick();                             /* the last pose holds */
+}
+
+/* From standing, a press: the way he faces is a walk; the other way is a
+ * walk too, turned -- unless it is let go of within TAP frames, which
+ * makes it the game's turn on the spot. */
+static void start_moving(WORD d)
+{
+    UBYTE turning = (d > 0) != V->facing;
+    ground_speed(d);
+    move_x();
+    walk_start();
+    V->tap = turning ? TAP : 0;
 }
 
 /* ---- one frame -------------------------------------------------------------- */
@@ -599,21 +1076,20 @@ static void step(void)
     case S_IDLE:
     case S_STOP:
     case S_SHOOT:
+    case S_TURN:
         if (hit & P_C) { jump(); return; }
         if (d) {
-            ground_speed(d);
-            move_x();
-            walk_start();
+            start_moving(d);
             break;
         }
-        if ((hit & (P_A | P_B)) && V->state != S_SHOOT) {
-            V->state = S_SHOOT;
-            play(A_SHOOT + V->facing);
+        if (hit & (P_A | P_B)) {
+            shoot_standing();
             break;
         }
         if ((pad & P_DOWN) && V->state != S_SHOOT) {
             V->state = S_DOWN;
             play(A_DOWN_IN + V->facing);
+            blend(2);
             break;
         }
         ground_speed(0);
@@ -621,25 +1097,40 @@ static void step(void)
         if (V->state == S_IDLE)
             idle();
         else if (tick())
-            idle_at(EXIT(V->aid));
+            idle_at(EXIT(V->me.id));
         break;
 
     case S_WALK:
         if (hit & P_C) { jump(); return; }
         if (!d) {
-            V->state = S_STOP;
             ground_speed(0);
             move_x();
-            play(A_STOP + V->facing);
+            if (V->tap) {
+                /* a tap the other way: the turn on the spot */
+                V->state = S_TURN;
+                V->vx = 0;
+                play(A_TURN + V->facing);
+                blend(4);
+            } else {
+                V->state = S_STOP;
+                V->aim = 0;
+                play(A_STOP + V->facing);
+                blend(4);
+            }
             break;
         }
+        if (V->tap)
+            V->tap--;
         if (ground_speed(d))
             V->skid = SKID;
         if (move_x() && blocked(d)) {
             idle_at(0);
             break;
         }
-        walk_advance();
+        if (hit & (P_A | P_B))
+            shoot_running();
+        else
+            walk_advance();
         break;
 
     case S_LAND:
@@ -649,16 +1140,18 @@ static void step(void)
             move_x();
         } else {
             if (d) {
-                ground_speed(d);
-                move_x();
-                walk_start();
+                start_moving(d);
+                break;
+            }
+            if (hit & (P_A | P_B)) {
+                shoot_standing();
                 break;
             }
             ground_speed(0);
             move_x();
         }
         if (tick())
-            idle_at(EXIT(V->aid));
+            idle_at(EXIT(V->me.id));
         break;
 
     case S_DOWN:
@@ -670,13 +1163,13 @@ static void step(void)
             fall((WORD)(V->y >> 8) + DROP);
             return;
         }
-        if ((V->aid & ~1u) == A_DOWN_IN) {
+        if ((V->me.id & ~1u) == A_DOWN_IN) {
             if (!(pad & P_DOWN))
                 play(A_DOWN_OUT + V->facing);
             else
                 tick();
         } else if (tick()) {
-            idle_at(EXIT(V->aid));
+            idle_at(EXIT(V->me.id));
         }
         break;
 
@@ -690,53 +1183,69 @@ static void step(void)
         fall(-32767);
 }
 
-/* ---- drawing ---------------------------------------------------------------- */
-static UWORD *put(UWORD *s, const struct spr *p, WORD ax, WORD ay)
+/* ---- drawing ----------------------------------------------------------------
+ * Thirty-odd sprites a frame, so this is written to be quick: x and y
+ * come in with the sprite table's own offsets already added, and nothing
+ * is called. */
+HOT UWORD *put(UWORD *s, WORD x, WORD y, UBYTE g, UBYTE fl)
 {
-    const UBYTE *g = blob + rd32(blob + H_GROUPS) + 4 * p->g;
-    WORD x = ax + p->dx + 128, y = ay + p->dy + 128 + SCREEN_YOFF;
-    if (x <= 0 || x >= 128 + 320 || y <= 0 || y >= 512)
+    const UBYTE *p;
+    if ((UWORD)(x - 1) >= 128 + 320 - 1 || (UWORD)(y - 1) >= 511)
         return s;                       /* off the screen -- and an x of 0
                                          * would mask the sprites under it */
-    if (V->nsat >= 80)
-        return s;
+    p = groups + 4 * (UWORD)g;
     s[0] = (UWORD)y;
-    s[1] = (UWORD)(g[2] << 8);          /* size; the link is filled in later */
-    s[2] = (UWORD)(rd16(g) | ((p->fl & 1) << 11) | ((p->fl & 2) << 11));
+    s[1] = (UWORD)(p[2] << 8);          /* size; the link is filled in later */
+    s[2] = (UWORD)(rd16(p) | ((fl & 3) << 11));
     s[3] = (UWORD)x;
-    V->nsat++;
     return s + 4;
 }
 
+static UWORD *put_list(UWORD *s, const UWORD *end, const UBYTE *p, UBYTE n,
+                       WORD ax, WORD ay)
+{
+    ax += 128;
+    ay += 128 + SCREEN_YOFF;
+    for (; n && s < end; n--, p += 6)
+        s = put(s, (WORD)(ax + (WORD)rd16(p)), (WORD)(ay + (WORD)rd16(p + 2)),
+                p[4], p[5]);
+    return s;
+}
+
+/* In the order the game draws in, earliest on top: the flashes, then
+ * him, then what flies behind him. */
 static void build_sat(void)
 {
     WORD ax = (WORD)(V->x >> 8);
     WORD ay = (WORD)(V->y >> 8) - hdr16(H_FOOT);
-    UWORD *s = V->sat;
-    struct spr t;
-    const UBYTE *p;
-    UBYTE i;
+    UWORD *s = V->sat, *q;
+    const UWORD *end = V->sat + 80 * 4;
+    const struct fx *f;
+    const struct spr *b;
+    UBYTE i, n;
 
-    V->nsat = 0;
-    for (i = 0, p = V->front; i < V->nfront; i++, p += 6) {
-        spr_read(&t, p);
-        s = put(s, &t, ax, ay);
+    for (i = 0, f = V->fx; i < NFX; i++, f++)
+        if (f->on && f->front && !f->wait)
+            s = put_list(s, end, f->pl.front, f->pl.nfront, ax, ay);
+    s = put_list(s, end, V->me.front, V->me.nfront, ax, ay);
+    compose();
+    {
+        WORD x0 = (WORD)(ax + 128), y0 = (WORD)(ay + 128 + SCREEN_YOFF);
+        for (i = V->nshown, b = V->shown; i && s < end; i--, b++)
+            s = put(s, (WORD)(x0 + b->dx), (WORD)(y0 + b->dy), b->g, b->fl);
     }
-    for (i = 0; i < V->nbody; i++)
-        s = put(s, &V->body[i], ax, ay);
-    for (i = 0, p = V->back; i < V->nback; i++, p += 6) {
-        spr_read(&t, p);
-        s = put(s, &t, ax, ay);
+    s = put_list(s, end, V->me.back, V->me.nback, ax, ay);
+    for (i = 0, f = V->fx; i < NFX; i++, f++)
+        if (f->on && !f->wait)
+            s = put_list(s, end, f->pl.back, f->pl.nback, f->x, f->y);
+    n = (UBYTE)((s - V->sat) >> 2);
+    for (i = 1, q = V->sat + 1; i < n; i++, q += 4)
+        *q |= i;                        /* each to the next; the last to 0 */
+    if (!n) {                           /* one hidden entry ends the chain */
+        s[0] = s[1] = s[2] = s[3] = 0;
+        n = 1;
     }
-    for (i = 0; i < V->nsat; i++)
-        V->sat[4 * i + 1] |= (i + 1 < V->nsat) ? i + 1 : 0;
-    if (!V->nsat) {                     /* one hidden entry ends the chain */
-        V->sat[0] = 0;
-        V->sat[1] = 0;
-        V->sat[2] = 0;
-        V->sat[3] = 0;
-        V->nsat = 1;
-    }
+    V->nsat = n;
 }
 
 static void vblank(void)
@@ -745,6 +1254,14 @@ static void vblank(void)
         ;
     while (!(VDP_CTRL & 8))             /* and into the next */
         ;
+}
+
+static void colours(const UBYTE *p)
+{
+    UBYTE i;
+    VDP_CTRL_L = CRAM_W(2 * (32 + 1));
+    for (i = 0; i < 8; i++, p += 2)
+        VDP_DATA = rd16(p);
 }
 
 static void show(void)
@@ -760,6 +1277,15 @@ static void show(void)
     VDP_DATA = rd16(c);
     VDP_DATA = rd16(c + 2);
     V->cyc = (V->cyc + 1) & 63;
+    /* A shot's glow, entries 1 to 8, and his own colours after it. */
+    if (V->glow < V->nglow) {
+        colours(blob + rd32(blob + H_GLOW) + 16 * V->glow);
+        V->glow++;
+    } else if (V->glow == V->nglow) {
+        colours(blob + H_PAL + 2);
+        V->glow++;
+    }
+    sfx_frame();
 }
 
 /* A three-button pad on port 1, the way shim.S reads it for Sonic. */
@@ -827,6 +1353,7 @@ void vm_main(const UWORD *screen, struct vm *work, ULONG mode,
         blob = rom_find();
     if (!blob)
         return;                         /* nothing to draw him with */
+    groups = blob + rd32(blob + H_GROUPS);
 
     foot_l = (WORD)((BYTE)blob[H_FEET_L] + 4);
     foot_r = (WORD)((BYTE)blob[H_FEET_R] - 4);
@@ -835,7 +1362,11 @@ void vm_main(const UWORD *screen, struct vm *work, ULONG mode,
     V->seed = (UWORD)(mode >> 16) | 1;
     V->prev = 0xFF;                     /* whatever was held to pick him
                                          * from the menu is not a press */
+    V->nglow = (UWORD)hdr16(H_NGLOW);
+    V->glow = V->nglow + 1;
+    V->bw = 8;
     vdp_setup();
+    sound_open();
 
     /* In from above the middle, and past the menu bar on the way: its top
      * edge is the first thing under him and the whole width of the
@@ -845,7 +1376,7 @@ void vm_main(const UWORD *screen, struct vm *work, ULONG mode,
     V->facing = 1;
     V->x = 160L << 8;
     V->y = -(8L << 8);
-    V->aid = 0xFFFF;
+    V->me.id = 0xFFFF;
     fall(24);
 
     for (;;) {
@@ -856,14 +1387,16 @@ void vm_main(const UWORD *screen, struct vm *work, ULONG mode,
         if (V->pad & ~V->prev & P_START)
             break;
         step();
+        fx_step();
         V->prev = V->pad;
     }
 
-    /* Out: no sprites, and the window back on the screen for the
-     * servant, which puts everything else back itself. */
+    /* Out: no sprites, no sound, and the window back on the screen for
+     * the servant, which puts everything else back itself. */
     vblank();
     VDP_CTRL_L = VRAM_W(SAT);
     VDP_DATA = 0;
     VDP_DATA = 0;
+    sound_close();
     bank(scr_bank);
 }

@@ -1,8 +1,66 @@
+diff --git a/core/sound/psg.c b/core/sound/psg.c
+index cf7069e..d5b3667 100644
+--- a/core/sound/psg.c
++++ b/core/sound/psg.c
+@@ -224,8 +224,10 @@ int psg_context_load(uint8 *state)
+   return bufferptr;
+ }
+ 
++extern void snd_log(char, unsigned int, unsigned int, unsigned int);
+ void psg_write(unsigned int clocks, unsigned int data)
+ {
++  snd_log('P', clocks, 0, data);
+   int index;
+ 
+   /* PSG chip synchronization */
+diff --git a/core/sound/sound.c b/core/sound/sound.c
+index 40c2bbd..28a9f4d 100644
+--- a/core/sound/sound.c
++++ b/core/sound/sound.c
+@@ -111,8 +111,30 @@ static void YM2612_Reset(unsigned int cycles)
+   fm_cycles_busy = 0;
+ }
+ 
++/* tools/build-vectorman.sh: every write to the sound chips, one line
++ * each -- frame, cycle, Y or P, port, value -- into GPGX_SNDLOG. Its sound
++ * effects are recorded from this. */
++#undef FILE
++#undef fopen
++#undef fprintf
++#include <stdio.h>
++#include <stdlib.h>
++unsigned int gpgx_frame_no;
++void snd_log(char chip, unsigned int cycles, unsigned int a, unsigned int v)
++{
++  static FILE *f;
++  static int tried;
++  if (!tried) {
++    const char *p = getenv("GPGX_SNDLOG");
++    tried = 1;
++    if (p) f = fopen(p, "w");
++  }
++  if (f) fprintf(f, "%u %u %c %u %u\n", gpgx_frame_no, cycles, chip, a, v);
++}
++
+ static void YM2612_Write(unsigned int cycles, unsigned int a, unsigned int v)
+ {
++  snd_log('Y', cycles, a, v);
+   /* detect DATA port write */
+   if (a & 1)
+   {
+@@ -216,6 +238,7 @@ static void YM3438_Reset(unsigned int cycles)
+ 
+ static void YM3438_Write(unsigned int cycles, unsigned int a, unsigned int v)
+ {
++  snd_log('Y', cycles, a, v);
+   /* synchronize FM chip with CPU */
+   fm_update(cycles);
+ 
 diff --git a/libretro/libretro.c b/libretro/libretro.c
-index 71a55a4..2075646 100644
+index 71a55a4..f45412e 100644
 --- a/libretro/libretro.c
 +++ b/libretro/libretro.c
-@@ -4032,6 +4032,38 @@ void retro_run(void)
+@@ -4032,6 +4032,40 @@ void retro_run(void)
        video_cb(NULL, vwidth - vwoffset, vheight, 720 * 2);
  
     audio_cb(soundbuffer, soundbuffer_size);
@@ -13,8 +71,10 @@ index 71a55a4..2075646 100644
 +    * the core holds it -- host byte order inside every 16-bit word. */
 +   {
 +      static unsigned vd_frame;
++      extern unsigned int gpgx_frame_no;
 +      const char *dir = getenv("GPGX_VDPDUMP");
 +      vd_frame++;
++      gpgx_frame_no = vd_frame;   /* for GPGX_SNDLOG, core/sound/sound.c */
 +      if (dir) {
 +         const char *fs = getenv("GPGX_VDPDUMP_FROM"), *ts = getenv("GPGX_VDPDUMP_TO");
 +         unsigned from = fs ? (unsigned)atoi(fs) : 0, to = ts ? (unsigned)atoi(ts) : 0xFFFFFFFFu;

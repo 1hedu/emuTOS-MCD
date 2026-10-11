@@ -8,15 +8,16 @@ underneath the way he does in the game.
 
 | | |
 |---|---|
-| left, right | walk |
+| left, right | walk; a tap the other way turns him round on the spot |
 | C | jump; C again in the air fires his boots |
-| A or B | shoot (standing) |
+| A or B | shoot — standing, on the run or in the air |
 | down | look down |
 | down + C | drop through what he is standing on |
 | Start | put the desktop back |
 
 He is the cartridge's own drawing, moving by the cartridge's own
-numbers, and he is not on any released disc: both are Sega's. What the
+numbers and making the cartridge's own noises, and he is not on any
+released disc: all three are Sega's. What the
 repository carries is the pipeline that records them off your own
 dump, and the engine that plays them back on the Mega CD.
 
@@ -29,11 +30,11 @@ it cuts the recording at frame numbers measured on that one.
 
     tools/build-vectorman.sh
 
-builds the emulator it records with (once, into `.emu/`), records, and
-leaves two files in `datadisc/`:
+builds the emulator it records with (into `.emu/`, once for each
+version of the patches), records, and leaves two files in `datadisc/`:
 
-    VECTOR.MDP    4.7 KB   the engine, payload/vectorman/vm.c
-    VECTOR.MDD   56.7 KB   his poses, tiles and palette
+    VECTOR.MDP    7.8 KB   the engine, payload/vectorman/vm.c
+    VECTOR.MDD   69.8 KB   his poses, tiles, palette and sounds
 
 The accessory, `VECTOR.ACC`, is part of the system build. It looks for
 the other two on C:, then R:, then D:.
@@ -59,7 +60,8 @@ already the whole of PRG RAM on a cartridge, and Sonic's art wants the
 room there.
 
 Don't put a cartridge built with VECTOR.MDD on R: anywhere public — it
-carries Sega's graphics. `dist/` is tracked by git for that reason.
+carries Sega's graphics and sounds. `dist/` is tracked by git for that
+reason.
 
 ## How he was recorded
 
@@ -72,7 +74,8 @@ like; it only exists once the game has computed it.
 
 So `tools/vectorman-tools/extract.py` runs the game rather than reading
 it. `tools/gpgx-vdpdump.patch` makes Genesis Plus GX write VRAM, CRAM,
-the VDP registers and work RAM out after every frame; the harness plays
+the VDP registers and work RAM out after every frame, and log every
+write to the sound chips; the harness plays
 scripted pad input into the first level; and the extractor reduces each
 frame to his sprites, their tiles, and the game's own state beside them:
 
@@ -84,11 +87,14 @@ frame to his sprites, their tiles, and the game's own state beside them:
 | `$FFE39A` | which eighth of the walk cycle he is in |
 | `$FFAF82`, `$FFAF8A` | the camera |
 
-Seven captures: standing facing each way for half a minute (his bored
+Eight captures: standing facing each way for half a minute (his bored
 animations), every move facing each way, two sets of back-and-forth
-runs, and a stop. Each animation is cut where the game's state says it
-starts and ends, and checked rather than trusted. The extractor stops
-rather than write a file that is wrong.
+runs, a stop, and a minute and a half of shooting — on the run at every
+point of the stride, from the top of a jump at four heights, and turns
+on the spot — plus three short runs for the sounds. Each animation is
+cut where the game's state says it starts and ends, and checked rather
+than trusted. The extractor stops rather than write a file that is
+wrong.
 
   * **The walk** is 64 poses in eight segments of eight. A segment runs
     over eight frames, or over four — two poses a frame — if he is near
@@ -106,10 +112,34 @@ rather than write a file that is wrong.
     upper left either way round, so his left-facing limbs are separate
     drawings and his near arm is the bright one. Both facings are
     recorded.
+  * **Shooting on the run** the game draws him out of two skeletons at
+    once: the legs go on walking and the arms aim. So the aiming walk is
+    a second cycle of 64 poses — the walk with the gun out — recorded
+    from sixty-four shots spread over the stride. A shot jumps the
+    stride four poses on, holds the aim for fifteen frames and eases
+    back into the walk over eight. Nineteen of the 128 aiming poses,
+    both facings, never came up; each is the nearest one that did, a
+    pixel or two off. Facing right, the game draws the arms already
+    mirrored, so the aiming poses were matched to the walk by the feet
+    alone.
+  * **Shooting in the air** is the jump's own pose giving way to an aim
+    and then falling back into it: one recording each way.
+  * **Turning on the spot** is ten frames, each way.
   * **The effects** — the bolt, the muzzle flash, the casing, the boost
     flames and their sparks — are recorded as part of the frames they
-    are in. The left-facing shot uses the right-facing shot's effects,
-    mirrored, because in the capture its bolt hit the level.
+    are in, and the shots' are kept as animations of their own, so that
+    a bolt flies on from where it was fired whatever he does next. The
+    air shot's are the left-facing one's, mirrored: facing right its
+    bolt hit the level and burst, and the burst alone is 160 tiles.
+    Whatever of the level was already on the screen before a shot is
+    left out of it.
+  * **His sounds**: the game's driver plays them on the Z80, so they
+    were recorded as what it wrote to the YM2612. The shot and the boost
+    are FM — a voice loaded into a channel, then a frequency a frame —
+    and the landing is a sample of 2604 bytes through the DAC. Each was
+    recorded in a run of its own, against the same run without the
+    press, because the level's music uses every channel and the effect
+    starts where the two differ.
   * **His palette** is not constant in the level: lightning lights him
     for a frame at a time, and two entries cycle — the glow in his
     joints over 64 frames and another over four. The file has each
@@ -118,10 +148,12 @@ rather than write a file that is wrong.
 ## VECTOR.MDD
 
 The extractor's comments are the byte-level description. In outline: a
-360-byte header (counts, offsets, his foot line and how far his feet
-reach, both palettes and the colour cycle); the tiles, in up to five
-runs that go straight into VRAM; 99 pictures, each a VRAM tile, a sprite
-size and a palette line; and 38 animations, each facing in turn.
+384-byte header (counts, offsets, his foot line and how far his feet
+reach, both palettes and the colour cycle, how long an aim lasts, where
+the standing shot's bolt starts); the tiles, in up to five runs that go
+straight into VRAM; 100 pictures, each a VRAM tile, a sprite size, a
+palette line and which part of him it is; 62 animations, each facing in
+turn; the 29 frames of the glow a shot lights him with; and the sounds.
 
 A frame record carries his own sprites either whole or as changes from
 the record before — a bit per sprite for whether it moved, and a
@@ -131,7 +163,13 @@ the casing and the sparks are drawn every other frame, and with them in
 the same list every record changed length and had to be written whole.
 That split and the bits took the file from 76 KB to 57.
 
-His graphics take 495 tiles of VRAM. A payload may use what the servant
+The sounds are register writes, a frame at a time, and the sample. A
+voice is thirty-odd writes, and the YM2612 wants a pause after each, so
+the extractor takes the voices out: each is given a channel of its own
+and written once when he arrives, and the effects keep the frequency
+and key writes — one to five a frame.
+
+His graphics take 499 tiles of VRAM. A payload may use what the servant
 does not: 1024..1079 (the on-screen keyboard's, which the servant
 uploads again afterwards), 1084..1215, 1216..1407, 1664..1791 and
 1920..1983. Tiles 1080..1083 are the pointer's, which nothing rewrites,
@@ -168,7 +206,29 @@ frames while he skids. A jump starts at −2080 and gravity takes 96 a
 frame back; a second C sets −2048 once. In the air he steers at 8.
 
 **The walk** runs on the game's own segment rule, so the 64 poses serve
-every speed exactly as they do in the game.
+every speed exactly as they do in the game. A tap the other way, let go
+of within eight frames, is the turn on the spot rather than a walk.
+
+**Blending.** The game moves from one thing to the next by easing the
+skeleton: from standing into the first stride over seven frames, from
+aiming back into the walk, into a jump. There is no skeleton here, so
+each of his sprites travels instead from where it was last drawn to the
+nearest sprite of the same part in the new pose — a hand to a hand, a
+ball to a ball — and halfway takes the new picture. The file says which
+part every picture is.
+
+**Shots.** Standing, running or in the air, a shot is three things: his
+pose, the flash and bolt flying as an animation of their own, and his
+colours lit for 29 frames, entries 1 to 8 of his palette frame by frame
+as the game does it. Up to four shots can be in the air.
+
+**Sound.** The 68000 plays the FM effects, a frame's writes in each
+vertical blank. The landing is 8860 bytes a second, too fast for that,
+so the Z80 plays it: a player of 67 bytes, this project's own, loaded
+into Z80 RAM with the sample, which waits on a mailbox and writes the
+DAC every 400 cycles. The 68000 takes the Z80's bus to reach the
+YM2612, which can stop the Z80 between its two writes, so it always
+leaves the DAC's register selected when it lets go.
 
 **Drawing.** Each frame he is decoded from the record into a sprite
 list — effects in front, his twenty-one, effects behind — and written
@@ -176,18 +236,28 @@ to the servant's sprite table in the vertical blank, with the two
 cycling colours. Sprites off the screen are dropped; one at x = 0 would
 mask everything under it.
 
+**The frame.** A 68000 has 262 lines' worth of time a frame, and the
+first version of this did not fit: a running shot took 251, and a
+blend pushed every frame it was in past the end, so that while he
+blended everything, the bolt in the air included, ran at half speed.
+Measured with the VDP's line counter, a frame now takes about 60 lines,
+and the worst in a test built to be hard on it — rapid fire, turning
+while aiming, shots and boosts in the air — took 188.
+What it took: the blend looks only among sprites of the same part (71
+comparisons, not 441); the sprite table is built without a call per
+sprite; the decoder walks its bit mask a byte at a time; the voices are
+loaded once; and going over between the walk and the aiming walk
+decodes at most three records a frame, catching up on the next.
+
 ## What is not here
 
-  * **Sound.** The game's driver runs on the Z80 out of the cartridge;
-    nothing of it is recorded.
-  * **Shooting while walking or in the air.** The game composes that on
-    the fly from his skeleton, and only the standing shot was recorded.
-    A or B does nothing while he moves.
-  * **The blend into a walk.** The game eases from wherever his idle
-    had got to into the first stride over seven frames. Here he goes
-    straight into the cycle's first pose: one quick step.
-  * **Turning on the spot.** A tap of the other direction turns him; the
-    game has a ten-frame turn for that, not recorded.
+  * **The game's skeleton.** Where the game eases one movement into
+    another, the in-between frames here are the blend above: the same
+    pictures getting to the same place, but not the poses the skeleton
+    would have passed through.
+  * **The shot's two frames of wind-up.** The game fires two frames after
+    the button; here it is the same frame.
+  * **The music.** Only his own sounds.
   * **Enemies, scenery, anything to shoot.** The desktop is the level.
 
 ## Testing without a hand on the pad

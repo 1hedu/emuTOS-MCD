@@ -6,7 +6,7 @@
  * length; docs/vectorman.md says what he does once he is there.
  *
  * The one difference is where his files are. Sonic's are on the boot
- * drive, beside the accessory. Vectorman's VECTOR.MDD is fifty-odd
+ * drive, beside the accessory. Vectorman's VECTOR.MDD is seventy-odd
  * kilobytes, and on a cartridge that is better kept on R: -- the
  * cartridge's own ROM, which the payload reads where it lies and which
  * costs no RAM at all -- than on C:, where it would be PRG RAM that

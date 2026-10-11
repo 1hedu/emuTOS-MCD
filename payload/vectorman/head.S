@@ -5,7 +5,7 @@
 | address and length in d1 and d2; vm_main in vm.c takes the same five
 | as arguments. Everything else about this payload is in vm.c.
 
-        .equ    WORKSPACE, 10240        | struct vm in vm.c, checked there
+        .equ    WORKSPACE, 11264        | struct vm in vm.c, checked there
 
         .section .head,"ax"
         .globl  payload_start

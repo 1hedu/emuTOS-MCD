@@ -6,10 +6,10 @@
 #
 # Two files come out and they go together:
 #
-#   VECTOR.MDP   5KB    the engine, payload/vectorman/vm.c
-#   VECTOR.MDD   57KB   every pose the game drew him in, its tiles and
-#                       his palette -- recorded off the running cartridge
-#                       by tools/vectorman-tools/extract.py
+#   VECTOR.MDP   8KB    the engine, payload/vectorman/vm.c
+#   VECTOR.MDD   70KB   every pose the game drew him in, its tiles, his
+#                       palette and his sounds -- recorded off the running
+#                       cartridge by tools/vectorman-tools/extract.py
 #
 # VECTOR.ACC, the Desk menu entry, is built with the system:
 # VECTORACC=1 tools/build-iso.sh puts it on C:. It finds the other two on
@@ -25,8 +25,9 @@
 # The extractor runs the cartridge on Genesis Plus GX with two patches:
 # tools/gpgx-cdtrace.patch, which keeps the core alive under the harness
 # (see tools/run-emu.sh), and tools/gpgx-vdpdump.patch, which writes the
-# VDP and work RAM out each frame. The core is built once into .emu/,
-# from the same upstream commit the patches were made against.
+# VDP and work RAM out each frame and logs every write to the sound chips.
+# The core is built into .emu/, from the same upstream commit the patches
+# were made against, once for each version of the patches.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -45,19 +46,22 @@ if [[ ! -x "$HARNESS" ]]; then
   chmod +x "$HARNESS"; rm -rf "$TMP"
 fi
 
-CORE="$CACHE/gpgx_vdp.so"
+# Named after the patches it was built from, so that a change to either
+# builds it again: an older core records no sound.
+PATCHES=(tools/gpgx-cdtrace.patch tools/gpgx-vdpdump.patch)
+TAG="$(cat "${PATCHES[@]}" | sha1sum | cut -c1-8)"
+CORE="$CACHE/gpgx_vdp-$TAG.so"
 if [[ ! -f "$CORE" ]]; then
-  SRC="$CACHE/gpgx-vdp"
+  SRC="$CACHE/gpgx-vdp-$TAG"
   REV=58c341487e5bfcf979ea68413c7987633adb0c56
-  if [[ ! -d "$SRC" ]]; then
-    git init -q "$SRC"
-    git -C "$SRC" fetch -q --depth 1 https://github.com/libretro/Genesis-Plus-GX "$REV"
-    git -C "$SRC" checkout -q FETCH_HEAD
-    git -C "$SRC" apply "$ROOT/tools/gpgx-cdtrace.patch"
-    git -C "$SRC" apply "$ROOT/tools/gpgx-vdpdump.patch"
-  fi
+  rm -rf "$SRC"
+  git init -q "$SRC"
+  git -C "$SRC" fetch -q --depth 1 https://github.com/libretro/Genesis-Plus-GX "$REV"
+  git -C "$SRC" checkout -q FETCH_HEAD
+  for p in "${PATCHES[@]}"; do git -C "$SRC" apply "$ROOT/$p"; done
   make -C "$SRC" -f Makefile.libretro platform=unix -j"$(nproc)" >/dev/null
   cp "$SRC/genesis_plus_gx_libretro.so" "$CORE"
+  rm -rf "$SRC"
 fi
 
 mkdir -p build/vectorman
