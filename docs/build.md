@@ -129,11 +129,12 @@ them off, is now what happens anyway.
 | `ADISK_DIR=<dir>` | put a directory's files on C: |
 | `ADISK_SIZE=0x…` | how big C: is, and so how much PRG RAM a payload has left |
 | `SONICACC=1` | add the Sonic accessory (see below) |
+| `VECTORACC=1` | add the Vectorman accessory (see below) |
 | `DIAG=1` | the diagnostic programs on C: and D: |
 | `AUTORUN=D:\\X.PRG` | the AES starts that program instead of the desktop; `AUTORUN_GEM=0` for a .PRG that is a TOS program |
 
 The rest — `NOASK`, `PALTEST`, `SHOWAUTO`, `EDITAUTO`, `NATAUTO`,
-`PRNAUTO`, `DDAUTO`, `ROMDAUTO`, `SPLITAUTO`, `BRAMAUTO`, `BRAMRW`, `FMTIAUTO`, `ACCAUTO`,
+`PRNAUTO`, `DDAUTO`, `ROMDAUTO`, `SPLITAUTO`, `BRAMAUTO`, `BRAMRW`, `FMTIAUTO`, `ACCAUTO`, `VECAUTO`,
 `HELLOA`, `AUDIT`, `CDDTEST` — build programs into `AUTO` that run
 before the desktop and then hold, so a headless emulator run exercises
 one path without a hand on the pad. They are emulator-only, by name, in
@@ -193,6 +194,27 @@ screen, and by the time it has said what it is for, the desktop he was
 supposed to be standing on is gone. Start ends it; so does walking into
 the sign post at the end of the fourth screen.
 
+
+## Adding Vectorman
+
+The same arrangement as Sonic, from one dump instead of two:
+`assets/vectorman/vectorman.md`, your own Vectorman (USA, Europe),
+plain binary. Then:
+
+    tools/build-vectorman.sh
+    VECTORACC=1 tools/build-datadisc.sh U                  # a disc
+    VECTORACC=1 tools/build-iso.sh U                       # or a cartridge:
+    DDISK_DIR=$PWD/datadisc tools/build-rom.sh boot/m1emu.S
+
+`build-vectorman.sh` builds Genesis Plus GX once into `.emu/` with
+`tools/gpgx-cdtrace.patch` and `tools/gpgx-vdpdump.patch`, runs the
+cartridge on it under scripted input, and records every pose the game
+draws him in — the cartridge computes his frames from a skeleton, so
+there is nothing to unpack, only to watch. That takes about twenty
+seconds. `VECTOR.MDP` and `VECTOR.MDD` land in `datadisc/`; the
+accessory finds them on C:, R: or D:. On a cartridge they go on R:,
+where the payload reads `VECTOR.MDD` straight out of the ROM and it
+costs no RAM. [docs/vectorman.md](vectorman.md) has the rest.
 
 ## Adding Dungeon Master
 

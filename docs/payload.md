@@ -88,9 +88,12 @@ Entry is an ordinary `jsr`, and a payload returns with `rts`.
                   seed it ships with — is identical on every run, and
                   without this a "random" payload draws the same random
                   thing forever. Seed from it.
-    d1.l the bulk data, as an address in the window -- or zero when
-         there is none. See below.
-    d2.l how many bytes of bulk data were actually loaded.
+    d1.l the bulk data, as an address in the window. See below.
+    d2.l how many bytes of bulk data were actually loaded -- zero when
+         there is none, and then d1 means nothing. (d1 used to be zero
+         for none, until a payload with no .MDD of its own was handed
+         the address the previous payload's had been loaded at. The
+         length is the test.)
 
 Interrupts are masked to 7 on entry. The payload owns the VDP, VRAM,
 CRAM, the pads and the Z80 completely, and may leave every one of them
@@ -158,6 +161,14 @@ So the bulk arena is **everything between the end of the ramdisk and
 twelve kilobytes. A disc that carries a payload with a `.MDD` builds a
 smaller C: -- `tools/build-datadisc.sh` uses 32KB and drops from it
 everything that is also on D:, which leaves 112KB.
+
+A `.MDD` on **R:**, the cartridge's romdisk, is not loaded at all. It is
+already in the cartridge ROM, which the main CPU sees as its own memory,
+and a cartridge boot has no PRG RAM to spare for a copy. The payload is
+told there is no bulk data and looks for the file in the ROM itself:
+`tools/mkfat.py` writes every file as one run of clusters, so its
+directory entry is the whole of finding it. `payload/vectorman/vm.c`,
+`rom_find`, is the one that does.
 
 `SCD_BULK_INFO` is how a program asks: it fills two longs, the byte
 address and the length, and a length of zero means the ramdisk filled

@@ -37,7 +37,8 @@ Burn the `.cue`/`.iso` (slow burns read more reliably on real hardware),
 or flash `m1emu.bin`. The cartridge boots with or without a disc in the
 tray. The disc is region-locked, the cartridge is not.
 
-Build instructions, including how to add Sonic: [docs/build.md](docs/build.md).
+Build instructions, including how to add Sonic and Vectorman:
+[docs/build.md](docs/build.md).
 
 ## Sonic
 
@@ -53,6 +54,17 @@ He is not on the released disc and cannot be: the art and the movement
 constants are Sega's. What the repository carries is the pipeline that
 reads them out of dumps you already own — see
 [docs/sonic.md](docs/sonic.md).
+
+## Vectorman
+
+**Desk → Vectorman** drops him onto the desktop, where every edge is a
+girder: he walks, jumps up through them, lands on them, fires his boots,
+shoots, and drops back down with down + C. Every pose is one the
+cartridge drew — recorded off the running game, both facings, his idle
+fidgets included — and he moves by its numbers, measured frame by
+frame. Like Sonic he is not distributed; the pipeline that records him
+from your own dump is. See [docs/vectorman.md](docs/vectorman.md).
+
 ## Layout
 
 | | |

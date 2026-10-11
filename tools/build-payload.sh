@@ -5,7 +5,7 @@
 #   tools/build-payload.sh payload/hello.S [out.mdp]     one file
 #   tools/build-payload.sh payload/sonic   [out.mdp]     a directory
 #
-# A directory is every .S in it, assembled and linked with its own
+# A directory is every .S and .c in it, built and linked with its own
 # link.ld -- which is what a payload with more than one source and more
 # than one section needs, and which is also how image_end gets to be a
 # linker symbol rather than a label the last file has to carry.
@@ -34,6 +34,19 @@ if [ -d "$SRC" ]; then
     for f in "$SRC"/*.S; do
         o="$B/$(basename "${f%.S}").o"
         $AS -I "$SRC" -o "$o" "$f"
+        OBJS+=("$o")
+    done
+    # C as well, for a payload that is not a port of somebody's assembly.
+    # Linked for one address, so no -mpcrel; no libgcc, so no 32-bit
+    # multiply or divide; and an initialised static has to stay .data
+    # even when it is zero, because a payload has no .bss -- link.ld
+    # refuses one.
+    for f in "$SRC"/*.c; do
+        [[ -e "$f" ]] || continue
+        o="$B/$(basename "${f%.c}").o"
+        m68k-elf-gcc -m68000 -Os -fomit-frame-pointer -ffreestanding -fno-builtin \
+            -fno-zero-initialized-in-bss -fno-common -fno-tree-loop-distribute-patterns \
+            -Wall -Wextra -Wno-unused-parameter -c -o "$o" "$f"
         OBJS+=("$o")
     done
     m68k-elf-ld -T "$SRC/link.ld" --oformat binary -o "$OUT" "${OBJS[@]}"

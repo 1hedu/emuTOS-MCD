@@ -199,6 +199,14 @@ if [[ -z "$PAYLOAD" ]]; then
     else
       acc "$ROOT/progs/sonicacc.c" SONIC.ACC
     fi
+    # Vectorman, the same way; docs/vectorman.md. VECAUTO is ACCAUTO's
+    # twin -- it opens itself once the desktop is up -- under a name of
+    # its own for the same reason.
+    if [[ -n "${VECAUTO:-}" ]]; then
+      acc "$ROOT/progs/vectoracc.c" VECTAUT.ACC -DACC_AUTO=1
+    else
+      acc "$ROOT/progs/vectoracc.c" VECTOR.ACC
+    fi
     # Something for SHOW.PRG to show on a machine that has never had a
     # file copied to it. Generated, not shipped: this project
     # distributes nobody's artwork, and the Mandelbrot set is
@@ -498,6 +506,15 @@ INF
         CADD+=(--add "$B/SONICAUT.ACC:SONICAUT.ACC")
       else
         CADD+=(--add "$B/SONIC.ACC:SONIC.ACC")
+      fi
+    fi
+    # VECTOR.ACC looks for its files on C:, then R:, then D:, so this is
+    # the only part of Vectorman that has to be on C:.
+    if [[ -n "${VECTORACC:-}" ]]; then
+      if [[ -n "${VECAUTO:-}" ]]; then
+        CADD+=(--add "$B/VECTAUT.ACC:VECTAUT.ACC")
+      else
+        CADD+=(--add "$B/VECTOR.ACC:VECTOR.ACC")
       fi
     fi
     python3 "$ROOT/tools/mkfat.py" "$B/fs/ADISK.IMG" --size "${ADISK_SIZE:-0x1C000}" \

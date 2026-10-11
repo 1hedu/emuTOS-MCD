@@ -182,9 +182,25 @@ static int payload_bulk(const char *name)
     if (i < 2) return 1;                /* no extension: no companion */
     dname[i] = 'M'; dname[i + 1] = 'D'; dname[i + 2] = 'D'; dname[i + 3] = 0;
 
+    /* "None" is said out loud: the servant keeps whatever the last
+     * payload was given, and a payload with no bulk data of its own
+     * would otherwise be handed someone else's. A length of zero is how
+     * it hears it. */
     fh = dos_fopen(dname, 0);
-    if (fh < 0) return 1;               /* absent is not an error */
+    if (fh < 0) {                       /* absent is not an error */
+        ctl(SCD_PAYLOAD_BULK, 0L, 0L);
+        return 1;
+    }
     dos_fclose(fh);
+
+    /* On R: it is in the cartridge ROM already, and the cartridge ROM is
+     * the main CPU's own memory: nothing to copy, and nowhere to copy it
+     * on a cartridge boot, whose ramdisk fills PRG RAM. The payload finds
+     * it there itself -- payload/vectorman/vm.c, rom_find. */
+    if ((dname[0] == 'R' || dname[0] == 'r') && dname[1] == ':') {
+        ctl(SCD_PAYLOAD_BULK, 0L, 0L);
+        return 1;
+    }
 
     ctl(SCD_BULK_INFO, (long)arena, 0);
     bulk_base = arena[0];

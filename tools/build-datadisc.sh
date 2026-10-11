@@ -38,5 +38,5 @@ fi
 # .MDD beside it, and that goes in whatever the ramdisk left: 32KB of
 # ramdisk leaves 112KB of it. See docs/payload.md, "Bulk data".
 DDISK_DIR="$ROOT/datadisc" ADISK_SIZE="${ADISK_SIZE:-0x8000}" \
-  "$ROOT/tools/build-iso.sh" "$REGION" "" "emutosmd-data-$REGION"
+  bash "$ROOT/tools/build-iso.sh" "$REGION" "" "emutosmd-data-$REGION"
 echo "data disc: $n file(s) from datadisc/ on D:"

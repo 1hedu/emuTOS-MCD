@@ -1,0 +1,43 @@
+diff --git a/libretro/libretro.c b/libretro/libretro.c
+index 71a55a4..2075646 100644
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -4032,6 +4032,38 @@ void retro_run(void)
+       video_cb(NULL, vwidth - vwoffset, vheight, 720 * 2);
+ 
+    audio_cb(soundbuffer, soundbuffer_size);
++
++   /* tools/build-vectorman.sh: the VDP and work RAM, one file a frame,
++    * for frames GPGX_VDPDUMP_FROM..GPGX_VDPDUMP_TO into GPGX_VDPDUMP.
++    * VRAM 64K, CRAM 128, VSRAM 128, registers 32, work RAM 64K, each as
++    * the core holds it -- host byte order inside every 16-bit word. */
++   {
++      static unsigned vd_frame;
++      const char *dir = getenv("GPGX_VDPDUMP");
++      vd_frame++;
++      if (dir) {
++         const char *fs = getenv("GPGX_VDPDUMP_FROM"), *ts = getenv("GPGX_VDPDUMP_TO");
++         unsigned from = fs ? (unsigned)atoi(fs) : 0, to = ts ? (unsigned)atoi(ts) : 0xFFFFFFFFu;
++         if (vd_frame >= from && vd_frame <= to) {
++#undef fopen
++#undef fwrite
++#undef fclose
++#undef FILE
++            char path[512];
++            FILE *f;
++            snprintf(path, sizeof path, "%s/f%05u.bin", dir, vd_frame);
++            f = fopen(path, "wb");
++            if (f) {
++               fwrite(vram, 1, 0x10000, f);
++               fwrite(cram, 1, 0x80, f);
++               fwrite(vsram, 1, 0x80, f);
++               fwrite(reg, 1, 0x20, f);
++               fwrite(work_ram, 1, 0x10000, f);
++               fclose(f);
++            }
++         }
++      }
++   }
+ }
+ 
+ #undef  CHUNKSIZE
